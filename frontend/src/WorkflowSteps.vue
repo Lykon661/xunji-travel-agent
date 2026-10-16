@@ -5,13 +5,14 @@ import type { WorkflowTab } from './workflow'
 const props = defineProps<{
   steps: readonly {key: WorkflowTab; label: string}[]
   active: WorkflowTab
+  progressStep: WorkflowTab
   disabled: boolean
   guideCount: number
 }>()
 const emit = defineEmits<{navigate: [key: WorkflowTab]}>()
 const flow = computed(() => props.steps.filter(step => step.key !== 'resources'))
 const tool = computed(() => props.steps.find(step => step.key === 'resources'))
-const activeIndex = computed(() => flow.value.findIndex(step => step.key === props.active))
+const progressIndex = computed(() => props.progressStep === 'resources' ? flow.value.length : flow.value.findIndex(step => step.key === props.progressStep))
 </script>
 
 <template>
@@ -19,13 +20,13 @@ const activeIndex = computed(() => flow.value.findIndex(step => step.key === pro
     <ol>
       <li v-for="(step, index) in flow" :key="step.key">
         <button
-          :class="{active: step.key === active, passed: activeIndex > index}"
+          :class="{active: step.key === active, passed: progressIndex > index}"
           :aria-current="step.key === active ? 'step' : undefined"
           :disabled="disabled"
           @click="emit('navigate', step.key)"
         >
           <span class="step-index" aria-hidden="true">
-            <svg v-if="activeIndex > index" viewBox="0 0 16 16"><path d="M3.5 8.5l3 3 6-7"/></svg>
+            <svg v-if="progressIndex > index" viewBox="0 0 16 16"><path d="M3.5 8.5l3 3 6-7"/></svg>
             <template v-else>{{ index + 1 }}</template>
           </span>
           <span class="step-label">{{ step.label }}</span>

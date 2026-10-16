@@ -123,11 +123,12 @@ const planningStep = computed(() => {
   const pending: Record<string,string> = {requirements:'补充旅行需求',guides:'选择参考攻略',sources:'补充参考攻略',interview:'回答旅行偏好',interview_confirmation:'确认旅行需求',selection:'确认完整路线',decision:'回答当前路线问题'}
   return pending[document.pending?.kind || ''] || labels[document.stage] || '查看当前行程'
 })
+const workflowStep = computed(() => current.value ? resolveWorkflowTab(current.value) : 'requirements')
 const backSteps = computed(() => {
   const steps = tabs.filter(item => item.key !== 'resources')
-  return tab.value === 'resources' ? steps.slice(0,itinerary.value ? 5 : doc.value?.candidates.length ? 4 : doc.value?.interview ? 3 : current.value?.sources.length ? 2 : 1) : steps.slice(0,steps.findIndex(item => item.key === tab.value))
+  return workflowStep.value === 'resources' ? steps : steps.slice(0,steps.findIndex(item => item.key === workflowStep.value))
 })
-const previousStep = computed(() => backSteps.value[backSteps.value.length-1])
+const previousStep = computed(() => tabs[tabs.findIndex(item => item.key === tab.value)-1])
 
 async function action(fn: () => Promise<void>, label = '正在处理当前操作') {
   error.value = ''; busy.value = true;actionLabel.value = label
@@ -145,6 +146,15 @@ async function backToStep(target: WorkflowTab) {
   if (isRunning.value) return
   if (isHistory.value) {moveToStep(target);return}
   if (!current.value || target === 'resources') return
+  const targetLabel = tabs.find(item => item.key === target)?.label
+  const clearedRecords = {
+    requirements:'参考攻略、需求追问、候选路线、每日行程及历史版本',
+    guides:'需求追问、候选路线、每日行程及历史版本',
+    interview:'候选路线、每日行程及历史版本',
+    routes:'路线确认结果、每日行程及历史版本',
+    itinerary:'后续资源查询与运行记录',
+  }[target]
+  if (!window.confirm(`确定将进度回退到“${targetLabel}”吗？\n将清除${clearedRecords}等记录，此操作无法撤销。\n如果只想查看之前的内容，请取消后点击顶部步骤。`)) return
   const trip = current.value,epoch = selectionEpoch
   await action(async () => {
     const result = await api<{run_id:string | null}>(`/trips/${trip.id}/workflow/back`,{method:'POST',body:JSON.stringify({step:target,base_version:trip.version,updated_at:trip.updated_at})})
@@ -161,10 +171,7 @@ async function backToStep(target: WorkflowTab) {
 }
 function navigateToStep(target: WorkflowTab) {
   if (isRunning.value) return
-  const targetIndex = tabs.findIndex(item => item.key === target)
-  const currentIndex = tabs.findIndex(item => item.key === tab.value)
-  if (!isHistory.value && targetIndex < currentIndex && target !== 'resources') void backToStep(target)
-  else moveToStep(target)
+  moveToStep(target)
 }
 async function reopenRoute() {
   if (!current.value || !canEdit.value || candidateInputsChanged.value) return
@@ -692,12 +699,12 @@ onUnmounted(() => {events?.close();window.clearInterval(runPoll);window.removeEv
           </span>
         </div>
 
-        <WorkflowSteps :steps="tabs" :active="tab" :disabled="isRunning" :guide-count="visibleSources.length" @navigate="navigateToStep" />
+        <WorkflowSteps :steps="tabs" :active="tab" :progress-step="workflowStep" :disabled="isRunning" :guide-count="visibleSources.length" @navigate="navigateToStep" />
 
         <div class="content-layout">
           <div class="main-panel">
             <div class="step-navigation">
-              <button v-if="previousStep" class="text-button" :disabled="isRunning" @click="backToStep(previousStep.key)">← 返回{{ previousStep.label }}</button>
+              <button v-if="previousStep" class="text-button" :disabled="isRunning" @click="navigateToStep(previousStep.key)">← 返回{{ previousStep.label }}</button>
               <button v-else class="text-button" :disabled="busy" @click="goHome">← 返回旅行列表</button>
               <label v-if="backSteps.length">
                 回到之前的步骤
@@ -959,7 +966,7 @@ onUnmounted(() => {events?.close();window.clearInterval(runPoll);window.removeEv
               <div v-else-if="!visibleCandidates.length" class="empty-panel">
                 <h3>还没有完整的候选路线</h3>
                 <p>请重新协作规划，完成需求追问与行程查证后再查看路线。</p>
-                <button class="secondary" :disabled="isRunning" @click="backToStep('guides')">返回参考攻略</button>
+                <button class="secondary" :disabled="isRunning" @click="navigateToStep('guides')">返回参考攻略</button>
               </div>
               <p v-if="candidateInputsChanged && !isHistory && doc?.candidates.length" class="pending-note">参考攻略或旅行需求已变化，请重新生成协作路线。</p>
               <button
