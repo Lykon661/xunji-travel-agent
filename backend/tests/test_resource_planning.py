@@ -74,7 +74,7 @@ class QuoteBoundaries(unittest.TestCase):
 class JoinedPlanning(unittest.IsolatedAsyncioTestCase):
     async def test_map_session_scopes_exit_in_the_owner_task_with_parallel_callers(self):
         amap = Amap.__new__(Amap)
-        amap.api_key = "synthetic-key"; amap.store = Mock(); amap.batch_state = ContextVar("test_batch",default=None)
+        amap.api_key = "synthetic-key"; amap.store = Mock(); amap.batch_state = ContextVar("test_batch",default=None); amap.cache = {}
         owners = []
         @asynccontextmanager
         async def transport(url):
@@ -85,7 +85,7 @@ class JoinedPlanning(unittest.IsolatedAsyncioTestCase):
                 owners.append(("exit",asyncio.current_task()))
         session = AsyncMock()
         session.list_tools.return_value = SimpleNamespace(tools=[SimpleNamespace(name="maps_weather",inputSchema={"properties":{"city":{"type":"string"}},"required":["city"]})])
-        session.call_tool.return_value = SimpleNamespace(isError=False,structuredContent={"forecasts":[]})
+        session.call_tool.return_value = SimpleNamespace(isError=False,structuredContent={"forecasts":[]},content=[])
         @asynccontextmanager
         async def client(read,write):
             yield session

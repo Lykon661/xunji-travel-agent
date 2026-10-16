@@ -734,7 +734,10 @@ class FlyAI:
         accepted = {normalized(value) for value in names}
         result = await self.search(trip_id,"poi",{"city":city,"date":day_date},{"city-name":city,"keyword":names[0]},fresh=fresh)
         # Retry an empty lookup once with a sourced alias, never with a guessed attraction.
-        alternate = next((value for value in names[1:] if normalized(value) != normalized(names[0])),None)
+        # Synonym folding is only for matching results; a synonym is still a different search keyword.
+        def keyword(value):
+            return re.sub(r"[\s·・（）()]", "",value)
+        alternate = next((value for value in names[1:] if keyword(value) != keyword(names[0])),None)
         if not result.get("options") and alternate and result.get("status") == "empty":
             result = await self.search(trip_id,"poi",{"city":city,"date":day_date},{"city-name":city,"keyword":alternate},fresh=fresh)
         all_rows = [row for row in walk_records(result.get("raw",{})) if row.get("name") and (row.get("id") or "ticketInfo" in row)]

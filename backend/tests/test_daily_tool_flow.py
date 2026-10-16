@@ -76,12 +76,12 @@ class DailyToolFlow(unittest.IsolatedAsyncioTestCase):
                  "evidence_id":"query:synthetic-opening","opentime2":"10月7日-10月31日:9:30-18:00","open_time":""}
         self.planner.amap.place = AsyncMock(return_value=place)
         self.planner.models = SimpleNamespace()
-        result = await Planner.locate_stops(self.planner,self.state,{"guide:a":self.stops["guide:a"]})
+        result = await Planner.locate_stops(self.planner,self.state,{"guide:a":self.state["stops"]["guide:a"]})
         actual = result["guide:a"]["map_place"]
         self.assertEqual(actual["opentime2"],place["opentime2"])
         self.assertEqual(actual["open_time"],"")
         self.assertEqual(actual["evidence_id"],place["evidence_id"])
-        self.planner.locate_stops.assert_awaited_once()
+        self.planner.amap.place.assert_awaited_once()
 
     async def test_real_route_tool_shape_marks_unknown_minutes_unresolved(self):
         request = RouteToolRequest(tool="route",city=CITY,origin_id="guide:a",destination_id="guide:b")

@@ -63,7 +63,7 @@ class ActivityPolicy(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_id_gets_one_correction_and_other_dates_remain_protected(self):
         day = {"date":"2026-11-10","city":"杭州","stop_ids":["a"]}
-        state = {"stops":{identity:{"id":identity,"city":"杭州"} for identity in ("a","other-day")},
+        state = {"stops":{identity:{"id":identity,"city":"杭州"} for identity in ("a","other-day")},"requirements":REQ,
                  "selected_route":{"days":[day,{"date":"2026-11-11","stop_ids":["other-day"]}]}}
         bad = RouteTurn(status="ready",order=OrderChoice(stop_ids=["other-day"]))
         good = RouteTurn(status="ready",order=OrderChoice(stop_ids=["a"]))
@@ -82,8 +82,8 @@ class ActivityPolicy(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(tail["start_name"])
         self.assertIsNone(tail["name"])
         day = {"date":"2026-11-10","city":"杭州","activities":[
-            {"id":"a","name":"首站","kind":"visit","start":"09:00","end":"10:00","map_place":{"location":"120,30"}},
-            {"id":"b","name":"次站","kind":"visit","start":"10:35","end":"11:00","map_place":{"location":"120.01,30"}}]}
+            {"id":"a","name":"首站","kind":"visit","start":"09:00","end":"10:00","map_place":{"name":"首站","location":"120,30"}},
+            {"id":"b","name":"次站","kind":"visit","start":"10:35","end":"11:00","map_place":{"name":"次站","location":"120.01,30"}}]}
         self.planner.movement = AsyncMock(return_value=({"minutes":15,"mode":"walking"},None))
         await self.planner.refresh_day_routes(state,{"days":[day]})
         self.assertEqual(day["activities"][0]["move_before"],{})
@@ -131,7 +131,7 @@ class ActivityPolicy(unittest.IsolatedAsyncioTestCase):
 
     async def test_daily_schedule_reserves_lunch_without_injecting_a_restaurant(self):
         stop = {"id":"a","city":"杭州","name":"景点","source_id":"guide","source_title":"攻略",
-                "map_place":{"location":"120,30"},"evidence":{"quote":"景点"},"duration_minutes":30}
+                "map_place":{"name":"景点","location":"120,30"},"evidence":{"quote":"景点"},"duration_minutes":30}
         self.planner.locate_stops = AsyncMock(return_value={"a":stop})
         self.planner.weather_context = AsyncMock(return_value={})
         self.planner.map_order = AsyncMock(return_value=(["a"],"单点"))

@@ -211,6 +211,7 @@ class ModelFormat(unittest.IsolatedAsyncioTestCase):
         stops = {"stop-a":{"city":"杭州","name":"合成景点"}}
         result = await planner.locate_stops(state, stops)
         self.assertEqual(result["stop-a"]["map_place"]["id"], "poi-a")
-        result = await planner.locate_stops(state, stops)
+        # A new run cannot reuse the earlier selection, so the invented ID reaches the membership check.
+        result = await planner.locate_stops({**state,"run_id":"next-run"}, stops)
         self.assertIsNone(result["stop-a"]["map_place"])
         self.assertIn("未知POI", planner.amap.cache[("place_issue","trip","杭州","合成景点")])

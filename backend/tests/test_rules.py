@@ -157,14 +157,15 @@ class PartialModification(unittest.IsolatedAsyncioTestCase):
                   "return_move":{"minutes":None},"adjustment":"原安排"}
         state = {"trip_id":"trip","requirements":REQ,"mode":"modify","change":{"scopes":["hotel"],"cities":["杭州"],"preserve_cities":["苏州"]},
             "locks":[],"old_itinerary":{"days":[{"date":"2026-11-10","city":"杭州","activities":[]},suzhou]},
-            "itinerary":{"days":[],"transport":[],"hotels":[{"id":"hotel:杭州","city":"杭州","selected":{"name":"新酒店"}}]},
+            "itinerary":{"days":[],"transport":[],"hotels":[{"id":"hotel:杭州","city":"杭州","selected":{"name":"新酒店"},"selected_by_user":True}]},
             "selected_route":{"days":[{"date":"2026-11-10","city":"杭州","stop_ids":["s:1"]},
                                         {"date":"2026-11-11","city":"苏州","stop_ids":[]}]},
             "stops":{"s:1":{"name":"真实导入地点","city":"杭州","duration_minutes":60,"source_id":"s",
                       "source_title":"人工测试攻略","evidence":{"kind":"text","quote":"真实导入地点"}}}}
         result = await planner.activities(state)
         self.assertEqual(result["itinerary"]["days"][1],suzhou)
-        self.assertTrue(any(call.args[2] == "新酒店" for call in planner.movement.await_args_list))
+        # The arrival day starts at the station, so the adopted hotel is routed as the day's end.
+        self.assertTrue(any("新酒店" in call.args[2:4] for call in planner.movement.await_args_list))
 
 
 if __name__ == "__main__":

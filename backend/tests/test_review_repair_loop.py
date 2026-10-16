@@ -34,6 +34,15 @@ def finding(index=0, action="repair"):
             "evidence_ids":["requirements"]}
 
 
+
+IDENTITY_FIELDS = {"alias_names","canonical_place_id","possible_duplicate_ids","source_references"}
+
+
+def without_identity(day):
+    # Whole-trip duplicate scanning annotates place identity; the protected schedule itself must not change.
+    return {**day,"activities":[{key:value for key,value in activity.items() if key not in IDENTITY_FIELDS}
+                                for activity in day["activities"]]}
+
 class ReviewRepairLoop(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.planner = Planner.__new__(Planner)
@@ -108,7 +117,7 @@ class ReviewRepairLoop(unittest.IsolatedAsyncioTestCase):
                  "requirements":{**REQ,"end_date":"2026-11-11"}}
         result = await self.planner.assess_result(state,route,draft)
         self.planner.activities.assert_awaited_once()
-        self.assertEqual(result["candidates"][0]["draft"]["days"][0],draft["days"][0])
+        self.assertEqual(without_identity(result["candidates"][0]["draft"]["days"][0]),without_identity(draft["days"][0]))
         self.assertFalse(result["candidates"][0]["confirmation_blockers"])
         self.planner.tickets.assert_not_awaited()
 
@@ -395,6 +404,6 @@ class ReviewRepairLoop(unittest.IsolatedAsyncioTestCase):
                  "requirements":{**REQ,"end_date":"2026-11-11"}}
         result = await self.planner.assess_result(state,route,draft)
         self.planner.activities.assert_awaited_once()
-        self.assertEqual(result["candidates"][0]["draft"]["days"][0],draft["days"][0])
+        self.assertEqual(without_identity(result["candidates"][0]["draft"]["days"][0]),without_identity(draft["days"][0]))
         self.assertEqual(result["candidates"][0]["draft"]["days"][1]["activities"][0]["end"],"17:00")
         self.assertFalse(result["decision"])

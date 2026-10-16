@@ -99,9 +99,28 @@ class RouteAgent(AgentRuntime):
             stop.pop("map_issue",None)
 
     async def plan(self, state, instruction, payload, tools, daily=False):
-        for stop in payload.get("available_stops",{}).values():
-            stop["query_status"] = ("resolved" if coordinates(stop.get("map_place")) else
-                                    "unresolved" if stop.get("map_issue") else "not_queried")
+        pool = payload.get("available_stops")
+        if isinstance(pool,dict):
+            # Annotate a copy for the model; the caller's pool only receives actual tool observations.
+            payload = {**payload,"available_stops":{identity:{**stop,"query_status":
+                ("resolved" if coordinates(stop.get("map_place")) else "unresolved" if stop.get("map_issue") else "not_queried")}
+                for identity,stop in pool.items()}}
+        try:
+            return await self.plan_turn(state,instruction,payload,tools,daily)
+        finally:
+            if isinstance(pool,dict):
+                for identity,stop in payload["available_stops"].items():
+                    original = pool.get(identity)
+                    if not isinstance(original,dict):
+                        continue
+                    for field in ("map_place","map_candidates","map_selected_id","map_issue"):
+                        if field in stop:
+                            if original.get(field) != stop[field]:
+                                original[field] = stop[field]
+                        else:
+                            original.pop(field,None)
+
+    async def plan_turn(self, state, instruction, payload, tools, daily):
         result = await self.ask(state,RouteTurn,
             "你与攻略 Agent、资源 Agent 协作，只形成一条完整行程。交通、住宿和门票使用资源 Agent 交接的真实结果。"
             "住宿仅在selected_by_user=true时参与行程；未选定酒店不得暂用，不安排酒店起终点、放行李或接驳，也不要求用户先选酒店。"

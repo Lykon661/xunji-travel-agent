@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from app.adapters import Amap, ToolError
-from app.models import REVIEW_DIMENSIONS, Requirements
+from app.models import REVIEW_DIMENSIONS, Requirements, ReviewRepairResolution
 from app.planner import Planner
 from app.planning_recovery import previous_round, regression_reason
 from app.reviewing import bind_report, review_basis
@@ -220,6 +220,8 @@ class Recovery(unittest.IsolatedAsyncioTestCase):
         planner.repair = AsyncMock(side_effect=lambda state:{"itinerary":copy.deepcopy(state["itinerary"]),
             "repair_round":state.get("repair_round",0)+1})
         planner.tickets = AsyncMock(return_value={})
+        planner.route_agent = SimpleNamespace(resolve_review=AsyncMock(return_value=ReviewRepairResolution(
+            status="blocked",explanation="合成诊断：剩余冲突无法在现有授权内自动修复")))
         findings = [{"code":"new_conflict_"+str(index),"target":"甲","severity":"blocker","action":"repair",
                      "field_path":"/days/0/activities/0","message":"仍需处理的行程冲突","dates":["2026-11-10"],
                      "evidence_ids":["requirements"]} for index in range(3)]

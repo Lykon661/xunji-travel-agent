@@ -32,7 +32,7 @@ class ItinerarySaving(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch.object(app.state,"store",self.store,create=True))
         self.enterContext(patch.object(app.state,"planner",self.planner,create=True))
         day = {"date":"2026-11-10","city":"杭州","activities":[{"id":"visit","kind":"visit","name":"合成景点",
-               "start":"09:00","end":"10:00","map_place":{"id":"poi","location":"120.1,30.2"},
+               "start":"09:00","end":"10:00","map_place":{"id":"poi","name":"合成景点","location":"120.1,30.2"},
                "move_before":{"minutes":0}}],"gaps":[],"return_move":{"minutes":0}}
         self.state = {"trip_id":self.id,"generation":"generation-one","base_version":0,
                       "run_id":self.store.start_run(self.id,0,"thread",{}),

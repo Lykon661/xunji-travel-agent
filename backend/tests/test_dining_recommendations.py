@@ -13,17 +13,17 @@ class DiningRecommendations(unittest.TestCase):
     def setUp(self):
         self.day = {"date":"2026-11-10","city":"广州","activities":[
             {"id":"sight","name":"合成公园","kind":"visit","start":"11:00","end":"13:00",
-             "map_place":{"id":"park","location":"113.3,23.1"}}]}
+             "map_place":{"id":"park","name":"合成公园","location":"113.3,23.1"}}]}
         self.stops = {
             "sight":{**self.day["activities"][0],"city":"广州"},
             "food": {"id":"food","name":"推荐餐厅","city":"广州","category":"dining",
                      "source_id":"guide","evidence":{"quote":"推荐餐厅"},
-                     "map_place":{"id":"restaurant","location":"113.301,23.1"}},
+                     "map_place":{"id":"restaurant","name":"推荐餐厅","location":"113.301,23.1"}},
             "unknown":{"id":"unknown","name":"咖啡店","city":"广州","category":"dining"},
             "far":{"id":"far","name":"远处餐厅","city":"广州","category":"dining",
-                   "map_place":{"id":"far","location":"114.3,23.1"}},
+                   "map_place":{"id":"far","name":"远处餐厅","location":"114.3,23.1"}},
             "other_city":{"id":"other_city","name":"外市餐厅","city":"深圳","category":"dining",
-                          "map_place":{"id":"other","location":"113.301,23.1"}}}
+                          "map_place":{"id":"other","name":"外市餐厅","location":"113.301,23.1"}}}
 
     def test_only_verified_nearby_dining_is_recommended_for_the_meal_window(self):
         result = meal_recommendations(self.day,self.stops)

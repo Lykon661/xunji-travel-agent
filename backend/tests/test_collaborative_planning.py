@@ -45,7 +45,14 @@ class PlanningInvariants(unittest.TestCase):
 
     def test_unknown_actual_route_blocks_confirmation_even_with_an_estimate(self):
         plan = complete_draft()
+        # Without adopted lodging or an arrival segment the day has no start point, so no first leg is required.
         plan["days"][0]["activities"][0]["move_before"] = {"minutes":None,"estimate_minutes":45}
+        self.assertEqual(confirmation_blockers(plan),[])
+        plan["days"][0]["activities"][0]["move_before"] = {"minutes":0,"mode":"walking"}
+        second = copy.deepcopy(plan["days"][0]["activities"][0])
+        second.update(id="source:1",name="合成景点二",start="11:30",end="12:30",
+                      map_place={"id":"poi-b","location":"113.3,23.2"},move_before={"minutes":None,"estimate_minutes":45})
+        plan["days"][0]["activities"].append(second)
         self.assertTrue(confirmation_blockers(plan))
 
     def test_missing_required_stop_blocks_confirmation(self):
@@ -88,8 +95,11 @@ class CollaborativeFlow(unittest.IsolatedAsyncioTestCase):
             RouteTurn(status="ready",order=OrderChoice(stop_ids=["a","b"],explanation="按实际交通排序"))]))
         tool = AsyncMock(return_value={"minutes":12,"provider":"amap"})
         agent = RouteAgent(model,self.store)
-        first = await agent.plan(self.state,"安排当天",{"stops":["a","b"]},tool,daily=True)
-        second = await agent.plan(self.state,"安排当天",{"stops":["a","b"]},tool,daily=True)
+        def payload():
+            return {"city":"广州","available_stops":{identity:{"id":identity,"name":"合成景点"+identity,"city":"广州"}
+                                                    for identity in ("a","b")}}
+        first = await agent.plan(self.state,"安排当天",payload(),tool,daily=True)
+        second = await agent.plan(self.state,"安排当天",payload(),tool,daily=True)
         self.assertEqual(first,second)
         self.assertEqual(tool.await_count,1)
         self.assertEqual(model.ask.await_count,2)

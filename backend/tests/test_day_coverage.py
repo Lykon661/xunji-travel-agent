@@ -269,7 +269,7 @@ class DailyCoverage(unittest.IsolatedAsyncioTestCase):
         state = self.state({"museum":stop("museum",60)},["museum"])
         original = {"days":[{"date":DATE,"city":"杭州","activities":[{
             **state["stops"]["museum"],"kind":"visit","start":"14:09","end":"16:09",
-            "appointment_time":None,"map_place":{"location":"120,30"},"move_before":{},
+            "appointment_time":None,"map_place":{"name":"museum","location":"120,30"},"move_before":{},
             "ticket_quote":{"price":50,"status":"reference","evidence_id":"query:ticket"}}],
             "weather":{},"gaps":[],"return_move":{}}],"transport":[],"hotels":[]}
         state.update(repair_only=True,mode="modify",old_itinerary=copy.deepcopy(original),itinerary=copy.deepcopy(original),

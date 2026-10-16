@@ -42,11 +42,15 @@ class RouteInterview(unittest.IsolatedAsyncioTestCase):
             return {"previews":{},"preview_ready":False}
         with patch("app.planner.Models",return_value=self.model), patch("app.planner.Crawler"), patch("app.planner.FlyAI"), patch("app.planner.Amap"), patch.object(Planner,"assess",new=assessed):
             self.planner = Planner(self.store,InMemorySaver())
+            # The graph is built lazily; bind the stubbed assessment node while the patch is active.
+            self.planner.graph
         self.planner.emit = Mock()
         async def route_plan(state,instruction,payload,tools):
             pack = await self.model.ask(CandidatePack,instruction,payload)
             return RouteTurn(status="ready",candidate=pack.candidates[0])
-        self.planner.route_agent = SimpleNamespace(plan=route_plan,ask=self.model.ask)
+        async def route_ask(state,schema,instruction,payload,**options):
+            return await self.model.ask(schema,instruction,payload)
+        self.planner.route_agent = SimpleNamespace(plan=route_plan,ask=route_ask)
         self.planner.amap = SimpleNamespace(cache={},place=AsyncMock(return_value=None),weather=AsyncMock(return_value={"forecasts":{}}))
         self.config = {"configurable":{"thread_id":"synthetic-interview"}}
         self.state = {"trip_id":self.trip["id"],"requirements":REQ,"selected_source_ids":["chosen"],
