@@ -88,8 +88,8 @@ onUnmounted(() => {
 <style scoped>
 .crawler-overlay { z-index: 90; }
 .crawler-modal { max-width: 620px; }
-.crawler-status { color: var(--sea); font-weight: 600; background: var(--sky); padding: 12px 14px; border-radius: 7px; }
+.crawler-status { color: var(--primary-text); font-weight: 600; background: var(--primary-soft); padding: 12px 14px; border-radius: 7px; }
 .crawler-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 22px 0; }
-.crawler-steps { padding-left: 22px; line-height: 1.9; font-size: 13px; color: #50646d; }
+.crawler-steps { padding-left: 22px; line-height: 1.9; font-size: 13px; color: var(--text-2); }
 .crawler-steps li { margin-bottom: 9px; }
 </style>

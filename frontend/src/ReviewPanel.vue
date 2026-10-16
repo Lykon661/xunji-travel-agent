@@ -11,11 +11,13 @@ const dimensions: Record<string,string> = {places:'地点重复',dining:'餐饮�
 const results: Record<string,string> = {ok:'完成',warning:'有提示',blocker:'有冲突',unknown:'待核对',not_applicable:'不涉及'}
 const outdated = computed(() => !props.historical && !!props.review && ['pass','pass_with_warnings'].includes(props.review.status) && (props.review.current === false ||
   !props.review.expires_at || new Date(props.review.expires_at).getTime() <= Date.now()))
+const tone = computed(() => props.historical ? 'neutral' : outdated.value || !props.review ? 'warn'
+  : props.review.status === 'pass' ? 'pass' : props.review.status === 'pass_with_warnings' ? 'pass' : 'warn')
 </script>
 
 <template>
-  <section class="review-panel" aria-label="独立行程检验">
-    <h4>{{ historical ? '历史审查记录' : outdated ? '审查已失效，需要重新审查' : statusNames[review?.status || ''] || '尚未经过独立检验' }}</h4>
+  <section class="review-panel" :class="tone" aria-label="独立行程检验">
+    <h4><span class="review-icon" aria-hidden="true">{{ tone === 'pass' ? '✓' : tone === 'warn' ? '!' : '·' }}</span>{{ historical ? '历史审查记录' : outdated ? '审查已失效，需要重新审查' : statusNames[review?.status || ''] || '尚未经过独立检验' }}</h4>
     <template v-if="review">
       <p>{{ review.summary }}</p>
       <small v-if="review.reviewed_at" class="subtle">审查于 {{ new Date(review.reviewed_at).toLocaleString() }}；查询参考不保证最终价格或库存。</small>
@@ -33,7 +35,15 @@ const outdated = computed(() => !props.historical && !!props.review && ['pass','
 </template>
 
 <style scoped>
-.review-panel {border:1px solid var(--line);border-radius:8px;padding:16px;margin:16px 0}
-.review-panel h4 {margin:0 0 8px}
-.review-finding {border-top:1px solid var(--line);padding:10px 0}
+.review-panel {border:1px solid var(--border);border-radius:var(--r-md);padding:14px 16px;margin:16px 0;background:var(--surface)}
+.review-panel.pass {border-color:var(--success-border);background:var(--success-soft)}
+.review-panel.warn {border-color:var(--warn-border);background:var(--warn-soft)}
+.review-panel h4 {display:flex;align-items:center;gap:8px;margin:0 0 6px;font-size:14px}
+.review-panel > p {margin-bottom:4px;font-size:13px;color:var(--text-2)}
+.review-icon {display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;font-size:12px;font-weight:700;background:var(--border);color:var(--text)}
+.pass .review-icon {background:var(--success);color:var(--on-primary)}
+.warn .review-icon {background:var(--warn);color:var(--on-primary)}
+.review-panel details {margin-top:8px;font-size:13px}
+.review-panel details p {margin:4px 0}
+.review-finding {border-top:1px solid var(--border);padding:10px 0}
 </style>

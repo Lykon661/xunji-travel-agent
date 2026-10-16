@@ -523,14 +523,15 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.management-overlay { position: fixed; inset: 0; z-index: 100; background: #253a4066; display: flex; align-items: center; justify-content: center; padding: 24px; }
-.management-dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: 0 18px 60px #253a4026; max-height: calc(100dvh - 48px); }
-.model-settings { --surface: #fff; --surface-alt: #f5f8fa; --soft: #e8f0f2; --accent: #205b61; --accent-dark: #16464c; --accent-line: #79a5a6; --success: #36776c; --warning: #9c742d; --warning-soft: #fff6e5; --danger: #a04a4a; }
+.management-overlay { position: fixed; inset: 0; z-index: 100; background: var(--backdrop); display: flex; align-items: center; justify-content: center; padding: 24px; }
+.management-dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-lg); max-height: calc(100dvh - 48px); }
+.model-settings { --surface-alt: var(--surface-2); --soft: var(--primary-soft); --accent: var(--primary-text); --accent-dark: var(--primary-hover); --accent-line: var(--primary-border); --warning: var(--warn); --warning-soft: var(--warn-soft); }
 .model-settings .muted { color: var(--muted); font-size: 13px; line-height: 1.75; }
 .model-settings .button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 36px; padding: 9px 14px; border: 1px solid transparent; border-radius: 7px; font-size: 13px; font-weight: 600; line-height: 1.5; }
-.model-settings .button.subtle { background: var(--surface); border-color: var(--line); color: var(--sea); }
+.model-settings .button.subtle { background: var(--surface); border-color: var(--border-strong); color: var(--text); }
+.model-settings .button.subtle:hover:enabled { background: var(--surface-2); }
 .model-settings .button.small { min-height: 32px; padding: 6px 10px; font-size: 12px; }
-.model-settings .icon-button { width: 36px; height: 36px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); font-size: 23px; flex-shrink: 0; }
+.model-settings .icon-button { width: 36px; height: 36px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text-2); font-size: 23px; flex-shrink: 0; }
 .model-settings .danger, .model-settings .document-error { color: var(--danger); }
 .model-settings .model-feedback { color: var(--success); }
 .model-vision-selection { margin-top: 12px; }
@@ -545,7 +546,7 @@ onUnmounted(() => {
 .model-live > div { display: flex; gap: 14px; align-items: baseline; min-width: 0; flex: 1; }
 .model-live small { flex-shrink: 0; color: var(--muted); font-size: 12px; }
 .model-live strong { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
-.model-status-dot { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: #9ba6b9; }
+.model-status-dot { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: var(--text-3); }
 .model-status-dot.connected { background: var(--success); }
 .model-draft-tag { color: var(--warning); font-size: 12px; flex-shrink: 0; }
 .model-workspace-scroll { flex: 1 1 0; min-height: 0; min-width: 0; overflow-y: auto; scrollbar-gutter: stable; overscroll-behavior: contain; border-top: 1px solid var(--line); }
@@ -581,7 +582,7 @@ onUnmounted(() => {
 .model-credential > .model-checkbox { margin-top: 10px; }
 .model-key-input { gap: 10px; }
 .model-header-settings { margin-top: 18px; }
-.model-header-settings summary, .model-compat-settings summary { font-size: 12px; cursor: pointer; color: #43516b; }
+.model-header-settings summary, .model-compat-settings summary { font-size: 12px; cursor: pointer; color: var(--text-2); }
 .model-header-settings > label { margin-top: 12px; }
 .model-header-settings > small { display: block; margin-top: 8px; }
 .model-oauth-card { margin-top: 18px; padding: 16px; background: var(--surface-alt); border: 1px solid var(--line); border-radius: 8px; }
@@ -594,7 +595,7 @@ onUnmounted(() => {
 .model-oauth-prompt { display: grid; gap: 10px; }
 .model-oauth-prompt > button { justify-self: start; }
 .model-oauth-card .document-error { font-size: 12px; margin-top: 12px; }
-.model-removal-confirm { margin: 0 0 14px; border: 1px solid #ead6b4; }
+.model-removal-confirm { margin: 0 0 14px; border: 1px solid var(--warn-border); }
 .model-auth-resume { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; margin-bottom: 10px; }
 .model-catalog-section, .model-editor-section { border-top: 1px solid var(--line); margin-top: 24px; padding-top: 20px; }
 .model-catalog-controls { display: grid; grid-template-columns: minmax(100px, .85fr) minmax(140px, 1.25fr) auto; align-items: center; gap: 8px; }

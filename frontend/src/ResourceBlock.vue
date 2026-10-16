@@ -31,12 +31,35 @@ function price(option: Resource) {return option.price == null ? '报价待确认
     <p v-else class="pending-note">{{ entry.reason || '尚未获得资源候选，请查看查询状态后重试。' }}</p>
     <p v-for="error in entry.errors" :key="error" class="pending-note">{{ error }}</p>
     <button class="text-button" :disabled="disabled || locked" @click="$emit('refresh',entry.id)">重新查询本项报价</button>
-    <details v-if="entry.options.length"><summary>比较与切换 {{ entry.options.length }} 个查询结果</summary><ul class="alternatives"><li v-for="option in entry.options" :key="option.id"><div><strong>{{ option.name }}</strong><small>{{ bases[option.price_basis] }}<span v-if="option.seat_class"> · {{ option.seat_class }}</span></small><small v-if="option.departure || option.arrival">{{ option.departure }} → {{ option.arrival }}</small><small v-if="option.door_minutes != null">含接驳缓冲 {{ option.door_minutes }} 分钟</small><small v-if="option.commute_minutes != null">住宿接驳 {{ option.commute_minutes }} 分钟</small><small v-for="issue in option.constraint_issues || []" :key="issue" class="pending-note">{{ issue }}</small></div><span>{{ price(option) }}</span><a v-if="safeLink(option.booking_url)" :href="safeLink(option.booking_url)" target="_blank" rel="noopener noreferrer">详情</a><button class="text-button" :disabled="disabled || locked || (option.id === entry.selected?.id && (option.kind !== 'hotel' || entry.selected_by_user)) || !!option.constraint_issues?.length" @click="$emit('select',entry.id,option.id)">{{ option.id === entry.selected?.id && (option.kind !== 'hotel' || entry.selected_by_user) ? '已采用' : '采用并重算' }}</button></li></ul></details>
+    <details v-if="entry.options.length">
+      <summary>比较与切换 {{ entry.options.length }} 个查询结果</summary>
+      <ul class="alternatives">
+        <li v-for="option in entry.options" :key="option.id" :class="{current: option.id === entry.selected?.id}">
+          <div>
+            <strong>{{ option.name }}</strong>
+            <small>{{ bases[option.price_basis] }}<span v-if="option.seat_class"> · {{ option.seat_class }}</span></small>
+            <small v-if="option.departure || option.arrival">{{ option.departure }} → {{ option.arrival }}</small>
+            <small v-if="option.door_minutes != null">含接驳缓冲 {{ option.door_minutes }} 分钟</small>
+            <small v-if="option.commute_minutes != null">住宿接驳 {{ option.commute_minutes }} 分钟</small>
+            <small v-for="issue in option.constraint_issues || []" :key="issue" class="pending-note">{{ issue }}</small>
+          </div>
+          <span class="alternative-price">{{ price(option) }}</span>
+          <a v-if="safeLink(option.booking_url)" :href="safeLink(option.booking_url)" target="_blank" rel="noopener noreferrer">详情</a>
+          <button
+            class="text-button"
+            :disabled="disabled || locked || (option.id === entry.selected?.id && (option.kind !== 'hotel' || entry.selected_by_user)) || !!option.constraint_issues?.length"
+            @click="$emit('select',entry.id,option.id)"
+          >{{ option.id === entry.selected?.id && (option.kind !== 'hotel' || entry.selected_by_user) ? '已采用' : '采用并重算' }}</button>
+        </li>
+      </ul>
+    </details>
   </section>
 </template>
 
 <style scoped>
-.resource-image {width:120px; height:82px; object-fit:cover; border-radius:8px; float:right; margin:0 0 12px 16px}
+.resource-image {width:120px; height:82px; object-fit:cover; border-radius:var(--r-sm); float:right; margin:0 0 12px 16px}
 .alternatives li {flex-wrap:wrap; gap:12px}
+.alternatives li.current {background:var(--primary-soft); border-radius:var(--r-sm); padding-inline:10px}
 .alternatives small {display:block}
+.alternative-price {font-weight:600; font-variant-numeric:tabular-nums}
 </style>
