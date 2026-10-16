@@ -70,7 +70,7 @@ onUnmounted(() => {
       <p>{{ state?.message || '正在读取本机采集器状态…' }}</p>
       <p v-if="error || loadError" class="pending-note" role="alert">{{ error || loadError }}</p>
       <div class="crawler-actions">
-        <button class="secondary" :disabled="disabled || !state" @click="command('install')">{{ state?.present ? '修复并重新安装' : '安装采集器' }}</button>
+        <button class="secondary" :disabled="disabled || !state" @click="command('install')">{{ state?.present ? '精简并修复安装' : '安装轻量采集器' }}</button>
         <button class="primary" :disabled="disabled || !state?.installed || state?.enabled || state?.blocked" @click="command('start')">启动采集器</button>
         <button class="secondary" :disabled="disabled || !state?.installed || state?.blocked || !!state?.cooldown_seconds" @click="command('login')">打开登录窗口</button>
         <button class="text-button" :disabled="loading || (!state?.enabled && !state?.busy && !state?.collecting)" @click="command('stop')">{{ state?.busy || state?.collecting ? '取消操作并停用' : '停止采集器' }}</button>
@@ -78,9 +78,9 @@ onUnmounted(() => {
       </div>
       <p v-if="state?.blocked" class="pending-note">请先在官方客户端处理账号异常。确认恢复后再解除保护；解除后仍保持停用，低频采集也不能保证账号安全。</p>
       <p v-if="state?.cooldown_seconds" class="subtle">本轮冷却还剩 {{ state.cooldown_seconds }} 秒；冷却结束不会自动恢复采集。</p>
-      <ol class="crawler-steps"><li>首次使用点击“安装采集器”，安装完成且账号正常时再打开登录窗口。</li><li>登录完成后保持停用，由你手动启动；账号异常时不要反复扫码重试。</li><li>在“参考攻略”中手动搜索。每轮一个关键词、最多三篇，接口请求间隔至少六秒，两轮开始至少间隔一分钟。</li></ol>
+      <ol class="crawler-steps"><li>首次使用点击“安装轻量采集器”，安装完成且账号正常时再打开登录窗口。</li><li>登录完成后保持停用，由你手动启动；账号异常时不要反复扫码重试。</li><li>在“参考攻略”中手动搜索。每轮一个关键词、最多三篇，接口请求间隔至少六秒，两轮开始至少间隔一分钟。</li></ol>
       <p class="subtle">规划过程只使用已保存攻略。验证码或访问限制会立即终止采集并锁定，保护状态和冷却时间保存在本机，重启后仍有效。</p>
-      <p class="subtle">安装需要 Git 和网络。采集器使用独立 Python 3.11；缺少时会通过 Python Install Manager 下载。安装失败后点击“修复并重新安装”。</p>
+      <p class="subtle">安装需要 Git 和网络，使用独立 Python 3.11。轻量环境仅用于小红书搜索、详情和扫码登录，保存为 JSONL；不安装词云、图像分析、数据库和其他平台依赖。已有环境点击“精简并修复安装”可移除可选大包，登录资料保留。缺少 Python 3.11 时会通过 Python Install Manager 下载。</p>
     </section>
   </div>
 </template>

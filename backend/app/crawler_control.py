@@ -34,7 +34,7 @@ class CrawlerControl:
 
     async def check_installation(self):
         if not self.public()["installed"]:
-            raise ToolError("crawler_config", "采集器依赖尚未安装完成，请先点击“修复并重新安装”，完成后再启动或登录")
+            raise ToolError("crawler_config", "采集器依赖尚未安装完成，请先点击“精简并修复安装”，完成后再启动或登录")
         code, revision, _ = await process(["git","rev-parse","HEAD"], cwd=settings.crawler_dir)
         if code or revision.strip() != CRAWLER_REVISION:
             raise ToolError("crawler_revision", "采集器版本不匹配，请按 README 使用固定版本")
@@ -60,7 +60,7 @@ class CrawlerControl:
             raise ToolError("crawler_config", "当前使用自定义 Python 路径，请按 README 安装到该环境，或恢复默认 MEDIACRAWLER_PYTHON")
         self.enable(False)
         self.stage = "installing" if operation == "install" else "logging_in"
-        self.message = "正在准备 Python 3.11、安装采集器依赖和 Chromium，首次下载可能需要几分钟。" if operation == "install" else "正在打开小红书登录窗口，请在弹出的窗口扫码并完成验证。"
+        self.message = "正在准备 Python 3.11、小红书轻量依赖和 Chromium；已有环境会移除可选大包，登录资料保留。" if operation == "install" else "正在打开小红书登录窗口，请在弹出的窗口扫码并完成验证。"
         self.task = asyncio.create_task(self.run(operation))
         return self.public()
 
@@ -76,11 +76,11 @@ class CrawlerControl:
                     (settings.data / "crawler-install.log").write_text(output + "\n" + errors, encoding="utf-8")
                     if code:
                         message = ("无法准备 Python 3.11，请安装 Python Install Manager 或 Python 3.11 后重试。"
-                                   if "TRAVEL_CRAWLER_PYTHON_311" in output + errors else "采集器依赖安装未完成，请点击“修复并重新安装”重试。")
+                                   if "TRAVEL_CRAWLER_PYTHON_311" in output + errors else "采集器依赖安装未完成，请点击“精简并修复安装”重试。")
                         raise ToolError("crawler_install", message + "详情见 backend/data/crawler-install.log")
                     await self.check_installation()
                     self.stage = "idle"
-                    self.message = "采集器已安装。点击“打开登录窗口”完成首次登录，或已有登录状态时直接启动。"
+                    self.message = "小红书轻量采集器已安装。点击“打开登录窗口”完成首次登录，或已有登录状态时直接启动。"
                 else:
                     await self.check_installation()
                     folder = settings.data / "crawler" / uuid4().hex

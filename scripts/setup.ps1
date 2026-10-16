@@ -122,16 +122,25 @@ if ($WithCrawler -or $CrawlerOnly) {
         Ensure-CrawlerEnvironment $crawlerDir
         $marker = Join-Path $crawlerDir '.venv\travel-agent-ready.json'
         if (Test-Path -LiteralPath $marker) { Remove-Item -LiteralPath $marker }
-        # MediaCrawler runs from its checkout; avoid building its invalid project metadata.
-        # This pinned pandas version has a Windows wheel for Python 3.11; never fall back to a source build.
-        Invoke-Required '.\.venv\Scripts\python.exe' @('-m', 'pip', 'install', '--only-binary=pandas', '-r', 'requirements.txt')
+        $profileScript = Join-Path $backendDir 'crawler_profile.py'
+        $profileOutput = & '.\.venv\Scripts\python.exe' $profileScript $crawlerDir --apply
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot apply the pinned Xiaohongshu lite profile; existing login data was preserved.' }
+        $profile = ($profileOutput -join "`n") | ConvertFrom-Json
+        # Keep the existing venv and login profile; install core dependencies before removing optional features.
+        Invoke-Required '.\.venv\Scripts\python.exe' @('-m', 'pip', 'install', '--no-cache-dir', '-r', (Join-Path $backendDir 'crawler-requirements.txt'))
+        $optionalPackages = @(& '.\.venv\Scripts\python.exe' $profileScript $crawlerDir --remove-packages)
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot read optional crawler package list' }
+        Invoke-Required '.\.venv\Scripts\python.exe' (@('-m', 'pip', 'uninstall', '-y') + $optionalPackages)
         Invoke-Required '.\.venv\Scripts\python.exe' @('-m', 'playwright', 'install', 'chromium')
         Invoke-Required '.\.venv\Scripts\python.exe' @((Join-Path $backendDir 'crawler_health.py'), $crawlerDir)
         @{
             complete = $true
             revision = 'd6f7c5bb906b6dac40ddf343ef9e26438a3de092'
             requirements_sha256 = (Get-FileHash -LiteralPath 'requirements.txt' -Algorithm SHA256).Hash.ToLowerInvariant()
-        } | ConvertTo-Json | Set-Content -LiteralPath $marker -Encoding UTF8
+            profile = $profile.profile
+            profile_sha256 = $profile.profile_sha256
+            source_sha256 = $profile.source_sha256
+        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $marker -Encoding UTF8
     } finally { Pop-Location }
 }
 Write-Host 'Dependencies installed. Choose models in the web settings; configure external services in backend/.env.'

@@ -3,6 +3,7 @@ import hashlib
 import json
 import re
 
+from crawler_profile import PROFILE, profile_digest, source_hashes
 from .config import CRAWLER_REVISION, settings
 
 
@@ -12,10 +13,14 @@ def installation_ready():
         marker = json.loads((environment / "travel-agent-ready.json").read_text(encoding="utf-8-sig"))
         version = (environment / "pyvenv.cfg").read_text(encoding="utf-8-sig")
         requirements = (settings.crawler_dir / "requirements.txt").read_bytes()
+        if "profile" in marker:
+            if (marker["profile"] != PROFILE or marker.get("profile_sha256") != profile_digest()
+                    or marker.get("source_sha256") != source_hashes(settings.crawler_dir)):
+                return False
         return bool(settings.crawler_python.is_file() and (settings.crawler_dir / "main.py").is_file()
                     and re.search(r"(?m)^version\s*=\s*3\.11\.", version)
                     and marker.get("revision") == CRAWLER_REVISION
                     and marker.get("complete") is True
                     and marker.get("requirements_sha256", "").lower() == hashlib.sha256(requirements).hexdigest())
-    except (OSError, ValueError, TypeError, AttributeError):
+    except (OSError, ValueError, TypeError, AttributeError, KeyError):
         return False

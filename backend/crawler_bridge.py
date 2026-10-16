@@ -1,4 +1,4 @@
-"""Run inside MediaCrawler's independent environment; no upstream source is modified."""
+"""Run inside MediaCrawler's isolated environment with the installer-managed lite profile."""
 import asyncio
 import json
 import sys
@@ -27,6 +27,7 @@ async def main():
     config.ENABLE_GET_COMMENTS = False
     config.ENABLE_GET_SUB_COMMENTS = False
     config.ENABLE_GET_MEIDAS = False
+    config.ENABLE_GET_WORDCLOUD = False
     config.SORT_TYPE = "popularity_descending"
     config.MAX_CONCURRENCY_NUM = 1
     config.SAVE_DATA_OPTION = "jsonl"
