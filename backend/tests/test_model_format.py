@@ -201,17 +201,21 @@ class ModelFormat(unittest.IsolatedAsyncioTestCase):
         self.client(iter(['{"selected_id":"poi-a"}', '{"selected_id":"invented"}']))
         planner = Planner.__new__(Planner)
         planner.models = self.models
-        poi = {"id":"poi-a","name":"合成景点","location":"120,30","cityname":"杭州"}
+        # Not an exact-name hit, so the model must judge the candidate.
+        poi = {"id":"poi-a","name":"合成景点东门","location":"120,30","cityname":"杭州"}
+        reasons = []
         async def place(trip, city, name, selector):
             selected_id, reason = await selector([poi])
-            self.assertIn("未返回匹配说明", reason)
+            reasons.append(reason)
             return poi if selected_id else None
         planner.amap = SimpleNamespace(place=place, cache={})
         state = {"trip_id":"trip"}
-        stops = {"stop-a":{"city":"杭州","name":"合成景点"}}
+        stops = {"stop-a":{"city":"杭州","name":"合成景点","evidence":{"quote":"合成景点"}}}
         result = await planner.locate_stops(state, stops)
         self.assertEqual(result["stop-a"]["map_place"]["id"], "poi-a")
-        # A new run cannot reuse the earlier selection, so the invented ID reaches the membership check.
-        result = await planner.locate_stops({**state,"run_id":"next-run"}, stops)
+        self.assertIn("未返回匹配说明", reasons[-1])
+        # New evidence cannot reuse the earlier match, so the invented ID reaches the membership check.
+        stops = {"stop-a":{**stops["stop-a"],"evidence":{"quote":"合成景点的另一处入口"}}}
+        result = await planner.locate_stops(state, stops)
         self.assertIsNone(result["stop-a"]["map_place"])
         self.assertIn("未知POI", planner.amap.cache[("place_issue","trip","杭州","合成景点")])

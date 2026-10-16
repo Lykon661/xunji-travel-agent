@@ -398,6 +398,14 @@ class ResourceChoice(BaseModel):
     reason: str = ""
 
 
+class PlaceChoice(ResourceChoice):
+    key: str = Field(min_length=1, description="places中的键，原样复制")
+
+
+class PlaceChoices(BaseModel):
+    choices: list[PlaceChoice] = Field(max_length=8, description="places中每个键恰好一项")
+
+
 class OrderChoice(BaseModel):
     stop_ids: list[str]
     explanation: str = ""

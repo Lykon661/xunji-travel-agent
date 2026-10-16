@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from app.adapters import Amap, ToolError
-from app.models import ResourceChoice
+from app.models import PlaceChoices, ResourceChoice
 from app.planner import Planner
 from app.reviewing import compact_review_payload, review_payload, review_repair_dates
 
@@ -120,6 +120,55 @@ class PlaceSelectionReuse(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result["a"]["map_place"])
         self.planner.models.ask.assert_awaited_once()
 
+
+    async def test_one_exact_name_sight_is_adopted_without_a_model_call(self):
+        self.candidates = [{"id":"lake","name":"公园","address":"湖滨路","location":"120,30"},
+                           {"id":"gate","name":"公园-南门","address":"湖滨路1号","location":"120.01,30"}]
+        result = await self.planner.locate_stops(self.state,self.stops)
+        self.assertEqual(result["a"]["map_place"]["id"],"lake")
+        self.assertIn("名称完全一致",result["a"]["map_place"]["match_basis"])
+        self.planner.models.ask.assert_not_awaited()
+
+    async def test_an_exact_name_restaurant_still_needs_branch_evidence(self):
+        self.stops["a"].update(name="合成面馆",category="dining")
+        self.candidates = [{"id":"main","name":"合成面馆","location":"120,30"},
+                           {"id":"branch","name":"合成面馆(西湖店)","location":"121,31"}]
+        await self.planner.locate_stops(self.state,self.stops)
+        self.planner.models.ask.assert_awaited_once()
+
+    async def test_a_confirmed_match_is_reused_by_later_runs_but_an_unresolved_one_is_not(self):
+        self.planner.models.ask.return_value = ResourceChoice(selected_id="poi-a",reason="攻略写明东路")
+        await self.planner.locate_stops(self.state,self.stops)
+        result = await self.planner.locate_stops({**self.state,"run_id":"run-b"},self.stops)
+        self.assertEqual(result["a"]["map_place"]["id"],"poi-a")
+        self.planner.models.ask.assert_awaited_once()
+
+    def ambiguous_stops(self, count):
+        return {f"s{index}":{"id":f"s{index}","city":"杭州","name":f"公园{index}","evidence":{"quote":f"公园{index}"}}
+                for index in range(count)}
+
+    async def test_batched_answers_are_checked_one_place_at_a_time(self):
+        stops = self.ambiguous_stops(3)
+        self.planner.models.ask.return_value = PlaceChoices(choices=[
+            {"key":"p1","selected_id":"poi-a","reason":"东路"},{"key":"p2","selected_id":"invented","reason":"编造"}])
+        result = await self.planner.locate_stops(self.state,stops)
+        self.planner.models.ask.assert_awaited_once()
+        self.assertEqual(result["s0"]["map_place"]["id"],"poi-a")
+        self.assertIsNone(result["s1"]["map_place"])
+        self.assertIn("未知POI",result["s1"]["map_issue"])
+        self.assertIsNone(result["s2"]["map_place"])
+        self.assertIn("未返回该地点",result["s2"]["map_issue"])
+
+    async def test_a_failed_batch_is_not_cached_and_large_cities_are_split(self):
+        stops = self.ambiguous_stops(9)
+        self.planner.models.ask.side_effect = ToolError("model_network","合成超时")
+        result = await self.planner.locate_stops(self.state,stops)
+        self.assertEqual(self.planner.models.ask.await_count,2)
+        self.assertTrue(all("合成超时" in stop["map_issue"] for stop in result.values()))
+        self.planner.models.ask.side_effect = None
+        self.planner.models.ask.return_value = ResourceChoice(selected_id=None,reason="仍有歧义")
+        await self.planner.locate_stops(self.state,{"s8":stops["s8"]})
+        self.assertEqual(self.planner.models.ask.await_count,3)
 
 class ReviewMaterialReuse(unittest.TestCase):
     def test_references_preserve_every_fact_and_leave_plan_paths_and_inputs_intact(self):

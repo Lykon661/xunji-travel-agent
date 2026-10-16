@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from app.adapters import Amap, ToolError
-from app.models import ResourceChoice
+from app.models import PlaceChoices, ResourceChoice
 from app.planner import Planner
 
 
@@ -63,11 +63,16 @@ class PlaceDisambiguation(unittest.IsolatedAsyncioTestCase):
         stops["guide:a"]["evidence"]["quote"] = "选择东路1号的合成艺术馆"
         stops["guide:b"] = {**copy.deepcopy(stops["guide:a"]),"id":"guide:b","evidence":{"quote":"选择西路2号的合成艺术馆"}}
         async def choose(schema,instruction,payload):
-            return ResourceChoice(selected_id="east" if payload["stop_id"] == "guide:a" else "west",reason=payload["evidence"][0]["quote"])
+            self.assertIs(schema,PlaceChoices)
+            return PlaceChoices(choices=[{"key":key,"selected_id":"east" if "东路" in place["evidence"][0]["quote"] else "west",
+                                          "reason":place["evidence"][0]["quote"]} for key,place in payload["places"].items()])
         self.planner.models.ask.side_effect = choose
         result = await self.planner.locate_stops(self.state,stops)
         self.assertEqual(result["guide:a"]["map_place"]["id"],"east")
         self.assertEqual(result["guide:b"]["map_place"]["id"],"west")
+        # Both ambiguous places of the city share one model judgment with short keys.
+        self.planner.models.ask.assert_awaited_once()
+        self.assertEqual(set(self.planner.models.ask.call_args.args[2]["places"]),{"p1","p2"})
         searches = [call for call in self.planner.amap.call.call_args_list if call.args[1] == "maps_text_search"]
         self.assertEqual(len(searches),1)
 

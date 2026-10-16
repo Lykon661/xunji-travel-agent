@@ -14,7 +14,7 @@ from weakref import WeakValueDictionary
 from .adapters import Amap, Crawler, FlyAI, Models, ToolError, default_ticket_price, image_data, map_link, navigation_link, remote_image
 from .config import settings
 from .models import (Candidate, CandidatePack, CandidateRevision, ChangeRequest, GuideExtraction, InterviewRound, OrderChoice, PlanningDecision,
-                     Requirements, RequirementUpdate, ResourceChoice)
+                     Requirements, RequirementUpdate, ResourceChoice, PlaceChoices)
 from .rules import check_itinerary, enforce_locks, merge_candidate_duplicates, resource_cost, ticket_policy, ticket_query_required, timestamp, validate_candidate, walking_limit
 from .store import Conflict, now, dump
 from .routing import coordinates, daily_route_scope, daily_movements, transport_access_transfers, distance, early_finish, geographic_order, reference_opening
@@ -1172,6 +1172,7 @@ class Planner:
     async def execute(self, run_id: str, invocation):
         run = self.store.run(run_id)
         config = {"configurable":{"thread_id":run["thread_id"]},"recursion_limit":60}
+        started = perf_counter()
         try:
             async with self.amap.batch():
                 result = await self.graph.ainvoke(invocation,config)
@@ -1195,9 +1196,11 @@ class Planner:
                 self.store.update(run["trip_id"],doc)
                 self.store.finish_run(run_id,"waiting",{"pending":pending})
                 self.store.event(run_id,"waiting",pending["message"],pending=pending)
+                logging.getLogger(__name__).info("Run %s waiting for %s after %.1fs",run_id,pending.get("kind"),perf_counter()-started)
             else:
                 self.store.finish_run(run_id,"completed",{"version":self.store.trip(run["trip_id"])["version"]})
                 self.store.event(run_id,"completed","已确认并保存这份每日行程")
+                logging.getLogger(__name__).info("Run %s completed after %.1fs",run_id,perf_counter()-started)
         except asyncio.CancelledError:
             if self.store.trip(run["trip_id"])["active_run"] != run_id:
                 raise
@@ -1225,7 +1228,7 @@ class Planner:
             for error in failures:
                 frames = traceback.extract_tb(error.__traceback__)
                 location = " -> ".join(f"{Path(frame.filename).name}:{frame.lineno}({frame.name})" for frame in frames)
-                logging.getLogger(__name__).error("Run %s failed (%s; code=%s) at %s",run_id,
+                logging.getLogger(__name__).error("Run %s failed after %.1fs (%s; code=%s) at %s",run_id,perf_counter()-started,
                     type(error).__name__,getattr(error,"code","run_failed"),location or "no traceback")
             trip = self.store.trip(run["trip_id"]); doc = trip["document"]
             doc.setdefault("progress_stage", doc["stage"])
@@ -2212,47 +2215,67 @@ class Planner:
         keys = [identity for identity in stops if identity not in preserved]
         candidate_sets,selection_results,failures = {},{},{}
         lookup_locks = {(stops[identity]["city"],stops[identity]["name"]):asyncio.Lock() for identity in keys}
-        async def locate(identity):
+        config_store = getattr(self.models,"config_store",None)
+        config = config_store.snapshot().public() if config_store else {}
+        place_instruction = ("将攻略地点匹配到高德实际POI，只能选pois中的id。可识别明确简称、城市前缀、同一景区别名；"
+            "餐厅/酒店分店必须符合攻略提到的地址或总店等限定。多个同名地点没有足够依据时selected_id=null，不随意选第一个。"
+            "用户已明确选择场馆展区时按该选择匹配高德POI；飞猪坐标不参与定位，也不能据其与高德坐标不同拒绝匹配。"
+            "preferences是已确认的用户需求，优先使用其中明确选择的展区或地址；原攻略未写展区不代表用户后来选择无效。"
+            "综合完整攻略引用、用户最新需求与已回答选择，区分目的地本体、分店、入口、售票处和停车场。"
+            "多条候选本身不是查不到：证据足以唯一对应时选中实际POI，并引用具体匹配依据；仍无法区分才返回null，说明欠缺的区分信息。"
+            "不得生成坐标或新ID；必须返回selected_id；reason说明匹配依据或歧义。")
+        deferred = {}
+
+        def selection_payload(identity,candidates):
+            stop = stops[identity]
+            return {"stop_id":identity,"city":stop["city"],"name":stop["name"],"evidence":[stop.get("evidence",{})],
+                    "preferences":preferences,"decisions":state.get("decision_history",[]),
+                    "source_references":stop.get("source_references",[]),"alias_names":stop.get("alias_names",[]),
+                    "pois":candidates}
+
+        def selection_keys(payload):
+            fingerprint = digest([payload,config])
+            # Unresolved choices stay within one run; a confirmed match on identical inputs is reused across runs.
+            return ("place_selection",state["trip_id"],state.get("run_id"),fingerprint),("place_selection_matched",state["trip_id"],fingerprint)
+
+        def record(identity,payload,selected_id,reason):
+            reason = reason.strip() or ("模型匹配了候选POI，未返回匹配说明" if selected_id else "模型未匹配地点，未返回原因说明")
+            if selected_id is not None and selected_id not in {row.get("id") for row in payload["pois"]}:
+                raise ToolError("place_choice","地点匹配引用了未知POI，未采用")
+            run_key,matched_key = selection_keys(payload)
+            self.amap.cache[run_key] = (selected_id,reason)
+            if selected_id is not None:
+                self.amap.cache[matched_key] = (selected_id,reason)
+            selection_results[identity] = (selected_id,reason)
+
+        async def first_pass(identity,candidates):
+            stop = stops[identity]
+            candidate_sets[identity] = [{field:row.get(field) for field in ("id","name","address","cityname","adname","type","typecode","location")} for row in candidates]
+            if identity in confirmed_choices:
+                selected = confirmed_choices[identity] if any(row.get("id") == confirmed_choices[identity] for row in candidates) else None
+                reason = "用户已明确选择此高德POI" if selected else "用户已选的地点不在本次候选中，需要重新核对"
+                selection_results[identity] = (selected,reason)
+                return selected,reason
+            # Restaurant branches need address evidence; a sight with one exact-name POI needs no model guess.
+            exact = [row for row in candidates if row.get("name") == stop["name"] and row.get("id")]
+            if len(exact) == 1 and not is_dining(stop):
+                selection_results[identity] = (exact[0]["id"],"高德候选中仅此一处与攻略地点名称完全一致")
+                return selection_results[identity]
+            payload = selection_payload(identity,candidate_sets[identity])
+            for cache_key in selection_keys(payload):
+                if cache_key in self.amap.cache:
+                    selection_results[identity] = self.amap.cache[cache_key]
+                    return selection_results[identity]
+            deferred[identity] = payload
+            return None,"等待地点匹配判断"
+
+        async def lookup(identity,selector):
             async with limit:
                 stop = stops[identity]
                 key = (stop["city"],stop["name"])
                 try:
-                    async def select(candidates):
-                        candidate_sets[identity] = [{field:row.get(field) for field in ("id","name","address","cityname","adname","type","typecode","location")} for row in candidates]
-                        if identity in confirmed_choices:
-                            selected = confirmed_choices[identity] if any(row.get("id") == confirmed_choices[identity] for row in candidates) else None
-                            reason = "用户已明确选择此高德POI" if selected else "用户已选的地点不在本次候选中，需要重新核对"
-                            selection_results[identity] = (selected,reason)
-                            return selected,reason
-                        payload = {"stop_id":identity,"city":key[0],"name":key[1],"evidence":[stop.get("evidence",{})],
-                                   "preferences":preferences,"decisions":state.get("decision_history",[]),
-                                   "source_references":stop.get("source_references",[]),"alias_names":stop.get("alias_names",[]),
-                                   "pois":candidate_sets[identity]}
-                        config_store = getattr(self.models,"config_store",None)
-                        config = config_store.snapshot().public() if config_store else {}
-                        selection_key = ("place_selection",state["trip_id"],state.get("run_id"),digest([payload,config]))
-                        if selection_key in self.amap.cache:
-                            selection_results[identity] = self.amap.cache[selection_key]
-                            return selection_results[identity]
-                        choice = await self.models.ask(ResourceChoice,
-                            "将攻略地点匹配到高德实际POI，只能选pois中的id。可识别明确简称、城市前缀、同一景区别名；"
-                            "餐厅/酒店分店必须符合攻略提到的地址或总店等限定。多个同名地点没有足够依据时selected_id=null，不随意选第一个。"
-                            "用户已明确选择场馆展区时按该选择匹配高德POI；飞猪坐标不参与定位，也不能据其与高德坐标不同拒绝匹配。"
-                            "preferences是已确认的用户需求，优先使用其中明确选择的展区或地址；原攻略未写展区不代表用户后来选择无效。"
-                            "综合完整攻略引用、用户最新需求与已回答选择，区分目的地本体、分店、入口、售票处和停车场。"
-                            "多条候选本身不是查不到：证据足以唯一对应时选中实际POI，并引用具体匹配依据；仍无法区分才返回null，说明欠缺的区分信息。"
-                            "不得生成坐标或新ID；必须返回selected_id；reason说明匹配依据或歧义。"
-                            '输出形如 {"selected_id":null,"reason":"存在同名歧义"}；确认匹配时将null替换为pois中的ID，不返回POI原对象。',
-                            payload)
-                        if choice.selected_id is not None and choice.selected_id not in {row.get("id") for row in candidates}:
-                            raise ToolError("place_choice","地点匹配引用了未知POI，未采用")
-                        reason = choice.reason.strip() or ("模型匹配了候选POI，未返回匹配说明" if choice.selected_id else "模型未匹配地点，未返回原因说明")
-                        # Keep unresolved decisions too; new evidence, candidates or runs get a new key.
-                        self.amap.cache[selection_key] = (choice.selected_id,reason)
-                        selection_results[identity] = (choice.selected_id,reason)
-                        return choice.selected_id,reason
                     async with lookup_locks[key]:
-                        place = await self.amap.place(state["trip_id"],*key,selector=select)
+                        place = await self.amap.place(state["trip_id"],*key,selector=selector)
                     if identity in confirmed_choices and place and place.get("id") != confirmed_choices[identity]:
                         failures[identity] = "高德本次结果不是你已选的POI，未擅自替换"
                         place = None
@@ -2260,11 +2283,66 @@ class Planner:
                         failures.setdefault(identity,str(self.amap.cache.get(("place_issue",state["trip_id"],*key)) or "高德尚未返回唯一匹配的地点与可用坐标"))
                     return {k:place.get(k) for k in ("id","name","location","address","cityname","adname","business_area","type","evidence_id","opentime2","open_time","match_basis")} if place and coordinates(place) else None
                 except ToolError as exc:
-                    failures[identity] = str(exc)
-                    self.amap.cache[("place_issue",state["trip_id"],*key)] = str(exc)
+                    fail(identity,exc)
                     return None
-        results = await asyncio.gather(*(locate(key) for key in keys))
-        places = dict(zip(keys,results))
+
+        def fail(identity,exc):
+            failures[identity] = str(exc)
+            self.amap.cache[("place_issue",state["trip_id"],stops[identity]["city"],stops[identity]["name"])] = str(exc)
+
+        async def decide(group):
+            if len(group) == 1:
+                payload = deferred[group[0]]
+                choice = await self.models.ask(ResourceChoice,place_instruction+
+                    '输出形如 {"selected_id":null,"reason":"存在同名歧义"}；确认匹配时将null替换为pois中的ID，不返回POI原对象。',payload)
+                answers = {group[0]:choice}
+            else:
+                # Ambiguous places of one city share one judgment; short keys avoid copying long guide IDs.
+                aliases = {f"p{index}":identity for index,identity in enumerate(group,1)}
+                result = await self.models.ask(PlaceChoices,place_instruction+
+                    "places中每个键是一处独立的攻略地点，只能从该地点自己的pois中选择；每个键恰好返回一项，key原样复制。"
+                    '输出形如 {"choices":[{"key":"p1","selected_id":null,"reason":"存在同名歧义"}]}；确认匹配时将null替换为该地点pois中的ID。',
+                    {"places":{alias:{**deferred[identity],"stop_id":alias} for alias,identity in aliases.items()}})
+                answers = {}
+                for choice in result.choices:
+                    if choice.key in aliases:
+                        answers.setdefault(aliases[choice.key],choice)
+            for identity in group:
+                choice = answers.get(identity)
+                try:
+                    if choice is None:
+                        raise ToolError("place_choice","地点匹配未返回该地点的判断，未采用")
+                    record(identity,deferred[identity],choice.selected_id,choice.reason)
+                except ToolError as exc:
+                    fail(identity,exc)
+
+        async def judge(batch):
+            try:
+                await decide(batch)
+            except ToolError as exc:
+                # Model failures are not selection decisions and are never cached.
+                for identity in batch:
+                    fail(identity,exc)
+
+        async def replay(identity):
+            failures.pop(identity,None)
+            async def chosen(candidates):
+                return selection_results[identity]
+            return await lookup(identity,chosen)
+
+        async def search(identity):
+            async def selector(candidates):
+                return await first_pass(identity,candidates)
+            return await lookup(identity,selector)
+
+        places = dict(zip(keys,await asyncio.gather(*(search(identity) for identity in keys))))
+        if deferred:
+            groups = {}
+            for identity in deferred:
+                groups.setdefault(stops[identity]["city"],[]).append(identity)
+            await asyncio.gather(*(judge(members[start:start+8]) for members in groups.values() for start in range(0,len(members),8)))
+            decided = [identity for identity in deferred if identity in selection_results]
+            places.update(zip(decided,await asyncio.gather(*(replay(identity) for identity in decided))))
         result = {identity:{**stop,"map_place":preserved.get(identity) or places.get(identity)} for identity,stop in stops.items()}
         for identity,stop in result.items():
             if identity in candidate_sets:
