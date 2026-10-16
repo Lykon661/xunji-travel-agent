@@ -3,6 +3,7 @@ import hashlib
 import logging
 import os
 import re
+import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 from time import perf_counter
@@ -16,6 +17,7 @@ from pydantic import ValidationError
 
 from .adapters import ToolError, image_data, source_identity, xhs_url
 from .config import CRAWLER_REVISION, PROJECT_ROOT, settings
+from .llm import worker as model_worker
 from .crawler_control import CrawlerControl, router as crawler_router
 from .models import (AmapKeyInput, CandidateRevisionInput, CreateTrip, FlyAIKeyInput, GuideSearchInput, RequirementsSaveInput,
                      ItinerarySaveInput, LockInput, MessageInput, SelectionInput, ResourceSelectionInput,
@@ -24,7 +26,7 @@ from .model_oauth import ModelOAuthManager
 from .model_routes import router as model_router
 from .map_preview import MapPreviewConfig, router as map_router
 from .planner import Planner
-from .store import Conflict, Store, dump, now
+from .store import Conflict, Store, compact_sqlite, dump, now
 from .web import mount_frontend
 from .routing import coordinates
 from .resource_planning import recommended_hotel_areas
@@ -36,6 +38,12 @@ async def lifespan(app: FastAPI):
     started = perf_counter()
     store = Store(settings.data)
     store.recover()
+    for name in ("trips.sqlite","checkpoints.sqlite"):
+        try:
+            if reclaimed := compact_sqlite(settings.data / name):
+                logger.info("[startup] reclaimed %.1f MB of free space in %s",reclaimed/1024/1024,name)
+        except sqlite3.Error as exc:
+            logger.warning("[startup] could not compact %s: %s",name,exc)
     logger.info("[startup] database initialization and recovery: %.3fs",perf_counter()-started)
     phase = perf_counter()
     async with AsyncSqliteSaver.from_conn_string(str(settings.data / "checkpoints.sqlite")) as checkpointer:
@@ -57,6 +65,7 @@ async def lifespan(app: FastAPI):
             await asyncio.gather(control.task, return_exceptions=True)
         for identity in list(app.state.model_oauth.sessions):
             app.state.model_oauth.cancel(identity)
+        model_worker.close()
 
 
 app = FastAPI(title="循迹旅行规划",version="0.1.0",lifespan=lifespan)

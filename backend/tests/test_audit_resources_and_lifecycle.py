@@ -1,6 +1,7 @@
 """User-run regressions with synthetic trips and mocked processes; no external services."""
 import asyncio
 import copy
+import json
 import queue
 import tempfile
 import unittest
@@ -12,7 +13,7 @@ from unittest.mock import Mock, patch
 
 from app.adapters import Models
 from app.cache import AdapterCache
-from app.llm import ModelClient
+from app.llm import ModelClient, ModelWorker
 from app.models import OrderChoice, Requirements
 from app.planner import Planner
 from app.routing import transport_access_transfers
@@ -116,22 +117,41 @@ class LazyHistory(unittest.TestCase):
 
 
 class CancelModelProcess(unittest.TestCase):
-    def test_cancelled_queue_wait_kills_and_reaps_the_owned_process(self):
-        cancelled = Event()
+    def worker_process(self):
         process = Mock()
         process.poll.return_value = None
+        return process
+
+    def test_cancelled_wait_aborts_the_request_and_keeps_the_shared_worker(self):
+        cancelled = Event()
+        process = self.worker_process()
         events = Mock()
         def waiting(**kwargs):
             cancelled.set()
             raise queue.Empty()
         events.get.side_effect = waiting
-        client = ModelClient.__new__(ModelClient)
+        client, worker = ModelClient.__new__(ModelClient), ModelWorker()
         with patch("app.llm.shutil.which",return_value="node"),patch("app.llm.subprocess.Popen",return_value=process), \
-             patch("app.llm.queue.Queue",return_value=events),patch("app.llm.Thread"):
+             patch("app.llm.queue.Queue",return_value=events),patch("app.llm.Thread"),patch("app.llm.worker",worker):
             with self.assertRaises(CancelledError):
                 list(client._events({},60,cancel_event=cancelled))
-        process.kill.assert_called_once()
-        process.wait.assert_called_once()
+        written = [json.loads(call.args[0]) for call in process.stdin.write.call_args_list]
+        self.assertEqual(written[-1],{"id":written[0]["id"],"cancel":True})
+        process.kill.assert_not_called()
+        self.assertEqual(worker.pending,{})
+
+    def test_requests_share_one_process_and_an_exited_worker_is_replaced(self):
+        first,second = self.worker_process(),self.worker_process()
+        worker = ModelWorker()
+        with patch("app.llm.shutil.which",return_value="node"),patch("app.llm.subprocess.Popen",side_effect=[first,second]) as popen, \
+             patch("app.llm.Thread"):
+            worker.submit({"action":"catalog"})
+            worker.submit({"action":"catalog"})
+            self.assertEqual(popen.call_count,1)
+            first.poll.return_value = 0
+            worker.submit({"action":"catalog"})
+        self.assertEqual(popen.call_count,2)
+        self.assertIn("--worker",popen.call_args.args[0])
 
 
 class CancelPlannerRequest(unittest.IsolatedAsyncioTestCase):

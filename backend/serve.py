@@ -11,10 +11,12 @@ import traceback
 from pathlib import Path
 
 from app.service_lock import service_lock
+from app.service_log import LOG_CONFIG, rotate_log
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
 DATA.mkdir(parents=True, exist_ok=True)
+rotate_log(DATA / "server.log")
 LOG = (DATA / "server.log").open("a", encoding="utf-8", buffering=1)
 sys.stdout = sys.stderr = LOG
 
@@ -27,7 +29,7 @@ async def serve(instance: str):
     os.environ["TRAVEL_SERVER_INSTANCE"] = instance
     state_file, stop_file = DATA / "server.json", DATA / "server.stop"
     server = uvicorn.Server(uvicorn.Config(
-        "app.main:app", host="127.0.0.1", port=8000, timeout_graceful_shutdown=20,
+        "app.main:app", host="127.0.0.1", port=8000, timeout_graceful_shutdown=20, log_config=LOG_CONFIG,
     ))
     temporary = state_file.with_suffix(".tmp")
     temporary.write_text(json.dumps({"pid":os.getpid(), "instance":instance}), encoding="utf-8")

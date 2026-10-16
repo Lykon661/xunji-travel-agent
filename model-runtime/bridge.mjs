@@ -1,4 +1,7 @@
-// One request per process. Secrets arrive on stdin, never in command-line arguments.
+// One request per process, or with --worker one long-lived process multiplexing JSON lines by id.
+// Secrets arrive on stdin, never in command-line arguments.
+
+import readline from 'node:readline';
 
 import { profileCredentials } from './credential-store.mjs';
 const send = value => process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -44,10 +47,7 @@ function context(messages, model) {
   }) };
 }
 
-async function main() {
-  const chunks = [];
-  for await (const chunk of process.stdin) chunks.push(chunk);
-  const request = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+async function handle(request, send, signal) {
   let sdk, builtinModels;
   try {
     sdk = await import('@earendil-works/pi-ai');
@@ -120,6 +120,8 @@ async function main() {
   }));
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.timeout_seconds * 1000);
+  if (signal?.aborted) controller.abort();
+  signal?.addEventListener('abort', () => controller.abort(), { once: true });
   let status;
   let includeUsage = true;
   let usageReported = false;
@@ -193,4 +195,32 @@ async function main() {
   } finally { clearTimeout(timer); }
 }
 
-main().catch(error => send({ type: 'error', message: error.message || '模型接入失败。' }));
+function worker() {
+  // The SDK modules load once; each request keeps its own credentials, abort signal and events.
+  const controllers = new Map();
+  const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+  lines.on('line', line => {
+    let message;
+    try { message = JSON.parse(line); } catch { return; }
+    if (typeof message?.id !== 'string') return;
+    if (message.cancel) { controllers.get(message.id)?.abort(); return; }
+    const controller = new AbortController();
+    controllers.set(message.id, controller);
+    const reply = event => send({ ...event, id: message.id });
+    handle(message.request, reply, controller.signal)
+      .catch(error => reply({ type: 'error', message: error.message || '模型接入失败。' }))
+      .finally(() => { controllers.delete(message.id); reply({ type: 'end' }); });
+  });
+  // The Python service owns this process; a closed stdin or stdout means it has gone away.
+  lines.on('close', () => process.exit(0));
+  process.stdout.on('error', () => process.exit(0));
+}
+
+async function main() {
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  await handle(JSON.parse(Buffer.concat(chunks).toString('utf8')), send);
+}
+
+if (process.argv.includes('--worker')) worker();
+else main().catch(error => send({ type: 'error', message: error.message || '模型接入失败。' }));

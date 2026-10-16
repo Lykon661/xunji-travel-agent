@@ -6,10 +6,11 @@ import subprocess
 from concurrent.futures import CancelledError
 from dataclasses import asdict
 from functools import lru_cache
-from threading import Thread
+from threading import Lock, Thread
 from time import monotonic
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, HTTPRedirectHandler
+from uuid import uuid4
 
 from .config import PROJECT_ROOT as ROOT, Settings
 from .model_registry import ModelConfig, ModelConfigStore
@@ -67,6 +68,94 @@ def model_failure_message(error: Exception) -> str:
     return "模型调用失败，请检查模型配置或后端日志。"
 
 
+class ModelWorker:
+    """One long-lived Node bridge shared by all model calls, so the SDK is imported once.
+
+    Requests are multiplexed by id; a cancelled or timed-out request is aborted inside the
+    worker instead of killing it. A worker that exits is restarted by the next request.
+    """
+
+    def __init__(self):
+        self.lock = Lock()
+        self.process = None
+        self.pending = {}
+
+    def _start(self):
+        if self.process is not None and self.process.poll() is None:
+            return self.process
+        node = shutil.which("node")
+        if not node:
+            raise ModelRuntimeError("未找到 Node.js。请安装 Node.js 22.19 或更高版本后重启后端。")
+        process = subprocess.Popen(
+            [node, str(ROOT / "model-runtime" / "bridge.mjs"), "--worker"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, encoding="utf-8", cwd=ROOT,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        self.process = process
+        Thread(target=self._read, args=(process,), daemon=True).start()
+        return process
+
+    def _read(self, process):
+        try:
+            for line in process.stdout:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                with self.lock:
+                    entry = self.pending.get(event.get("id"))
+                if entry is not None:
+                    entry[1].put(event)
+        finally:
+            with self.lock:
+                if self.process is process:
+                    self.process = None
+                orphaned = [events for owner, events in self.pending.values() if owner is process]
+            for events in orphaned:
+                events.put(None)
+
+    def _write(self, process, message: dict):
+        process.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
+        process.stdin.flush()
+
+    def submit(self, request: dict):
+        identity, events = uuid4().hex, queue.Queue()
+        with self.lock:
+            process = self._start()
+            self.pending[identity] = (process, events)
+            try:
+                self._write(process, {"id": identity, "request": request})
+            except (OSError, ValueError) as exc:
+                self.pending.pop(identity, None)
+                raise ModelRuntimeError("模型运行进程无法接收请求，请重试；仍失败时请重启后端。") from exc
+        return identity, events
+
+    def finish(self, identity: str, cancel: bool):
+        with self.lock:
+            entry = self.pending.pop(identity, None)
+            if cancel and entry is not None and entry[0].poll() is None:
+                try:
+                    self._write(entry[0], {"id": identity, "cancel": True})
+                except (OSError, ValueError):
+                    pass
+
+    def close(self):
+        with self.lock:
+            process, self.process = self.process, None
+        if process is None or process.poll() is not None:
+            return
+        try:
+            process.stdin.close()
+            process.wait(timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
+            process.kill()
+            process.wait()
+
+
+worker = ModelWorker()
+
+
 class ModelClient:
     """Python adapter to pi-ai; each invocation uses one immutable settings snapshot."""
 
@@ -81,31 +170,10 @@ class ModelClient:
     def _events(self, request: dict, timeout: float, cancel_event=None):
         if cancel_event is not None and cancel_event.is_set():
             raise CancelledError()
-        node = shutil.which("node")
-        if not node:
-            raise ModelRuntimeError("未找到 Node.js。请安装 Node.js 22.19 或更高版本后重启后端。")
-        events = queue.Queue()
-        process = subprocess.Popen(
-            [node, str(ROOT / "model-runtime" / "bridge.mjs")],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True, encoding="utf-8", cwd=ROOT,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-
-        def read():
-            try:
-                for line in process.stdout:
-                    events.put(line)
-            finally:
-                events.put(None)
-
-        reader = Thread(target=read, daemon=True)
-        reader.start()
-        deadline = monotonic() + timeout + 10  # Include local SDK import overhead.
-        terminal = False
+        identity, events = worker.submit(request)
+        deadline = monotonic() + timeout + 10  # Include the first request's SDK import overhead.
+        terminal = finished = False
         try:
-            process.stdin.write(json.dumps(request, ensure_ascii=False))
-            process.stdin.close()
             while True:
                 if cancel_event is not None and cancel_event.is_set():
                     raise CancelledError()
@@ -113,17 +181,16 @@ class ModelClient:
                 if remaining <= 0:
                     raise ModelRuntimeError("模型请求超时。",timed_out=True)
                 try:
-                    line = events.get(timeout=min(0.1,remaining) if cancel_event is not None else remaining)
+                    event = events.get(timeout=min(0.1,remaining) if cancel_event is not None else remaining)
                 except queue.Empty as exc:
                     if cancel_event is not None and monotonic() < deadline:
                         continue
                     raise ModelRuntimeError("模型请求超时。", timed_out=True) from exc
-                if line is None:
+                if event is None:
                     break
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise ModelRuntimeError("模型运行进程返回了无效数据，请检查运行依赖。") from exc
+                if event.get("type") == "end":
+                    finished = True
+                    break
                 if event.get("type") == "error":
                     if event.get("code") == "image_not_supported":
                         raise ModelImageNotSupported("当前模型不支持图片输入。请在“模型配置”中选择支持图片的视觉模型；自定义接口需确认模型支持图片并启用该选项。")
@@ -152,13 +219,8 @@ class ModelClient:
             if not terminal:
                 raise ModelRuntimeError("模型运行进程提前结束。请确认 Node.js 版本和 model-runtime 依赖已安装。")
         finally:
-            if process.poll() is None:
-                process.kill()
-            process.wait()
-            reader.join(timeout=1)
-            process.stdout.close()
-            if not process.stdin.closed:
-                process.stdin.close()
+            # Abort an unfinished request inside the shared worker; other requests keep running.
+            worker.finish(identity, cancel=not finished)
 
     @lru_cache(maxsize=1)
     def catalog(self):

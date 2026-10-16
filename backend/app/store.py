@@ -18,6 +18,29 @@ class Conflict(Exception):
     pass
 
 
+def compact_sqlite(file: Path, min_free_ratio: float = 0.25, min_free_bytes: int = 1024 * 1024) -> int:
+    """Reclaim pages freed by deleted trips, runs and checkpoints; returns reclaimed bytes.
+
+    SQLite never shrinks a file on DELETE. Call this only at startup, before the service
+    shares the database, and only when enough of the file is free to be worth rewriting.
+    """
+    if not file.is_file():
+        return 0
+    db = sqlite3.connect(file, timeout=20)
+    try:
+        page_size = db.execute("PRAGMA page_size").fetchone()[0]
+        pages = db.execute("PRAGMA page_count").fetchone()[0]
+        free = db.execute("PRAGMA freelist_count").fetchone()[0]
+        if not pages or free / pages < min_free_ratio or free * page_size < min_free_bytes:
+            return 0
+        db.execute("VACUUM")
+        # In WAL mode the rewritten pages land in the log; checkpoint so the main file shrinks now.
+        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        return free * page_size
+    finally:
+        db.close()
+
+
 class Store:
     def __init__(self, folder: Path):
         folder.mkdir(parents=True, exist_ok=True)
