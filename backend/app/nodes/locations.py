@@ -18,7 +18,7 @@ class LocationNodes:
             candidates = list({item["id"]:item for item in stop.get("map_candidates",[]) if item.get("id")}.values())
             if coordinates(stop.get("map_place")) or stop.get("map_selected_id") or len(candidates) < 2:
                 continue
-            options = {f"{index+1}. {item['name']}（{item.get('address') or '地址未返回'}）":item["id"] for index,item in enumerate(candidates[:4])}
+            options = {f"{index+1}. {item['name']}（{item.get('address') or '地址未返回'}）":item["id"] for index,item in enumerate(candidates[:9])}
             question_id = "place-"+digest([identity,candidates])[:24]
             dates = [day["date"] for day in days if identity in day.get("stop_ids",[])]
             question = PlanningDecision(id=question_id,title="请选择具体地点",

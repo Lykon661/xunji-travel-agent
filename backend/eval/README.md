@@ -18,22 +18,22 @@
 在 `backend` 目录下运行，**先停止本机服务**（避免争用模型和高德配额）：
 
 ```bash
-.venv/Scripts/python.exe -m eval.run_ablation --mode record --variants full --repeats 1
+.venv/Scripts/python.exe -m eval.run_ablation --mode auto --out eval/runs/main
 ```
 
-先用 `full` 跑一轮，把高德和飞猪的真实返回录制到 `eval/cassettes/`。然后跑完整对比：
+默认只跑**核心集**：8 条用例（5 条地点池紧张的 `stress-*`，加 `gz-2d` 别名重复、`xa-3d` 周一闭馆、`bj-3d` 攻略天数多于行程）× 4 组 × 2 次 = 64 次，单次约 2～6 分钟，整体约 3～6 小时，可以分几次跑完。
 
-```bash
-.venv/Scripts/python.exe -m eval.run_ablation --mode auto --repeats 3 --out eval/runs/main
-```
+- 第一次跑到某个用例时，高德和飞猪的真实返回会录制到 `eval/cassettes/`，之后各组复用同一份数据。
+- 想跑全部 25 条用 `--suite all`；时间不够可先 `--repeats 1`，之后用同一个 `--out` 加 `--repeats 2` 补第二轮，已完成的会跳过。
+- 也可以按组分批：`--variants full,no_dedupe` 先跑去重对比，再跑 `--variants no_reviewer,no_code_checks`（同一个 `--out`）。
 
 - `auto`：命中录制就回放，没命中（关掉某项设计后查了新地点）才实时查询并补录。汇总末尾会给出实时查询次数。
 - `replay`：完全离线，没命中按查询失败处理。各组外部数据严格一致，但关掉设计后新出现的地点会缺少数据。
 - 中断后用同一个 `--out` 重跑，已完成的组合会被跳过。
 - 只跑部分用例：`--only gz-2d,cd-3d`；只重新生成汇总：`--report eval/runs/main`。
-- 25 条 × 4 组 × 3 次 = 300 次完整规划，耗时很长。可以先用 `--only gz-2d --repeats 1` 确认能跑通。
+- 不要用 `--mode record`：它会覆盖已有录制。
 
-运行时会自动回答规划中的追问（地点澄清选第一个候选，其余采用系统推荐），每组策略相同。超过 `--max-decisions`（默认 3）次就停下，按当时的候选判分。
+运行时会自动回答规划中的追问（地点澄清选第一个候选，其余采用系统推荐），每组策略相同。超过 `--max-decisions`（默认 8）次就停下，按当时的候选判分。
 
 ## 输出
 
@@ -67,4 +67,4 @@
 
 - `no_code_checks` 为了避免后续节点崩溃，仍会丢掉不存在的地点 ID。所以「编造地点」在这一组里不会体现为「无来源地点」。
 - 判分用的是运行结束时的需求。自动回答追问时如果放宽了步行上限，这部分不再计为违反；每次追问的内容都在 `plans/*.json` 的 `decision_history` 里。
-- 模型输出有随机性。汇总里给出了每轮违反合计的「均值±标准差」，写结论时把样本量一起写上，例如「25 条需求 × 3 次」。
+- 模型输出有随机性。汇总里给出了每轮违反合计的「均值±标准差」，写结论时把样本量一起写上，例如「8 条需求 × 2 次」。

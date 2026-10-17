@@ -226,7 +226,7 @@ class SchedulingNodes:
                     return None,"车站或机场有多个航站楼或进出站口，需要你确认"
                 if coordinates(await self.amap.place(state["trip_id"],city,name,selector=pick)) or len(found.get("hubs",[])) < 2:
                     continue
-                hubs = sorted(found["hubs"],key=lambda row:(bool(terminal) and str(terminal).upper() not in row["name"].upper(),len(row["name"])))[:5]
+                hubs = sorted(found["hubs"],key=lambda row:(bool(terminal) and str(terminal).upper() not in row["name"].upper(),len(row["name"])))[:10]
                 options = {f"{index+1}. {row['name']}（{row.get('address') or '地址未返回'}）":row["id"] for index,row in enumerate(hubs)}
                 question = PlanningDecision(id="hub-"+digest([city,name,role,list(options.values())])[:24],title="请选择"+role+"位置",
                     question=(segment["label"]+"的"+role+"地点“"+name+"”"+("（"+str(terminal)+"）" if terminal else "")+

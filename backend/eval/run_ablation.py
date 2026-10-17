@@ -181,6 +181,8 @@ async def run_all(args):
     if args.only:
         wanted = set(args.only.split(","))
         cases = [case for case in cases if case["id"] in wanted]
+    else:
+        cases = [case for case in cases if args.suite in case.get("suites", ["all"])]
     variants = [name.strip() for name in args.variants.split(",") if name.strip()]
     for name in variants:
         ablation.parse(name)
@@ -307,14 +309,16 @@ def report(out: Path):
 def main():
     parser = argparse.ArgumentParser(description="旅行规划四 Agent 消融实验")
     parser.add_argument("--cases", default=str(HERE / "cases.json"))
+    parser.add_argument("--suite", choices=("core", "all"), default="core",
+                        help="core：8 条核心用例（5 条地点池紧张 + 3 条常规陷阱），all：全部 25 条；--only 优先")
     parser.add_argument("--only", default="", help="只跑这些用例 ID，逗号分隔")
     parser.add_argument("--variants", default=",".join(VARIANTS), help="组别，逗号分隔；可组合，如 no_reviewer+no_dedupe")
-    parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--mode", choices=replay.MODES, default="auto")
     parser.add_argument("--cassettes", default=str(HERE / "cassettes"))
     parser.add_argument("--out", default="", help="结果目录；用已有目录可断点续跑")
     parser.add_argument("--timeout", type=int, default=1800, help="单次运行（含自动回答追问）的超时秒数")
-    parser.add_argument("--max-decisions", type=int, default=3, help="自动回答追问的上限")
+    parser.add_argument("--max-decisions", type=int, default=8, help="自动回答追问的上限")
     parser.add_argument("--max-resumes", type=int, default=2, help="遇到模型网络/格式错误或地图网络错误时自动继续任务的次数")
     parser.add_argument("--keep-work", action="store_true", help="保留每次运行的临时数据库")
     parser.add_argument("--report", default="", help="只根据已有结果目录重新生成汇总")

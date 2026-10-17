@@ -163,7 +163,7 @@ class InterviewQuestion(BaseModel):
     id: str = Field(min_length=1, max_length=80)
     title: str = Field(min_length=1, max_length=150)
     question: str = Field(min_length=1, max_length=1500)
-    options: list[str] = Field(default_factory=list, max_length=5)
+    options: list[str] = Field(default_factory=list, max_length=10)
     recommendation: str = Field(min_length=1, max_length=1000)
 
 
