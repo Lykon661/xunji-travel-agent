@@ -15,6 +15,8 @@ from time import perf_counter
 from weakref import WeakValueDictionary
 
 from .adapters import Amap, Crawler, FlyAI, Models, ToolError
+from pydantic import ValidationError
+
 from .models import Candidate, Requirements, RequirementUpdate, DECISION_REQUIREMENT_FIELDS, DecisionResolution
 from .rules import validate_candidate
 from .store import Conflict, now, dump
@@ -218,6 +220,13 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
             overlap = sorted(set(resolution.required_ids) & set(resolution.excluded_ids))
             if overlap:
                 issues.append({"field":"required_ids/excluded_ids","conflicting_ids":overlap})
+            try:
+                Requirements.model_validate({**state["requirements"],**{key:value for key,value in resolution.requirements.items()
+                                                                         if key in DECISION_REQUIREMENT_FIELDS}})
+            except ValidationError as exc:
+                # e.g. latest_return="2026-12-14 15:00" where HH:MM is required.
+                issues.append({"field":"requirements","invalid_values":[".".join(str(part) for part in error["loc"])+"："+error["msg"]
+                                                                        for error in exc.errors(include_url=False,include_input=False)][:5]})
             if not issues:
                 break
             # Log only the rejected keys/IDs, never the user's answer or model field values.
@@ -227,7 +236,7 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
                                                state.get("run_id"),attempt+1,dump(diagnostic))
             if attempt:
                 detail = "；".join(issue["field"]+"："+"、".join(
-                    issue.get("unknown_fields",issue.get("unknown_ids",issue.get("conflicting_ids",[])))) for issue in diagnostic)
+                    issue.get("unknown_fields",issue.get("unknown_ids",issue.get("conflicting_ids",issue.get("invalid_values",[]))))) for issue in diagnostic)
                 raise ToolError("decision_resolution","回答解析自动纠正一次后仍不符合允许范围（"+detail+"），原草稿已保留")
             self.emit(state,"decision","回答解析中出现越界字段或景点，正在按允许范围自动纠正一次")
             payload = {**payload,"previous_resolution":resolution.model_dump(mode="json"),"validation_errors":issues}

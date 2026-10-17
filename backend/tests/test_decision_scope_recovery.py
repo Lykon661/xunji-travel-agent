@@ -72,6 +72,18 @@ class DecisionScopeRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(self.answer,"\n".join(captured.output))
         self.assertEqual(result["decision_history"][-1]["answers"],{"transit":self.answer})
 
+    async def test_invalid_requirement_value_is_corrected_instead_of_crashing_the_run(self):
+        self.answer = "返程最晚下午3点到家"
+        self.planner.models.ask.side_effect = [
+            DecisionResolution(requirements={"latest_return":"2026-10-17 15:00"}),
+            DecisionResolution(requirements={"latest_return":"15:00"},explanation="最晚15:00返回")]
+        result = await self.resolve()
+        self.assertEqual(self.planner.models.ask.await_count,2)
+        self.assertEqual(result["requirements"]["latest_return"],"15:00")
+        errors = self.planner.models.ask.await_args_list[1].args[2]["validation_errors"]
+        self.assertEqual(errors[0]["field"],"requirements")
+        self.assertIn("latest_return",errors[0]["invalid_values"][0])
+
     async def test_unknown_ids_and_conflicting_marks_are_corrected_together(self):
         self.answer = "东山口必去，正佳广场不去"
         self.planner.models.ask.side_effect = [
