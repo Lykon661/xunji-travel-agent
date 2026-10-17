@@ -94,7 +94,9 @@ test.bat
 ```text
 backend/
   app/
-    planner.py          LangGraph 图定义与各节点（协调器）
+    planner.py          LangGraph 图定义、执行入口与人工确认 gate（协调器）
+    workflow/           TripState 定义；提交 / 回退 / 重开决策 / 删除等用户入口
+    nodes/              图节点实现：攻略、候选、资源、定位、日程、审查-修复循环
     agents/             四个 Agent：guide / resource / route / reviewer，共享 runtime
     reviewing.py        审查报告校验、哈希绑定、门禁判断
     rules.py            预算、时间线、日期覆盖、锁定等确定性规则
@@ -124,5 +126,4 @@ scripts/                安装、启动、停止、打包、测试脚本
 - 只在 Windows 上运行和测试过（服务锁使用 `msvcrt`，飞猪 CLI 以 `.cmd` 入口调用）。
 - 报价、库存、营业时间都是查询时刻的参考，不代表预订保证；不支持下单。
 - 审查依赖模型判断，可能误判或漏判；代码规则能拦住的只有数值、去重、日期、版本这类确定性问题。
-- `planner.py` 仍然偏大（约 3500 行），拆分计划见 [docs/DESIGN_DECISIONS.md](docs/DESIGN_DECISIONS.md#已知不足)。
 - MediaCrawler 为非商业许可，采集功能仅供个人学习使用。

@@ -22,6 +22,24 @@ FastAPI (backend/app/main.py)
 
 规划任务作为 `asyncio.Task` 在服务进程内运行（`Planner.execute`），进度写入 `events` 表，前端通过 SSE（`GET /api/runs/{id}/events`，支持 `Last-Event-ID` 续传）读取。关闭网页不影响任务。
 
+## 代码组织
+
+`Planner` 由若干按职责划分的 mixin 组合而成，方法名与调用方式不变（`self.xxx`），只是实现分散在不同文件：
+
+| 文件 | 内容 |
+|---|---|
+| [planner.py](../backend/app/planner.py) | `Planner.__init__`、图定义 `graph`、`execute()`，以及所有调用 `interrupt()` 的 gate 节点（`requirements_gate` / `guides_gate` / `decision_gate` / `interview_gate` / `selection_gate`）、`confirm_route`、`save` |
+| [workflow/state.py](../backend/app/workflow/state.py) | `TripState` 与节点到前端阶段的映射 `NODE_STAGES` |
+| [workflow/submit.py](../backend/app/workflow/submit.py) | 用户入口：`submit` / `back_to_step` / `reopen_decision` / `delete_trip` 及其版本校验 |
+| [nodes/guides.py](../backend/app/nodes/guides.py) | `coordinate`、攻略解析 `prepare_guides`、`guide_analysis`、`interview`、Agent 工具分发 `agent_tool` |
+| [nodes/candidates.py](../backend/app/nodes/candidates.py) | `discover` / `assess` / `revise_candidate` 与受影响范围计算 |
+| [nodes/resources.py](../backend/app/nodes/resources.py) | `transport` / `hotels` / `tickets`、`query_ticket_prices`、`enrich_*`、`refresh_expired_resources` |
+| [nodes/locations.py](../backend/app/nodes/locations.py) | `locate_stops`（高德定位与同名地点澄清）、天气上下文 |
+| [nodes/scheduling.py](../backend/app/nodes/scheduling.py) | `activities` / `schedule_activity_day` / `daily_order` / `movement` / `map_order` / `window` / `refresh_day_routes` |
+| [nodes/review_loop.py](../backend/app/nodes/review_loop.py) | `check` / `audit` / `assess_result` / `repair` / `review_gate` / `review_result` / `planning_failed` |
+
+把全部 `interrupt()` 留在 `planner.py`，是为了在一个文件里就能看清「流程会在哪里停下来等用户」。
+
 ## LangGraph 图
 
 图在 [planner.py](../backend/app/planner.py) `Planner.graph` 中定义。下面是实际的边（省略了少数仅用于兼容旧检查点的分支）：

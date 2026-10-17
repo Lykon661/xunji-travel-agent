@@ -64,7 +64,7 @@
 | 锁定项、必去项是否保留 | |
 | 报价是否过期、审查报告是否与当前计划匹配 | |
 
-对应代码：`check()`（[planner.py](../backend/app/planner.py)）、`check_itinerary`（[rules.py](../backend/app/rules.py)）、`confirmation_blockers`（[decisions.py](../backend/app/decisions.py)）、`duplicate_issues`。
+对应代码：`check()`（[nodes/review_loop.py](../backend/app/nodes/review_loop.py)）、`check_itinerary`（[rules.py](../backend/app/rules.py)）、`confirmation_blockers`（[decisions.py](../backend/app/decisions.py)）、`duplicate_issues`。
 
 ### 两者的结论如何合并（`Planner.audit`）
 
@@ -135,21 +135,12 @@ LangGraph 恢复 interrupt 时，**会从头重新执行包含 `interrupt()` 的
 
 下面这些问题我清楚存在，但还没有处理：
 
-1. **`planner.py` 约 3500 行**。所有图节点、资源查询、日程计算、审查循环、提交与恢复逻辑都在 `Planner` 这一个类里。原因是逐步迭代时一直往节点里加逻辑，没有及时拆分。计划的拆分方式：
-   - `workflow/submit.py`：`submit` / `back_to_step` / `reopen_decision` 等入口和校验
-   - `nodes/resources.py`：`transport` / `hotels` / `tickets` 及报价刷新
-   - `nodes/scheduling.py`：`activities` / `schedule_activity_day` / `daily_order` / `movement`
-   - `nodes/review_loop.py`：`assess_result` / `audit` / `repair`
-   - `planner.py` 只保留图的定义
+1. **修复循环不在图上**。真正的审查-修复循环是 `assess_result()`（[nodes/review_loop.py](../backend/app/nodes/review_loop.py)）里的 `while True`，它直接调用 `repair()`。这样做是因为循环需要 `backup`、`no_progress`、`diagnosed` 等局部变量，放进图里就要把它们都加入 `TripState`。代价是从图上看不到这个循环，修复轮次也没有单独的检查点。更好的做法是把循环变量放进 state，用条件边表达循环。（图上原有一条恒不触发的 `check → repair` 边，已删除。）
 
-   现有 573 个单元测试会作为拆分时的回归保护。
+2. **检验 Agent 的提示词太长**（约 80 行），其中很多是针对具体误判打的补丁，例如关于「北京路」、「16:40–17:40」的规则。这说明仍有不少本该由代码计算的判断留给了模型。方向是继续把可计算的比较移进 `review_scope`，让提示词只描述原则。
 
-2. **图上的 `check → repair` 边是死代码**。`after_check` 永远返回 `"save"`，真正的修复循环是 `assess_result()` 里的 `while True`。这样做是因为循环需要 `backup`、`no_progress`、`diagnosed` 等局部变量，放进图里就要把它们都加入 `TripState`。代价是从图上看不到这个循环，修复轮次也没有单独的检查点。正确的做法是把循环变量放进 state，用条件边表达循环，并删掉无用的 `repair` 边。
+3. **`TripState` 是一个约 50 个字段的宽松 `TypedDict`**，很多字段是任意 dict，没有 reducer。节点之间的依赖关系靠约定维持，新增字段时容易遗漏清理（例如 `revise_candidate` 需要手动重置 `repair_round`、`keep_current_plan` 等）。
 
-3. **检验 Agent 的提示词太长**（约 80 行），其中很多是针对具体误判打的补丁，例如关于「北京路」、「16:40–17:40」的规则。这说明仍有不少本该由代码计算的判断留给了模型。方向是继续把可计算的比较移进 `review_scope`，让提示词只描述原则。
+4. **只在 Windows 上运行**：服务锁使用 `msvcrt`，飞猪 CLI 通过 Windows 下的 Node 入口调用。
 
-4. **`TripState` 是一个约 50 个字段的宽松 `TypedDict`**，很多字段是任意 dict，没有 reducer。节点之间的依赖关系靠约定维持，新增字段时容易遗漏清理（例如 `revise_candidate` 需要手动重置 `repair_round`、`keep_current_plan` 等）。
-
-5. **只在 Windows 上运行**：服务锁使用 `msvcrt`，飞猪 CLI 通过 Windows 下的 Node 入口调用。
-
-6. **审查质量没有量化评估**：单元测试只验证门禁逻辑是否正确（例如「模型说 pass 但代码有阻断时，结果不能是 pass」），无法衡量检验 Agent 实际能发现多少问题。一个可行的做法是构造一批注入了已知错误的行程（重复地点、闭馆日安排、衔接时间不足），统计检出率和误报率。
+5. **审查质量没有量化评估**：单元测试只验证门禁逻辑是否正确（例如「模型说 pass 但代码有阻断时，结果不能是 pass」），无法衡量检验 Agent 实际能发现多少问题。一个可行的做法是构造一批注入了已知错误的行程（重复地点、闭馆日安排、衔接时间不足），统计检出率和误报率。
