@@ -1,7 +1,7 @@
 export interface Requirements {
   origin: string | null; cities: string[]; start_date: string | null; end_date: string | null;
   people: number | null; rooms: number | null; budget: number | null; preferences: string;
-  transport: 'any' | 'train' | 'flight'; bed_type: string; return_to_origin: boolean;
+  transport: 'any' | 'train' | 'flight'; bed_type: string; return_to_origin: boolean; self_arranged_round_trip: boolean;
   local_transport: 'public' | 'walking' | 'driving' | 'bicycling';
   origin_address?: string; children?: number; children_ages?: number[];
   earliest_departure?: string | null; latest_arrival?: string | null; latest_return?: string | null;

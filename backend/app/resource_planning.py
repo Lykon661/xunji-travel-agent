@@ -10,10 +10,10 @@ def resource_context_issues(itinerary, req):
     for index,day in enumerate(days):
         if index and day["city"] == days[index-1]["city"]:
             continue
-        if origin and origin != day["city"]:
+        if origin and origin != day["city"] and not (origin == req.get("origin") and req.get("self_arranged_round_trip")):
             expected[(origin,day["city"])] = day["date"]
         origin = day["city"]
-    if days and req.get("return_to_origin",True) and origin != req.get("origin"):
+    if days and req.get("return_to_origin",True) and origin != req.get("origin") and not req.get("self_arranged_round_trip"):
         expected[(origin,req["origin"])] = req["end_date"]
     issues = []
     for group in ("transport","hotels"):

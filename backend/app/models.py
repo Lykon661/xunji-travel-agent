@@ -46,6 +46,8 @@ class Requirements(BaseModel):
     local_transport: Literal["public", "walking", "driving", "bicycling"] = "public"
     bed_type: str = "双床房"
     return_to_origin: bool = True
+    # The user books the trip to and from the origin; only destination days and inter-city legs are planned.
+    self_arranged_round_trip: bool = False
     origin_address: str = Field(default="", max_length=200)
     children: int = Field(default=0, ge=0, le=19)
     children_ages: list[int] = Field(default_factory=list, max_length=19)

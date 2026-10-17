@@ -159,11 +159,11 @@ class ResourceNodes:
         segments = []
         origin = req["origin"]
         for day in city_starts:
-            if origin != day["city"]:
+            if origin != day["city"] and not (origin == req["origin"] and req.get("self_arranged_round_trip")):
                 ctx = {"origin":origin,"destination":day["city"],"date":day["date"]}
                 segments.append({"id":f"transport:{origin}:{day['city']}","label":origin+" → "+day["city"],"context":ctx})
             origin = day["city"]
-        if req["return_to_origin"] and origin != req["origin"]:
+        if req["return_to_origin"] and origin != req["origin"] and not req.get("self_arranged_round_trip"):
             ctx = {"origin":origin,"destination":req["origin"],"date":req["end_date"]}
             segments.append({"id":f"transport:{origin}:{req['origin']}","label":origin+" → "+req["origin"],"context":ctx})
         return segments

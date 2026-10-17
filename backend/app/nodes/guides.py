@@ -168,7 +168,7 @@ class GuideNodes:
                 change = update.model_dump(mode="json")
                 before = Requirements.model_validate(state.get("old_requirements") or req).model_dump(mode="json")
                 req = Requirements.model_validate({**req,**change["requirements"]}).model_dump(mode="json")
-                if any(before.get(k) != req.get(k) for k in ("cities","origin","start_date","end_date","people","rooms","return_to_origin","children","earliest_departure","latest_arrival","latest_return","direct_only","max_transport_hours")):
+                if any(before.get(k) != req.get(k) for k in ("cities","origin","start_date","end_date","people","rooms","return_to_origin","self_arranged_round_trip","children","earliest_departure","latest_arrival","latest_return","direct_only","max_transport_hours")):
                     change["scopes"] = ["full"]
                 if not change["scopes"]:
                     change["scopes"] = ["activity"]
@@ -202,7 +202,7 @@ class GuideNodes:
             req["excluded_stop_ids"] = sorted(set(req.get("excluded_stop_ids",[])) | removed)
         if state["mode"] == "modify" and not change.get("scopes"):
             before = Requirements.model_validate(state.get("old_requirements") or req).model_dump(mode="json")
-            changed = any(before.get(k) != req.get(k) for k in ("cities","origin","start_date","end_date","people","rooms","return_to_origin","children","earliest_departure","latest_arrival","latest_return","direct_only","max_transport_hours"))
+            changed = any(before.get(k) != req.get(k) for k in ("cities","origin","start_date","end_date","people","rooms","return_to_origin","self_arranged_round_trip","children","earliest_departure","latest_arrival","latest_return","direct_only","max_transport_hours"))
             change = {**change,"scopes":["full"] if changed else ["hotel","activity"]}
         if state["mode"] == "modify" and req.get("local_transport") != state.get("old_requirements",{}).get("local_transport","public"):
             # Local mobility applies to every affected connection, even when the model chooses a narrow scope.

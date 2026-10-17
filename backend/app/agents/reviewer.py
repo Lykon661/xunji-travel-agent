@@ -23,6 +23,7 @@ class ReviewerAgent(AgentRuntime):
             "同城的北京路与北京路步行街这类道路/步行街简称，若位置相符仍是同一游览地点，不能因POI ID不同放过跨日重复。"
             "possible_duplicate_ids只是同名同址近邻的疑点，不证明相同；对照原文与查询证据，不能凭距离合并不同POI门店。"
             "按完整时间线检查班次/接驳/进站缓冲/预约/返程和住宿覆盖、步行、预算口径。"
+            "requirements.self_arranged_round_trip=true表示出发地与目的地之间的去程、返程由用户自行安排：不检查、不查询、不追问去程返程班次、到离时刻或车站机场接驳，只规划目的地内的行程及多个目的地之间的交通。"
             "景点间衔接以review_scope.activities.transfer_timing的代码计算为准：available_minutes已扣除紧邻的午餐、休息或等待时段，"
             "route_minutes是已采用高德路线总耗时，不能重复累加其中的步行接驳和换乘；available_minutes>=route_minutes表示移动时间足够。"
             "例如预留63分钟、路线43分钟，仍剩20分钟，不能无依据判为衔接或缓冲不足。额外缓冲必须引用明确用户要求或真实班次/检票规则，"

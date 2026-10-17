@@ -56,7 +56,7 @@ let inputBaseline = ''
 const automaticRepairs = new Set<string>()
 const extraRequirements = {origin_address:'',children:0,children_ages:[] as number[],earliest_departure:null,latest_arrival:null,latest_return:null,
   max_transport_hours:null,direct_only:true,flight_cabin:'',train_seat:'',hotel_type:'',hotel_stars:'',hotel_areas:{} as Record<string,string>,max_walk_per_day:8000,walking_limit_exempt_dates:[] as string[],allow_taxi:false,required_stop_ids:[] as string[],excluded_stop_ids:[] as string[]}
-const requirements = reactive<Requirements>({origin:null,cities:[],start_date:null,end_date:null,people:null,rooms:null,budget:null,preferences:'',transport:'any',local_transport:'public',bed_type:'双床房',return_to_origin:true,...extraRequirements})
+const requirements = reactive<Requirements>({origin:null,cities:[],start_date:null,end_date:null,people:null,rooms:null,budget:null,preferences:'',transport:'any',local_transport:'public',bed_type:'双床房',return_to_origin:true,self_arranged_round_trip:false,...extraRequirements})
 const childAgeText = ref('')
 const hotelAreas = reactive<Record<string,string>>({})
 const destinationCities = computed(() => cityText.value.split(/[、,，\n]/).map(value => value.trim()).filter(Boolean))
@@ -769,7 +769,8 @@ onUnmounted(() => {events?.close();window.clearInterval(runPoll);window.removeEv
                     </div>
                     <div class="check-row">
                       <label class="checkbox-label"><input v-model="requirements.allow_taxi" type="checkbox">允许打车与打车入口</label>
-                      <label class="checkbox-label"><input v-model="requirements.return_to_origin" type="checkbox">结束后回到出发地</label>
+                      <label class="checkbox-label"><input v-model="requirements.return_to_origin" type="checkbox" :disabled="requirements.self_arranged_round_trip">结束后回到出发地</label>
+                      <label class="checkbox-label"><input v-model="requirements.self_arranged_round_trip" type="checkbox">往返交通自行安排（只规划目的地行程）</label>
                     </div>
                   </div>
 
