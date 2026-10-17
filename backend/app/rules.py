@@ -2,6 +2,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 import re
 
+from . import ablation
 from .models import Candidate, Requirements
 from .dining import is_dining
 from .places import canonicalize_stops, canonical_key, repeat_allowed, duplicate_issues
@@ -84,6 +85,8 @@ def timestamp(value, day: str) -> datetime | None:
 def merge_candidate_duplicates(candidate: Candidate, req: Requirements, stops: dict, locked_ids=()) -> Candidate:
     """Normalize a newly generated proposal; submission gates still validate the exact displayed plan."""
     candidate = candidate.model_copy(deep=True)
+    if ablation.disabled("dedupe"):
+        return candidate
     stops = canonicalize_stops(stops)
     requirements = req.model_dump(mode="json")
     locked = set(locked_ids)
@@ -126,6 +129,12 @@ def merge_candidate_duplicates(candidate: Candidate, req: Requirements, stops: d
 
 def validate_candidate(candidate: Candidate, req: Requirements, stops: dict) -> Candidate:
     stops = canonicalize_stops(stops)
+    if ablation.disabled("code_checks"):
+        # Ablation: accept the model's dates, cities and order; only drop IDs that would crash later nodes.
+        for day in candidate.days:
+            day.stop_ids = [stop_id for stop_id in dict.fromkeys(day.stop_ids)
+                            if stop_id in stops and stops[stop_id].get("city") == day.city and not is_dining(stops[stop_id])]
+        return candidate
     if not req.start_date or not req.end_date:
         raise ValueError("请先设定旅行起止日期")
     dates = [req.start_date + timedelta(days=i) for i in range((req.end_date-req.start_date).days+1)]
@@ -337,6 +346,8 @@ def check_itinerary(itinerary: dict, req: dict) -> dict:
     if total_estimate > money(req["budget"]):
         issues.append({"code":"over_budget","message":f"已知费用加各项估算 {total_estimate} 元超过预算 {money(req['budget'])} 元","target":"budget","blocking":True})
     unknown = list(dict.fromkeys(unknown))
+    if ablation.disabled("code_checks"):
+        issues = []
     return {"issues":issues,"constraint_notes":constraint_notes,"information_unknown":list(dict.fromkeys(information_unknown)),"budget":{"known_subtotal":float(known),"estimated_meals":float(estimates),
             "estimated_resources":float(estimated_resources),"estimated_tickets":float(estimated_tickets),"estimated_local_transport":float(estimated_local),
             "known_plus_estimates":float(total_estimate),"limit":req["budget"],"lines":lines,"unknown":unknown,

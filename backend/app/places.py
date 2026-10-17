@@ -4,6 +4,7 @@ import json
 import re
 import unicodedata
 
+from . import ablation
 from .routing import coordinates, distance
 
 
@@ -50,6 +51,8 @@ def street_alias(item, city=""):
 
 def place_key(item, city=""):
     place = item.get("map_place") or {}
+    if ablation.disabled("dedupe"):
+        return "source:"+str(item.get("id") or fingerprint([city,item.get("name"),item.get("source_id")])[:24])
     city = normalized(city or item.get("city") or place.get("cityname"))
     if place.get("id"):
         return "poi:"+fingerprint([city,str(place["id"])])[:24]
@@ -63,6 +66,14 @@ def place_key(item, city=""):
 
 
 def canonicalize_stops(stops):
+    if ablation.disabled("dedupe"):
+        # Ablation: every guide reference is its own place; no cross-guide identity or alias merging.
+        return {identity:{**stop,"canonical_place_id":"source:"+str(stop.get("id") or identity),"possible_duplicate_ids":[],
+                          "source_references":[{"stop_id":stop.get("id") or identity,"source_id":stop.get("source_id"),
+                                                "source_title":stop.get("source_title"),"evidence":stop.get("evidence")}],
+                          "alias_names":[stop["name"]] if stop.get("name") else [],
+                          "match_status":"resolved" if coordinates(stop.get("map_place")) else "unresolved"}
+                for identity,stop in stops.items()}
     result = {identity:{**stop,"canonical_place_id":place_key(stop),"possible_duplicate_ids":[]} for identity,stop in stops.items()}
     parents, streets = {},{}
     def root(key):
@@ -182,6 +193,8 @@ def represented_ids(items):
 
 
 def duplicate_issues(itinerary, requirements=None):
+    if ablation.disabled("dedupe") or ablation.disabled("code_checks"):
+        return []
     requirements = requirements or {}
     seen, issues = {},[]
     for item in occurrences(itinerary):

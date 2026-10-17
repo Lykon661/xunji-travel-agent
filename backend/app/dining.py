@@ -1,6 +1,7 @@
 """Guide dining places are optional recommendations, separate from sightseeing."""
 import re
 
+from . import ablation
 from .routing import coordinates, distance
 from .places import canonical_key, repeat_allowed
 
@@ -21,7 +22,8 @@ def meal_recommendations(day, stops, excluded=(), used=None, requirements=None, 
     visits = [item for item in day.get("activities", []) if item.get("kind") == "visit" and not is_dining(item)
               and coordinates(item.get("map_place"))]
     result = []
-    used = used if used is not None else set()
+    # Ablation: no trip-wide restaurant table, so lunch, dinner and later days may repeat a venue.
+    used = set() if used is None or ablation.disabled("dedupe") else used
     excluded_places = {canonical_key(stops[identity]) for identity in excluded if identity in stops}
     for meal, target in (("lunch", 12 * 60), ("dinner", 18 * 60)):
         anchors = []
@@ -58,7 +60,8 @@ def meal_recommendations(day, stops, excluded=(), used=None, requirements=None, 
             result.append({**{field: stop.get(field) for field in ("id", "name", "source_id", "source_title", "source_url", "evidence", "map_place", "opening_claim", "canonical_place_id", "source_references", "possible_duplicate_ids")},
                            "meal": meal, "nearby_activity": anchor["name"], "distance_meters": round(meters),
                            "note": "与该时段活动点直线距离不超过2公里；营业时间、道路通行和实际消费需核对"})
-            used.add(key)
+            if not ablation.disabled("dedupe"):
+                used.add(key)
             if sum(item["meal"] == meal for item in result) >= max_options:
                 break
     return result

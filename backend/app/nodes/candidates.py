@@ -3,6 +3,7 @@ import copy
 from datetime import timedelta
 from uuid import uuid4
 
+from .. import ablation
 from ..adapters import ToolError
 from ..models import Candidate, CandidateRevision, Requirements
 from ..rules import merge_candidate_duplicates, validate_candidate
@@ -96,10 +97,11 @@ class CandidateNodes:
                     self.emit(state,"candidates","已合并候选中的重复地点引用，保留全部攻略来源并继续校验")
                 candidate = validate_candidate(normalized,req,stops)
                 used = represented_ids([stops[identity] for day in candidate.days for identity in day.stop_ids])
-                if set(state.get("stop_constraints",{}).get("required",[])) - used:
-                    raise ValueError("路线遗漏用户明确必去的景点，应提出取舍问题而不是删除")
-                if used & set(state.get("stop_constraints",{}).get("excluded",[])):
-                    raise ValueError("路线包含用户明确排除的景点")
+                if not ablation.disabled("code_checks"):
+                    if set(state.get("stop_constraints",{}).get("required",[])) - used:
+                        raise ValueError("路线遗漏用户明确必去的景点，应提出取舍问题而不是删除")
+                    if used & set(state.get("stop_constraints",{}).get("excluded",[])):
+                        raise ValueError("路线包含用户明确排除的景点")
                 candidate.id = uuid4().hex
                 candidate.feasibility = {}
                 candidates.append(candidate.model_dump(mode="json"))

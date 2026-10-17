@@ -1,3 +1,4 @@
+from . import ablation
 from .agents.runtime import digest
 from .routing import coordinates, daily_route_scope, reference_opening
 from .rules import timestamp
@@ -72,6 +73,8 @@ def route_structure(itinerary):
 
 
 def confirmation_blockers(itinerary, constraints=None, requirements=None):
+    if ablation.disabled("code_checks"):
+        return []
     blockers = [issue["message"] for issue in itinerary.get("issues",[]) if issue.get("blocking")]
     if requirements:
         blockers.extend(issue["message"] for issue in resource_context_issues(itinerary,requirements))

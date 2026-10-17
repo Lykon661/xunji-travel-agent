@@ -1,0 +1,676 @@
+{
+ "version": 1,
+ "note": "日期为绝对日期以保证录制可回放；过期后整体平移日期并重新录制。traps 只说明设计意图，不参与判分。",
+ "cases": [
+  {
+   "id": "gz-2d",
+   "title": "广州两日",
+   "traps": [
+    "广州塔/小蛮腰同一地点",
+    "陈家祠/陈氏书院同一地点",
+    "北京路/北京路步行街",
+    "点都德两篇都推荐"
+   ],
+   "requirements": {
+    "origin": "武汉",
+    "cities": [
+     "广州"
+    ],
+    "start_date": "2026-12-12",
+    "end_date": "2026-12-13",
+    "people": 2,
+    "rooms": 1,
+    "budget": 4000,
+    "preferences": "喜欢岭南建筑和早茶，节奏适中",
+    "local_transport": "public"
+   },
+   "guides": [
+    {
+     "title": "广州两天一夜经典路线",
+     "city_hint": "广州",
+     "text": "Day1：上午去陈家祠看岭南建筑雕刻，大概1.5小时；中午去北京路步行街逛逛，午饭推荐点都德吃早茶点心；下午去沙面拍欧式老建筑；晚上去广州塔看夜景。\nDay2：上午永庆坊，下午红砖厂，晚上坐珠江夜游。"
+    },
+    {
+     "title": "第一次来广州这样玩不踩雷",
+     "city_hint": "广州",
+     "text": "第一天：陈氏书院（就是陈家祠）一定要去，建筑太美了。然后去北京路，千年古道遗址免费看。午餐点都德或者陶陶居。\n第二天：小蛮腰白天登塔也很值，旁边花城广场散步；下午去广东省博物馆，周一闭馆注意。晚饭陶陶居。"
+    }
+   ]
+  },
+  {
+   "id": "gz-3d-budget",
+   "title": "广州三日（预算偏紧）",
+   "traps": [
+    "预算偏紧",
+    "长隆野生动物世界与长隆动物园别名",
+    "白云山两篇重复"
+   ],
+   "requirements": {
+    "origin": "长沙",
+    "cities": [
+     "广州"
+    ],
+    "start_date": "2026-12-18",
+    "end_date": "2026-12-20",
+    "people": 2,
+    "rooms": 1,
+    "budget": 1500,
+    "preferences": "预算有限，尽量省钱",
+    "local_transport": "public"
+   },
+   "guides": [
+    {
+     "title": "广州三天穷游攻略",
+     "city_hint": "广州",
+     "text": "Day1：白云山爬山，免费入园只要缆车另付；下午上下九步行街吃小吃。\nDay2：长隆野生动物世界玩一整天，门票比较贵提前买。\nDay3：永庆坊、粤剧艺术博物馆，晚上北京路。"
+    },
+    {
+     "title": "广州亲子三日",
+     "city_hint": "广州",
+     "text": "第一天去长隆动物园（长隆野生动物世界）建议一整天。第二天白云山，下午去广州塔附近的花城广场。第三天沙面和上下九。"
+    }
+   ]
+  },
+  {
+   "id": "sz-2d",
+   "title": "深圳两日",
+   "traps": [
+    "东门老街/东门步行街",
+    "华侨城创意文化园两种叫法"
+   ],
+   "requirements": {
+    "origin": "上海",
+    "cities": [
+     "深圳"
+    ],
+    "start_date": "2026-12-12",
+    "end_date": "2026-12-13",
+    "people": 2,
+    "rooms": 1,
+    "budget": 5000,
+    "preferences": "想去海边，也想逛创意园区",
+    "local_transport": "public"
+   },
+   "guides": [
+    {
+     "title": "深圳两日城市漫游",
+     "city_hint": "深圳",
+     "text": "Day1：上午深圳湾公园骑行看海，下午华侨城创意文化园逛展，晚上东门老街吃夜宵。\nDay2：大梅沙海滨公园玩水，傍晚回市区去莲花山公园看日落。"
+    },
+    {
+     "title": "深圳周末这样玩",
+     "city_hint": "深圳",
+     "text": "第一天：OCT-LOFT华侨城创意文化园，接着世界之窗。第二天：东门步行街，然后深圳湾公园看日落，人才公园看灯光秀。"
+    }
+   ]
+  },
+  {
+   "id": "gz-sz-4d",
+   "title": "广州+深圳四日",
+   "traps": [
+    "城市顺序",
+    "攻略三天对应四天行程"
+   ],
+   "requirements": {
+    "origin": "北京",
+    "cities": [
+     "广州",
+     "深圳"
+    ],
+    "start_date": "2026-12-19",
+    "end_date": "2026-12-22",
+    "people": 2,
+    "rooms": 1,
+    "budget": 8000,
+    "preferences": "先广州后深圳，不要太累",
+    "local_transport": "public"
+   },
+   "guides": [
+    {
+     "title": "广州深圳三日联游",
+     "city_hint": "广州",
+     "text": "Day1 广州：陈家祠、北京路步行街、广州塔夜景。\nDay2 广州：沙面、永庆坊，下午坐高铁去深圳。\nDay3 深圳：世界之窗、深圳湾公园看日落。"
+    },
+    {
+     "title": "深圳一日精华",
+     "city_hint": "深圳",
+     "text": "上午莲花山公园，中午去华侨城创意文化园吃饭逛展，下午欢乐海岸，晚上深圳湾公园。"
+    }
+   ]
+  },
+  {
+   "id": "cd-3d",
+   "title": "成都三日",
+   "traps": [
+    "大熊猫繁育研究基地/熊猫基地",
+    "宽窄巷子两篇重复",
+    "陈麻婆豆腐两篇都推荐"
+   ],
+   "requirements": {
+    "origin": "杭州",
+    "cities": [
+     "成都"
+    ],
+    "start_date": "2026-12-12",
+    "end_date": "2026-12-14",
+    "people": 2,
+    "rooms": 1,
+    "budget": 5000,
+    "preferences": "一定要看熊猫，喜欢美食",
+    "local_transport": "public"
+   },
+   "guides": [
+    {
+     "title": "成都三天吃喝玩乐",
+     "city_hint": "成都",
+     "text": "Day1：成都大熊猫繁育研究基地一早去，熊猫上午最活跃；下午宽窄巷子，晚饭陈麻婆豆腐。\nDay2：武侯祠、锦里，晚上春熙路和太古里。\nDay3：人民公园喝茶，下午杜甫草堂。"
+    },
+    {
+     "title": "成都必去清单",
+     "city_hint": "成都",
+     "text": "第一天：熊猫基地（大熊猫繁育研究基地）早上8点前到。第二天：宽窄巷子、人民公园鹤鸣茶社喝茶，午饭陈麻婆豆腐。第三天：文殊院，下午东郊记忆。"
+    }
+   ]
+  },
+  {
+   "id": "cq-2d",
+   "title": "重庆两日",
+   "traps": [
+    "解放碑/解放碑步行街",
+    "磁器口/磁器口古镇",
+    "洪崖洞两篇重复"
+   ],
+   "requirements": {
+    "origin": "西安",
+    "cities": [
+     "重庆"
+    ],
+    "start_date": "2026-12-12",
+    "end_date": "2026-12-13",
+    "people": 2,
+    "rooms": 1,
+    "budget": 4000,
+    "preferences": "喜欢夜景和老街",
+    "local_transport": "public"
+   },
+   "guides": [
+    {
+     "title": "重庆两天一夜",
+     "city_hint": "重庆",
+     "text": "Day1：解放碑步行街，中午吃火锅，下午长江索道，晚上洪崖洞。\nDay2：磁器口古镇，下午鹅岭二厂。"
+    },
+    {
+     "title": "重庆夜景路线",
+     "city_hint": "重庆",
+     "text": "白天去李子坝看轻轨，再去解放碑。晚上洪崖洞和千厮门大桥看夜景。第二天去磁器口，最后南山一棵树观景台。"
+    }
+   ]
+  },
+  {
+   "id": "xa-3d",
+   "title": "西安三日（含周一）",
+   "traps": [
+    "大雁塔/大慈恩寺",
+    "兵马俑/秦始皇帝陵博物院",
+    "陕西历史博物馆周一闭馆",
+    "回民街两篇重复"
+   ],
+   "requirements": {
+    "origin": "上海",
+    "cities": [
+     "西安"
+    ],
+    "start_date": "2026-12-06",
+    "end_date": "2026-12-08",
+    "people": 2,
+    "rooms": 1,
+    "budget": 5000,
+    "preferences": "历史爱好者",
+    "local_transport": "public"
+   },
+   "guides": [
+    {
+     "title": "西安三天历史线",
+     "city_hint": "西安",
+     "text": "Day1：秦始皇帝陵博物院（兵马俑）一整天。\nDay2：陕西历史博物馆，周一闭馆要避开；下午大慈恩寺，晚上大唐不夜城。\nDay3：钟楼、回民街，下午西安城墙骑行。"
+    },
+    {
+     "title": "西安经典打卡",
+     "city_hint": "西安",
+     "text": "第一天：兵马俑。第二天：大雁塔北广场看音乐喷泉，晚上回民街吃小吃。第三天：城墙、钟楼鼓楼，下午碑林博物馆。"
+    }
+   ]
+  },
+  {
+   "id": "hz-2d",
+   "title": "杭州两日",
+   "traps": [
+    "断桥/断桥残雪",
+    "河坊街/清河坊",
+    "楼外楼两篇都推荐"
+   ],
+   "requirements": {
+    "origin": "北京",
+    "cities": [
+     "杭州"
+    ],
+    "start_date": "2026-12-12",
+    "end_date": "2026-12-13",
+    "people": 2,
+    "rooms": 1,
+    "budget": 4000,
+    "preferences": "慢节奏，喜欢湖景",
+    "local_transport": "public"
+   },
+   "guides": [
+    {
+     "title": "杭州西湖两日",
+     "city_hint": "杭州",
+     "text": "Day1：断桥残雪开始沿白堤走，中午楼外楼吃西湖醋鱼，下午雷峰塔。\nDay2：灵隐寺，下午河坊街。"
+    },
+    {
+     "title": "杭州周末慢游",
+     "city_hint": "杭州",
+     "text": "第一天：灵隐寺和飞来峰，中午楼外楼。第二天：断桥，苏堤散步，傍晚清河坊街逛吃。"
+    }
+   ]
+  },
+  {
+   "id": "sh-2d",
+   "title": "上海两日",
+   "traps": [
+    "南京路/南京路步行街",
+    "外滩两篇重复",
+    "南翔馒头店两篇都推荐"
+   ],
+   "requirements": {
+    "origin": "成都",
+    "cities": [
+     "上海"
+    ],
+    "start_date": "2026-12-12",
+    "end_date": "2026-12-13",
+    "people": 2,
+    "rooms": 1,
+    "budget": 5000,
+    "preferences": "城市漫步",
+    "local_transport": "public"
+   },
+   "guides": [
+    {
+     "title": "上海两天citywalk",
+     "city_hint": "上海",
+     "text": "Day1：外滩、南京路步行街，中午南翔馒头店，下午豫园。\nDay2：武康路、安福路，晚上陆家嘴看夜景。"
+    },
+    {
+     "title": "第一次来上海",
+     "city_hint": "上海",
+     "text": "第一天：豫园，午饭南翔馒头店，下午南京路，晚上外滩。第二天：上海博物馆，下午新天地。"
+    }
+   ]
+  },
+  {
+   "id": "sh-su-3d",
+   "title": "上海+苏州三日",
+   "traps": [
+    "城市顺序",
+    "拙政园两篇重复"
+   ],
+   "requirements": {
+    "origin": "广州",
+    "cities": [
+     "上海",
+     "苏州"
+    ],
+    "start_date": "2026-12-18",
+    "end_date": "2026-12-20",
+    "people": 2,
+    "rooms": 1,
+    "budget": 6000,
+    "preferences": "先上海后苏州",
+    "local_transport": "public"
+   },
+   "guides": [
+    {
+     "title": "上海一日",
+     "city_hint": "上海",
+     "text": "上午外滩，中午豫园，下午武康路，晚上陆家嘴。"
+    },
+    {
+     "title": "苏州两日园林",
+     "city_hint": "苏州",
+     "text": "Day1：拙政园，旁边苏州博物馆（周一闭馆），下午平江路。\nDay2：留园，下午山塘街，再去拙政园看夜游。"
+    }
+   ]
+  },
+  {
+   "id": "nj-2d",
+   "title": "南京两日（含周一）",
+   "traps": [
+    "夫子庙/夫子庙秦淮风光带",
+    "南京博物院周一闭馆",
+    "中山陵两篇重复"
+   ],
+   "requirements": {
+    "origin": "武汉",
+    "cities": [
+     "南京"
+    ],
+    "start_date": "2026-12-07",
+    "end_date": "2026-12-08",
+    "people": 2,
+    "rooms": 1,
+    "budget": 4000,
+    "preferences": "喜欢民国建筑",
+    "local_transport": "public"
+   },
+   "guides": [
+    {
+     "title": "南京两日",
+     "city_hint": "南京",
+     "text": "Day1：中山陵，下午南京博物院（周一闭馆），晚上夫子庙。\nDay2：总统府，下午老门东。"
+    },
+    {
+     "title": "南京民国风之旅",
+     "city_hint": "南京",
+     "text": "第一天：总统府、颐和路。第二天：中山陵，晚上夫子庙秦淮风光带坐船。"
+    }
+   ]
+  },
+  {
+   "id": "su-2d",
+   "title": "苏州两日（含周一）",
+   "traps": [
+    "苏州博物馆周一闭馆",
+    "平江路两篇重复",
+    "拙政园两篇重复"
+   ],
+   "requirements": {
+    "origin": "北京",
+    "cities": [
+     "苏州"
+    ],
+    "start_date": "2026-12-07",
+    "end_date": "2026-12-08",
+    "people": 2,
+    "rooms": 1,
+    "budget": 3500,
+    "preferences": "园林和老街",
+    "local_transport": "public"
+   },
+   "guides": [
+    {
+     "title": "苏州园林两日",
+     "city_hint": "苏州",
+     "text": "Day1：拙政园，苏州博物馆，下午平江路。\nDay2：留园，傍晚山塘街。"
+    },
+    {
+     "title": "苏州周末",
+     "city_hint": "苏州",
+     "text": "第一天：平江路，中午去拙政园。第二天：虎丘，下午山塘街，晚饭在平江路。"
+    }
+   ]
+  },
+  {
+   "id": "xm-3d",
+   "title": "厦门三日",
+   "traps": [
+    "中山路/中山路步行街",
+    "鼓浪屿两篇重复",
+    "曾厝垵两篇重复"
+   ],
+   "requirements": {
+    "origin": "北京",
+    "cities": [
+     "厦门"
+    ],
+    "start_date": "2026-12-12",
+    "end_date": "2026-12-14",
+    "people": 2,
+    "rooms": 1,
+    "budget": 6000,
+    "preferences": "海岛和文艺小店",
+    "local_transport": "public"
+   },
+   "guides": [
+    {
+     "title": "厦门三天",
+     "city_hint": "厦门",
+     "text": "Day1：鼓浪屿一整天。\nDay2：厦门大学、南普陀寺，下午曾厝垵。\nDay3：中山路步行街，沙坡尾。"
+    },
+    {
+     "title": "厦门两日精华",
+     "city_hint": "厦门",
+     "text": "第一天：南普陀寺、厦门大学，晚上中山路。第二天：鼓浪屿，回来去曾厝垵吃小吃。"
+    }
+   ]
+  },
+  {
+   "id": "cs-2d",
+   "title": "长沙两日",
+   "traps": [
+    "橘子洲/橘子洲头",
+    "超级文和友两篇都推荐",
+    "岳麓山两篇重复"
+   ],
+   "requirements": {
+    "origin": "上海",
+    "cities": [
+     "长沙"
+    ],
+    "start_date": "2026-12-12",
+    "end_date": "2026-12-13",
+    "people": 2,
+    "rooms": 1,
+    "budget": 3500,
+    "preferences": "美食为主",
+    "local_transport": "public"
+   },
+   "guides": [
+    {
+     "title": "长沙两天吃吃吃",
+     "city_hint": "长沙",
+     "text": "Day1：岳麓山、岳麓书院，傍晚橘子洲头看夕阳，晚上超级文和友。\nDay2：湖南省博物馆，下午太平街。"
+    },
+    {
+     "title": "长沙周末",
+     "city_hint": "长沙",
+     "text": "第一天：橘子洲，下午岳麓山。第二天：太平街，晚饭超级文和友。"
+    }
+   ]
+  },
+  {
+   "id": "wh-2d",
+   "title": "武汉两日",
+   "traps": [
+    "江汉路/江汉路步行街",
+    "黄鹤楼两篇重复",
+    "户部巷两篇重复"
+   ],
+   "requirements": {
+    "origin": "广州",
+    "cities": [
+     "武汉"
+    ],
+    "start_date": "2026-12-12",
+    "end_date": "2026-12-13",
+    "people": 2,
+    "rooms": 1,
+    "budget": 3500,
+    "preferences": "想看长江",
+    "local_transport": "public"
+   },
+   "guides": [
+    {
+     "title": "武汉两日",
+     "city_hint": "武汉",
+     "text": "Day1：黄鹤楼，下午户部巷，晚上江汉路步行街。\nDay2：湖北省博物馆，下午东湖。"
+    },
+    {
+     "title": "武汉打卡",
+     "city_hint": "武汉",
+     "text": "第一天：东湖骑行。第二天：黄鹤楼、户部巷吃早点，晚上江汉路。"
+    }
+   ]
+  },
+  {
+   "id": "qd-2d",
+   "title": "青岛两日",
+   "traps": [
+    "栈桥两篇重复",
+    "八大关两篇重复"
+   ],
+   "requirements": {
+    "origin": "北京",
+    "cities": [
+     "青岛"
+    ],
+    "start_date": "2026-12-12",
+    "end_date": "2026-12-13",
+    "people": 2,
+    "rooms": 1,
+    "budget": 3500,
+    "preferences": "海边散步",
+    "local_transport": "public"
+   },
+   "guides": [
+    {
+     "title": "青岛两天",
+     "city_hint": "青岛",
+     "text": "Day1：栈桥、劈柴院，下午信号山公园。\nDay2：八大关，下午青岛啤酒博物馆。"
+    },
+    {
+     "title": "青岛海边漫步",
+     "city_hint": "青岛",
+     "text": "第一天：八大关、第二海水浴场。第二天：栈桥，然后天主教堂，下午小鱼山。"
+    }
+   ]
+  },
+  {
+   "id": "bj-3d",
+   "title": "北京三日（攻略五天）",
+   "traps": [
+    "故宫/故宫博物院",
+    "攻略五天要压缩为三天",
+    "颐和园两篇重复",
+    "四季民福两篇都推荐"
+   ],
+   "requirements": {
+    "origin": "广州",
+    "cities": [
+     "北京"
+    ],
+    "start_date": "2026-12-12",
+    "end_date": "2026-12-14",
+    "people": 2,
+    "rooms": 1,
+    "budget": 7000,
+    "preferences": "第一次来北京",
+    "local_transport": "public"
+   },
+   "guides": [
+    {
+     "title": "北京五日深度游",
+     "city_hint": "北京",
+     "text": "Day1：天安门广场、故宫博物院，晚饭四季民福烤鸭。\nDay2：八达岭长城。\nDay3：颐和园、圆明园。\nDay4：天坛、前门大街。\nDay5：南锣鼓巷、什刹海。"
+    },
+    {
+     "title": "北京三天经典",
+     "city_hint": "北京",
+     "text": "第一天：故宫，景山公园看日落，晚饭四季民福。第二天：颐和园。第三天：南锣鼓巷、什刹海。"
+    }
+   ]
+  },
+  {
+   "id": "km-2d",
+   "title": "昆明两日",
+   "traps": [
+    "翠湖公园两篇重复",
+    "滇池/海埂大坝"
+   ],
+   "requirements": {
+    "origin": "杭州",
+    "cities": [
+     "昆明"
+    ],
+    "start_date": "2026-12-12",
+    "end_date": "2026-12-13",
+    "people": 2,
+    "rooms": 1,
+    "budget": 3500,
+    "preferences": "看红嘴鸥",
+    "local_transport": "public"
+   },
+   "guides": [
+    {
+     "title": "昆明两天看海鸥",
+     "city_hint": "昆明",
+     "text": "Day1：翠湖公园喂红嘴鸥，下午云南大学，晚上南强街。\nDay2：海埂大坝看滇池，下午云南民族村。"
+    },
+    {
+     "title": "昆明慢生活",
+     "city_hint": "昆明",
+     "text": "第一天：滇池海埂大坝，第二天翠湖公园和陆军讲武堂，下午官渡古镇。"
+    }
+   ]
+  },
+  {
+   "id": "gz-1d-walk",
+   "title": "广州一日（步行上限低）",
+   "traps": [
+    "一天塞八个地点",
+    "步行上限3000米"
+   ],
+   "requirements": {
+    "origin": "深圳",
+    "cities": [
+     "广州"
+    ],
+    "start_date": "2026-12-12",
+    "end_date": "2026-12-12",
+    "people": 1,
+    "rooms": 1,
+    "budget": 1500,
+    "preferences": "不想走太多路",
+    "local_transport": "public",
+    "max_walk_per_day": 3000
+   },
+   "guides": [
+    {
+     "title": "广州一日暴走",
+     "city_hint": "广州",
+     "text": "一天打卡：陈家祠、上下九步行街、沙面、北京路步行街、广州塔、花城广场、广东省博物馆、海心沙。"
+    }
+   ]
+  },
+  {
+   "id": "cq-cd-3d",
+   "title": "重庆+成都三日（与攻略顺序相反）",
+   "traps": [
+    "城市顺序与攻略相反",
+    "攻略只有一篇且跨两城"
+   ],
+   "requirements": {
+    "origin": "上海",
+    "cities": [
+     "重庆",
+     "成都"
+    ],
+    "start_date": "2026-12-18",
+    "end_date": "2026-12-20",
+    "people": 2,
+    "rooms": 1,
+    "budget": 6000,
+    "preferences": "先重庆再成都",
+    "local_transport": "public"
+   },
+   "guides": [
+    {
+     "title": "成渝三日",
+     "city_hint": "成都",
+     "text": "Day1 成都：宽窄巷子、人民公园。\nDay2 成都：成都大熊猫繁育研究基地，下午坐高铁去重庆。\nDay3 重庆：洪崖洞、解放碑步行街。"
+    }
+   ]
+  }
+ ]
+}

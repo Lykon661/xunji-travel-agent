@@ -24,3 +24,6 @@ external/
 .agents/
 .DS_Store
 Thumbs.db
+
+# 消融实验运行结果（录制数据 eval/cassettes 可按需提交）
+backend/eval/runs/

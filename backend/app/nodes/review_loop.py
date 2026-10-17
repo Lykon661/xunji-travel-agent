@@ -4,8 +4,9 @@ import logging
 import re
 from datetime import timedelta
 
+from .. import ablation
 from ..adapters import ToolError, default_ticket_price
-from ..models import PlanningDecision
+from ..models import REVIEW_DIMENSIONS, PlanningDecision
 from ..rules import check_itinerary, enforce_locks, resource_cost, ticket_query_required, timestamp
 from ..store import Conflict, now
 from ..routing import reference_opening
@@ -67,10 +68,15 @@ class ReviewLoopNodes:
         sources = self.selected_sources(state["trip_id"],state.get("selected_source_ids",[]))
         queries = self.store.review_queries(state["trip_id"],list(evidence_ids(itinerary)))
         basis = review_basis(state,itinerary,sources,queries)
-        try:
-            report = (await self.reviewer_agent.review(state,review_payload(state,itinerary,sources,queries))).model_dump(mode="json")
-        except ToolError as exc:
-            report = {"status":"review_unavailable","summary":"独立检验未完成："+str(exc),"checks":[],"findings":[],"question":None}
+        if ablation.disabled("reviewer"):
+            # Ablation: no independent model review; code blockers below still veto the plan.
+            report = {"status":"pass","summary":"消融实验：未运行检验 Agent","findings":[],"question":None,
+                      "checks":[{"dimension":dimension,"result":"ok","note":"消融实验未审查"} for dimension in sorted(REVIEW_DIMENSIONS)]}
+        else:
+            try:
+                report = (await self.reviewer_agent.review(state,review_payload(state,itinerary,sources,queries))).model_dump(mode="json")
+            except ToolError as exc:
+                report = {"status":"review_unavailable","summary":"独立检验未完成："+str(exc),"checks":[],"findings":[],"question":None}
         hard = confirmation_blockers(itinerary,state.get("stop_constraints"),state["requirements"])
         if hard:
             for message in hard:
@@ -370,6 +376,8 @@ class ReviewLoopNodes:
                 if old_day["date"] < state["requirements"]["start_date"] or old_day["date"] > state["requirements"]["end_date"] or old_day["city"] not in state["requirements"]["cities"]:
                     if any(a["id"] in state["locks"] for a in old_day["activities"]):
                         itinerary["issues"].append({"code":"locked_date","target":old_day["date"],"message":"锁定活动与新日期或城市冲突，请调整","blocking":True})
+        if ablation.disabled("code_checks"):
+            itinerary["issues"] = []
         if itinerary.get("personal_map") and plan_fingerprint(itinerary) != plan_fingerprint(state.get("old_itinerary") or state["itinerary"]):
             itinerary.pop("personal_map",None)
         return {"itinerary":itinerary}
