@@ -36,7 +36,7 @@ from .metrics import VIOLATIONS, evaluate
 HERE = Path(__file__).resolve().parent
 VARIANTS = {"full": "全部开启", "no_reviewer": "关掉检验 Agent", "no_dedupe": "关掉统一地点身份与全程去重",
             "no_code_checks": "关掉代码硬约束校验"}
-TRANSIENT = {"model_network", "amap_network", "amap_rate_limit", "flyai_timeout"}
+TRANSIENT = {"model_network", "model_format", "amap_network", "amap_rate_limit", "flyai_timeout"}
 RUN_LEVEL = {"decisions", "model_calls", "elapsed_seconds"}
 OUTCOMES = {"selection": "得到候选", "decision_limit": "追问超过上限", "failed": "运行失败",
             "no_candidate": "未形成候选", "timeout": "超时", "invalid_case": "用例无效"}
@@ -315,7 +315,7 @@ def main():
     parser.add_argument("--out", default="", help="结果目录；用已有目录可断点续跑")
     parser.add_argument("--timeout", type=int, default=1800, help="单次运行（含自动回答追问）的超时秒数")
     parser.add_argument("--max-decisions", type=int, default=3, help="自动回答追问的上限")
-    parser.add_argument("--max-resumes", type=int, default=2, help="遇到模型或地图网络错误时自动继续任务的次数")
+    parser.add_argument("--max-resumes", type=int, default=2, help="遇到模型网络/格式错误或地图网络错误时自动继续任务的次数")
     parser.add_argument("--keep-work", action="store_true", help="保留每次运行的临时数据库")
     parser.add_argument("--report", default="", help="只根据已有结果目录重新生成汇总")
     args = parser.parse_args()
