@@ -51,6 +51,19 @@ class ProviderPrices(unittest.TestCase):
         self.assertEqual(options[0]["departure"],"2026-10-13 08:00:00")
         self.assertEqual(options[0]["booking_url"],"https://www.fliggy.com/booking")
 
+    def test_current_cli_fare_fields_are_read_for_trains_and_flights(self):
+        segment = {"marketingTransportNo":"MU2542","depDateTime":"2026-12-12 07:20:00","arrDateTime":"2026-12-12 08:55:00",
+                   "depStationName":"天河国际机场","arrStationName":"白云国际机场","depTerm":"T3","arrTerm":"T3"}
+        context = {"date":"2026-12-12","origin":"武汉","destination":"广州"}
+        flight = normalize_resources({"status":0,"data":{"itemList":[{"ticketPrice":"350.00","jumpUrl":"https://www.fliggy.com/f",
+            "journeys":[{"journeyType":"直达","segments":[segment]}]}]}},"flight",context)
+        train = normalize_resources({"status":0,"data":{"itemList":[{"price":"415.00","jumpUrl":"https://www.fliggy.com/t",
+            "journeys":[{"journeyType":"直达","segments":[{**segment,"marketingTransportNo":"G1009"}]}]}]}},"train",context)
+        for options,name,price in ((flight,"MU2542",350),(train,"G1009",415)):
+            self.assertEqual(len(options),1)
+            self.assertEqual((options[0]["name"],options[0]["price"],options[0]["price_basis"]),(name,price,"person_segment"))
+            self.assertEqual((options[0]["departure"],options[0]["arrival_place"]),("2026-12-12 07:20:00","白云国际机场"))
+
     def test_wrong_date_adult_price_is_not_attached_to_a_route(self):
         payload = {"adultPrice":"¥100","journeys":[{"segments":[{"marketingTransportNo":"G1","depDateTime":"2026-10-12 08:00:00"}]}]}
         self.assertEqual(normalize_resources(payload,"train",{"date":"2026-10-13"}),[])

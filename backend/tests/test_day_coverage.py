@@ -448,6 +448,21 @@ class DailyCoverage(unittest.IsolatedAsyncioTestCase):
         issues = check_itinerary({"days":[scheduled]},REQ)["issues"]
         self.assertFalse(any(i["code"] in {"overlap","move_gap","lunch_missing"} for i in issues))
 
+    async def test_two_hour_visit_straddling_noon_takes_lunch_before_it(self):
+        # try4: 09:00 visit, then a 120-minute visit 11:15-13:15 matched none of the before/within/after rules.
+        state = self.state({"a":stop("a",90),"b":stop("b",120),"c":stop("c",60)},["a","b","c"])
+        self.planner.movement = AsyncMock(return_value=({"minutes":25,"mode":"transit"},None))
+        window = (540,1200,[],[],{"name":None,"start_name":None,"label":"结束当天安排"})
+        scheduled = await self.planner.schedule_activity_day(state,state["selected_route"]["days"][0],
+            OrderChoice(stop_ids=["a","b","c"]),set(),window,{})
+        lunch = next(a for a in scheduled["activities"] if a.get("meal") == "lunch")
+        visit = next(a for a in scheduled["activities"] if a["id"] == "b")
+        self.assertEqual((lunch["start"],lunch["end"]),("11:30","12:30"))
+        self.assertEqual((visit["start"],visit["end"]),("12:55","14:55"))
+        self.assertEqual([a["id"] for a in scheduled["activities"] if a["kind"] == "visit"],["a","b","c"])
+        issues = check_itinerary({"days":[scheduled]},REQ)["issues"]
+        self.assertFalse(any(i["code"] in {"overlap","move_gap","lunch_missing"} for i in issues))
+
     async def test_model_start_time_does_not_protect_an_impossible_optional_duration(self):
         state = self.state({"park":stop("park",660)},["park"])
         window = (540,1200,[],[],{"name":None,"start_name":None,"label":"结束当天安排"})

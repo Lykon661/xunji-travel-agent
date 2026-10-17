@@ -134,6 +134,18 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
         if answer.get("round_id") != token or answer.get("draft_revision") != state.get("draft_revision",0) or set(values) != {question["id"]} or not values[question["id"]].strip() or answer.get("confirm"):
             raise Conflict("问题或草稿已变化，请只回答当前这一题")
         selection = state.get("place_selection") or {}
+        if selection.get("kind") == "hub" and selection.get("question_id") == question["id"]:
+            poi_id = selection["options"].get(values[question["id"]].strip())
+            if not poi_id:
+                raise Conflict("请从列出的航站楼或进出站口中选择一个")
+            summary = "已选择"+values[question["id"]]+"作为"+selection["name"]+"的接驳位置，重新查询接驳路线"
+            history = [*history,{"questions":[question],"answers":values,"note":answer.get("note",""),"summary":summary,
+                                 "hub_selection":{"city":selection["city"],"name":selection["name"],"poi_id":poi_id}}]
+            # Re-run the full assessment so transfers, day start times and reviews all use the chosen hub.
+            return {"decision_history":history,"decision":{},"place_selection":{},"decision_reopened":False,
+                    "assessment_dates":[],"assessment_base":"","repair_only":False,"repair_round":0,"review_feedback":[],
+                    "draft_revision":state.get("draft_revision",0)+1,"keep_current_plan":False,
+                    "interview":{"summary":summary,"questions":[],"history":history,"confirmed":False}}
         poi_id = ((selection.get("options") or {}).get(values[question["id"]])
                   if selection.get("question_id") == question["id"] and not answer.get("note","").strip() else None)
         if poi_id:

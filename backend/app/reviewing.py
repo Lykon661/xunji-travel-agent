@@ -121,8 +121,42 @@ def review_scope(itinerary,queries=()):
                 "ticket_assumed_free":bool(quote.get("assumed_free")),
                 "ticket_candidates_only":quote.get("status") == "place_confirmation" and (quote.get("price") is None or quote.get("assumed_free"))
                     and not quote.get("options") and not activity.get("product")})
+    def clock(value):
+        return f"{value//60:02d}:{value%60:02d}" if isinstance(value,int) else None
+
+    def connections(day):
+        """Code-computed intercity timing so the reviewer does not re-derive station buffers."""
+        result = []
+        visits = [item for item in day.get("activities",[]) if item.get("kind") == "visit"]
+        for entry in itinerary.get("transport",[]):
+            selected, ctx = entry.get("selected") or {},entry.get("context") or {}
+            if ctx.get("date") != day["date"]:
+                continue
+            buffer = entry.get("buffer_minutes",60)
+            if ctx.get("origin") == day["city"] and selected.get("departure"):
+                departure = minutes(str(selected["departure"])[11:16])
+                planned = minutes(day.get("return_end")) if (day.get("return_move") or {}).get("minutes") is not None else None
+                latest = departure-buffer if departure is not None else None
+                result.append({"direction":"departure","label":entry.get("label"),"station":selected.get("departure_place"),
+                    "departure":clock(departure),"station_buffer_minutes":buffer,"latest_station_arrival":clock(latest),
+                    "last_activity_end":visits[-1].get("end") if visits else None,
+                    "route_minutes":(day.get("return_move") or {}).get("minutes"),"planned_station_arrival":clock(planned),
+                    "slack_minutes":latest-planned if latest is not None and planned is not None else None,
+                    "within_station_buffer":planned <= latest if latest is not None and planned is not None else None})
+            if ctx.get("destination") == day["city"] and selected.get("arrival") and visits:
+                arrival = minutes(str(selected["arrival"])[11:16])
+                move = visits[0].get("move_before") or {}
+                first = minutes(visits[0].get("start"))
+                ready = arrival+60+move["minutes"] if arrival is not None and move.get("minutes") is not None else None
+                result.append({"direction":"arrival","label":entry.get("label"),"station":selected.get("arrival_place"),
+                    "arrival":clock(arrival),"exit_buffer_minutes":60,"route_minutes":move.get("minutes"),
+                    "first_activity":visits[0].get("name"),"first_activity_start":visits[0].get("start"),
+                    "slack_minutes":first-ready if first is not None and ready is not None else None,
+                    "within_exit_buffer":first >= ready if first is not None and ready is not None else None})
+        return result
+
     return {"days":[{"date":day["date"],"weekday":"星期"+"一二三四五六日"[date.fromisoformat(day["date"]).weekday()],
-                     **daily_route_scope(itinerary,day)} for day in itinerary.get("days",[])],
+                     **daily_route_scope(itinerary,day),"transport_connections":connections(day)} for day in itinerary.get("days",[])],
             "activities":activities,
             "budget_status":itinerary.get("budget",{}).get("status"),
             "unknown_costs_are_excluded":bool(itinerary.get("budget",{}).get("unknown")),

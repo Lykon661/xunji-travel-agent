@@ -438,7 +438,9 @@ def normalize_resources(payload, kind: str, context: dict) -> list[dict]:
         joined = []
         for item in list(rows):
             journeys = item.get("journeys")
-            if item.get("adultPrice") is None or not isinstance(journeys,list) or len(journeys) != 1:
+            # Older CLI builds return adultPrice; current ones return ticketPrice (flight) or price (train), all per adult.
+            fare = first(item,"adultPrice","ticketPrice","price")
+            if fare is None or not isinstance(journeys,list) or len(journeys) != 1:
                 continue
             segments = journeys[0].get("segments",[]) if isinstance(journeys[0],dict) else []
             if not segments or any(not isinstance(segment,dict) for segment in segments):
@@ -447,7 +449,7 @@ def normalize_resources(payload, kind: str, context: dict) -> list[dict]:
             if str(departure.get("depDateTime",""))[:10] != context.get("date"):
                 continue
             joined.append({"name":" → ".join(str(segment.get("marketingTransportNo") or segment.get("transportNo") or "") for segment in segments),
-                "ticketPrice":item["adultPrice"],"priceBasis":"person_segment","currency":item.get("currency") or "CNY",
+                "ticketPrice":fare,"priceBasis":"person_segment","currency":item.get("currency") or "CNY",
                 "departureTime":departure.get("depDateTime"),"arrivalTime":arrival.get("arrDateTime"),
                 "departureStation":departure.get("depStationName"),"arrivalStation":arrival.get("arrStationName"),
                 "bookingUrl":item.get("jumpUrl"),"seatClassName":departure.get("seatClassName"),

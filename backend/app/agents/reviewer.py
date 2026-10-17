@@ -26,6 +26,8 @@ class ReviewerAgent(AgentRuntime):
             "景点间衔接以review_scope.activities.transfer_timing的代码计算为准：available_minutes已扣除紧邻的午餐、休息或等待时段，"
             "route_minutes是已采用高德路线总耗时，不能重复累加其中的步行接驳和换乘；available_minutes>=route_minutes表示移动时间足够。"
             "例如预留63分钟、路线43分钟，仍剩20分钟，不能无依据判为衔接或缓冲不足。额外缓冲必须引用明确用户要求或真实班次/检票规则，"
+            "城际班次衔接以review_scope.days.transport_connections为准：slack_minutes已扣除station_buffer_minutes（进站/值机）或exit_buffer_minutes（出站），"
+            "within_station_buffer或within_exit_buffer为true即衔接成立，不能再次扣除进站时间后判为不足。"
             "普通实时交通不确定性只提示warning，不凭空添加最低缓冲要求。预留很长不等于冲突，未选具体船班也不能凭空设置登船截止时刻。"
             "完整游览日应有60分钟午餐预留：activities中meal=lunch的rest是独立午餐时段，"
             "visit.meal_break是全天园区内部用餐，已计入该活动总时长，不能当作活动重叠或重复地点，也不能再次加60分钟。"

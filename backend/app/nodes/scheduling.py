@@ -5,10 +5,11 @@ import re
 from datetime import date
 
 from ..adapters import ToolError, map_link, navigation_link
-from ..models import OrderChoice, Requirements
+from ..models import OrderChoice, PlanningDecision, Requirements
 from ..rules import enforce_locks, timestamp, walking_limit
 from ..routing import coordinates, daily_route_scope, daily_movements, transport_access_transfers, distance, early_finish, geographic_order, reference_opening
 from ..resource_planning import chosen_hotel, comparison
+from ..agents.runtime import digest
 from ..agents.route import resolve_stop_id
 from ..dining import is_dining, meal_recommendations, refresh_meals
 from ..places import canonicalize_stops, canonical_key, planning_stop_pool, repeat_allowed, represented_ids
@@ -178,6 +179,63 @@ class SchedulingNodes:
             self.emit(state,"activities","正在修正路线 Agent 返回的活动范围")
             payload = {**payload,"previous_order":order.model_dump(mode="json"),"validation_error":"；".join(problems),
                        "reference_correction":{"invalid_ids":sorted(invalid),"allowed_stop_ids":sorted(available)}}
+
+    @staticmethod
+    def hub_rows(city,name,rows):
+        """AMap airport/railway POIs for one provider hub name: the main building, terminals, halls and gates."""
+        prefix = city.removesuffix("市")
+        base = name.removeprefix(prefix).removeprefix("市")
+        return [row for row in rows if row.get("id") and str(row.get("typecode","")).startswith(("1501","1502"))
+                and str(row.get("name","")).removeprefix(prefix).removeprefix("市").startswith(base)]
+
+    async def resolve_hubs(self,state,itinerary):
+        """Pin each routed station or airport to one AMap POI, or return a question instead of guessing a terminal.
+
+        Exact unique names and the flight's own terminal resolve automatically; the user's earlier choice is reused.
+        Pinned places stay in the AMap place cache, so every later lookup by the same name uses them.
+        """
+        req = state["requirements"]
+        chosen = {(entry["hub_selection"]["city"],entry["hub_selection"]["name"]):entry["hub_selection"]["poi_id"]
+                  for entry in state.get("decision_history",[]) if entry.get("hub_selection")}
+        for segment in itinerary.get("transport",[]):
+            selected, ctx = segment.get("selected") or {},segment["context"]
+            for role,city,name,terminal in (("到达",ctx["destination"],selected.get("arrival_place"),selected.get("arrival_terminal")),
+                                            ("出发",ctx["origin"],selected.get("departure_place"),selected.get("departure_terminal"))):
+                # The origin city's hub is only routed when the user gave a home address there.
+                if not name or city == req["origin"] and not req.get("origin_address"):
+                    continue
+                if (city,name) in chosen:
+                    async def keep(candidates,poi_id=chosen[(city,name)]):
+                        return ((poi_id,"你在需求追问中选择的到达或出发位置") if any(row.get("id") == poi_id for row in candidates)
+                                else (None,"已选位置不在当前高德候选中"))
+                    await self.amap.place(state["trip_id"],city,name,selector=keep)
+                    continue
+                if coordinates(await self.amap.place(state["trip_id"],city,name)):
+                    continue
+                found = {}
+                async def pick(candidates,city=city,name=name,terminal=terminal,found=found):
+                    hubs = found["hubs"] = self.hub_rows(city,name,candidates)
+                    if terminal:
+                        matched = [row for row in hubs if str(terminal).upper() in str(row["name"]).upper()]
+                        plain = [row for row in matched if not re.search(r"[(（]",row["name"])]
+                        for group in (plain,matched):
+                            if len(group) == 1:
+                                return group[0]["id"],"按班次航站楼"+str(terminal)+"唯一匹配"
+                    if len(hubs) == 1:
+                        return hubs[0]["id"],"车站或机场唯一匹配"
+                    return None,"车站或机场有多个航站楼或进出站口，需要你确认"
+                if coordinates(await self.amap.place(state["trip_id"],city,name,selector=pick)) or len(found.get("hubs",[])) < 2:
+                    continue
+                hubs = sorted(found["hubs"],key=lambda row:(bool(terminal) and str(terminal).upper() not in row["name"].upper(),len(row["name"])))[:6]
+                options = {f"{index+1}. {row['name']}（{row.get('address') or '地址未返回'}）":row["id"] for index,row in enumerate(hubs)}
+                question = PlanningDecision(id="hub-"+digest([city,name,role,list(options.values())])[:24],title="请选择"+role+"位置",
+                    question=(segment["label"]+"的"+role+"地点“"+name+"”"+("（"+str(terminal)+"）" if terminal else "")+
+                              "在高德有多个航站楼或进出站口，不能唯一对应。你会从哪个位置"+role+"？")[:1500],
+                    options=list(options),recommendation="按机票或车票上的航站楼、进出站口选择。",
+                    why_needed="接驳路线需要明确的起终点才能查询真实耗时，系统不会替你猜测航站楼或入口。",
+                    affected_dates=[ctx["date"]]).model_dump(mode="json")
+                return {"decision":question,"place_selection":{"kind":"hub","question_id":question["id"],"city":city,"name":name,"options":options}}
+        return None
 
     async def movement(self,state,city,origin_name,destination_name,origin_place=None,destination_place=None):
         mode = Requirements.model_validate(state["requirements"]).local_transport
@@ -353,6 +411,13 @@ class SchedulingNodes:
                     duration += 60
                 if lunch is None and 11*60+30 <= visit_start+duration <= 13*60:
                     lunch, lunch_position = meal(visit_start+duration),"after"
+                # A shorter visit straddling 13:00 fits neither inside nor after lunch; eat first and start it later.
+                if lunch is None and visit_start < 13*60 < visit_start+duration:
+                    lunch_start = max(current,11*60+30)
+                    proposed = max(lunch_start+60+travel,earliest)
+                    if lunch_start+60 <= 14*60 and (appointment_minutes is None or proposed <= appointment_minutes):
+                        lunch, lunch_position = meal(lunch_start),"before"
+                        visit_start = proposed
             tail_move = (await self.movement(state,city,stop["name"],tail["name"],origin_place=place,destination_place=tail.get("end_place")))[0] if tail["name"] else {}
             tail_minutes = tail_move.get("minutes") if tail_move.get("minutes") is not None else tail_move.get("estimate_minutes",0)
             duration_adjustment = ""
@@ -485,6 +550,8 @@ class SchedulingNodes:
         weather = state.get("weather",{}) if repair_dates is not None else await self.weather_context(state)
         state = {**state,"stops":stops,"weather":weather}
         if clarification := self.place_clarification(stops,active_ids,state["selected_route"]["days"]):
+            return {"itinerary":copy.deepcopy(state["itinerary"]),"stops":stops,"weather":weather,"decision_resume":"assess",**clarification}
+        if clarification := await self.resolve_hubs(state,state["itinerary"]):
             return {"itinerary":copy.deepcopy(state["itinerary"]),"stops":stops,"weather":weather,"decision_resume":"assess",**clarification}
         req, itinerary = state["requirements"],copy.deepcopy(state["itinerary"])
         for entry in itinerary.get("transport",[]):
@@ -650,6 +717,7 @@ class SchedulingNodes:
 
     async def refresh_day_routes(self,state,itinerary,dates=None,refresh_routes=True,missing_only=False):
         # Locks and repairs can change predecessors. Re-query those legs without changing locked timestamps.
+        await self.resolve_hubs(state,itinerary)
         meal_dates = set(dates) if dates is not None else None
         mobility = Requirements.model_validate(state["requirements"]).local_transport
         allowed_modes = {"walking","transit"} if mobility == "public" else {mobility}

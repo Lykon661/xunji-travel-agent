@@ -324,3 +324,15 @@ class ReviewCorrection(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(tail["start_name"])
         self.assertIsNone(tail["name"])
         planner.movement.assert_not_awaited()
+
+
+class TransportConnectionFacts(unittest.TestCase):
+    def test_departure_slack_already_includes_the_station_buffer(self):
+        from app.reviewing import review_scope
+        itinerary = {"transport":[{"label":"广州 → 武汉","buffer_minutes":60,"context":{"origin":"广州","destination":"武汉","date":"2026-12-13"},
+                                   "selected":{"departure":"2026-12-13 17:03:00","departure_place":"广州南站"}}],
+                     "days":[{"date":"2026-12-13","city":"广州","return_end":"15:47","return_move":{"minutes":47},
+                              "activities":[{"kind":"visit","name":"广州塔","start":"14:25","end":"14:40"}]}]}
+        connection = review_scope(itinerary)["days"][0]["transport_connections"][0]
+        self.assertEqual((connection["latest_station_arrival"],connection["slack_minutes"],connection["within_station_buffer"]),
+                         ("16:03",16,True))
