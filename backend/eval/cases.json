@@ -1,6 +1,6 @@
 {
  "version": 1,
- "note": "日期为绝对日期以保证录制可回放；过期后整体平移日期并重新录制。traps 只说明设计意图，不参与判分。 suites：core 为默认核心集（8 条），all 为全部 25 条。",
+ "note": "日期为绝对日期以保证录制可回放；过期后整体平移日期并重新录制。traps 只说明设计意图，不参与判分。 suites：core 为默认核心集（8 条），all 为全部 25 条。 所有用例都设 self_arranged_round_trip=true：往返交通由用户自行安排，只评测目的地内的行程规划。",
  "cases": [
   {
    "id": "gz-2d",
@@ -22,7 +22,8 @@
     "rooms": 1,
     "budget": 4000,
     "preferences": "喜欢岭南建筑和早茶，节奏适中",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -60,7 +61,8 @@
     "rooms": 1,
     "budget": 1500,
     "preferences": "预算有限，尽量省钱",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -96,7 +98,8 @@
     "rooms": 1,
     "budget": 5000,
     "preferences": "想去海边，也想逛创意园区",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -133,7 +136,8 @@
     "rooms": 1,
     "budget": 8000,
     "preferences": "先广州后深圳，不要太累",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -170,7 +174,8 @@
     "rooms": 1,
     "budget": 5000,
     "preferences": "一定要看熊猫，喜欢美食",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -207,7 +212,8 @@
     "rooms": 1,
     "budget": 4000,
     "preferences": "喜欢夜景和老街",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -245,7 +251,8 @@
     "rooms": 1,
     "budget": 5000,
     "preferences": "历史爱好者",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -283,7 +290,8 @@
     "rooms": 1,
     "budget": 4000,
     "preferences": "慢节奏，喜欢湖景",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -320,7 +328,8 @@
     "rooms": 1,
     "budget": 5000,
     "preferences": "城市漫步",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -357,7 +366,8 @@
     "rooms": 1,
     "budget": 6000,
     "preferences": "先上海后苏州",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -394,7 +404,8 @@
     "rooms": 1,
     "budget": 4000,
     "preferences": "喜欢民国建筑",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -431,7 +442,8 @@
     "rooms": 1,
     "budget": 3500,
     "preferences": "园林和老街",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -468,7 +480,8 @@
     "rooms": 1,
     "budget": 6000,
     "preferences": "海岛和文艺小店",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -505,7 +518,8 @@
     "rooms": 1,
     "budget": 3500,
     "preferences": "美食为主",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -542,7 +556,8 @@
     "rooms": 1,
     "budget": 3500,
     "preferences": "想看长江",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -578,7 +593,8 @@
     "rooms": 1,
     "budget": 3500,
     "preferences": "海边散步",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -616,7 +632,8 @@
     "rooms": 1,
     "budget": 7000,
     "preferences": "第一次来北京",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -653,7 +670,8 @@
     "rooms": 1,
     "budget": 3500,
     "preferences": "看红嘴鸥",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -690,7 +708,8 @@
     "budget": 1500,
     "preferences": "不想走太多路",
     "local_transport": "public",
-    "max_walk_per_day": 3000
+    "max_walk_per_day": 3000,
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -722,7 +741,8 @@
     "rooms": 1,
     "budget": 6000,
     "preferences": "先重庆再成都",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -754,7 +774,8 @@
     "rooms": 1,
     "budget": 8000,
     "preferences": "每天都想安排满，每天至少三个景点，不要留空白时间",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -792,7 +813,8 @@
     "rooms": 1,
     "budget": 8000,
     "preferences": "每天都想安排满，每天至少三个景点，不要留空白时间",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -830,7 +852,8 @@
     "rooms": 1,
     "budget": 8000,
     "preferences": "每天都想安排满，每天至少三个景点，不要留空白时间",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -868,7 +891,8 @@
     "rooms": 1,
     "budget": 8000,
     "preferences": "每天都想安排满，每天至少三个景点，不要留空白时间",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {
@@ -906,7 +930,8 @@
     "rooms": 1,
     "budget": 10000,
     "preferences": "每天都想安排满，每天至少三个景点，不要留空白时间",
-    "local_transport": "public"
+    "local_transport": "public",
+    "self_arranged_round_trip": true
    },
    "guides": [
     {

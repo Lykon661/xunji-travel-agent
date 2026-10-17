@@ -10,6 +10,7 @@
 模型、高德、飞猪配置沿用 backend/data 中现有设置。结果逐行追加到 results.jsonl，中断后用同一 --out 重跑会跳过已完成的组合。
 """
 import argparse
+import re
 import asyncio
 import csv
 import json
@@ -36,6 +37,7 @@ from .metrics import VIOLATIONS, evaluate
 HERE = Path(__file__).resolve().parent
 VARIANTS = {"full": "全部开启", "no_reviewer": "关掉检验 Agent", "no_dedupe": "关掉统一地点身份与全程去重",
             "no_code_checks": "关掉代码硬约束校验"}
+UNAVAILABLE = re.compile(r"额度|重新登录|模型权限")
 TRANSIENT = {"model_network", "model_format", "amap_network", "amap_rate_limit", "flyai_timeout"}
 RUN_LEVEL = {"decisions", "model_calls", "elapsed_seconds"}
 OUTCOMES = {"selection": "得到候选", "decision_limit": "追问超过上限", "failed": "运行失败",
@@ -160,6 +162,8 @@ async def run_one(case, variant, repeat, out, cassette, args):
             if undo:
                 undo()
             cassette.flush()
+    if row["outcome"] in {"failed", "no_candidate"} and UNAVAILABLE.search(row["error"]):
+        row["outcome"] = "model_unavailable"
     row["elapsed_seconds"] = round(perf_counter() - started, 1)
     row["model_seconds"] = round(row["model_seconds"], 1)
     row["replay"] = {key: value - before.get(key, 0) for key, value in cassette.stats.items()}
@@ -194,6 +198,7 @@ async def run_all(args):
                                                 ensure_ascii=False, indent=1), encoding="utf-8")
     total = len(cases) * len(variants) * args.repeats
     finished = len(done)
+    unavailable = 0
     try:
         # 先按重复轮次、再按用例交替各组，时间漂移（模型服务负载、未命中的实时查询）对各组影响相同。
         for repeat in range(1, args.repeats + 1):
@@ -204,12 +209,25 @@ async def run_all(args):
                         continue
                     print(f"[{finished + 1}/{total}] {case['id']} · {variant} · 第{repeat}次 ...", flush=True)
                     row = await run_one(case, variant, repeat, out, cassette, args)
+                    if row["outcome"] == "model_unavailable":
+                        # 额度或登录问题不是规划结果：不写入，续跑时会重新执行这一组合。
+                        unavailable += 1
+                        print(f"    → 模型不可用（{row['error'][:80]}），本次不记录", flush=True)
+                        if unavailable >= 2:
+                            print("连续两次模型不可用，已停止本批。恢复额度或重新登录后，用同一个 --out 续跑。", flush=True)
+                            break
+                        continue
+                    unavailable = 0
                     with results.open("a", encoding="utf-8") as output:
                         output.write(json.dumps(row, ensure_ascii=False) + "\n")
                     finished += 1
                     print(f"    → {OUTCOMES.get(row['outcome'], row['outcome'])}，违反 {row.get('total_violations', '-')}，"
                           f"可确认 {row.get('confirmable', '-')}，模型调用 {row['model_calls']} 次，用时 {row['elapsed_seconds']}s"
                           + (f"，错误：{row['error']}" if row["error"] else ""), flush=True)
+                if unavailable >= 2:
+                    break
+            if unavailable >= 2:
+                break
     finally:
         model_worker.close()
     report(out)
