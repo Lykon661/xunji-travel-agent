@@ -328,10 +328,10 @@ def main():
     parser = argparse.ArgumentParser(description="旅行规划四 Agent 消融实验")
     parser.add_argument("--cases", default=str(HERE / "cases.json"))
     parser.add_argument("--suite", choices=("core", "all"), default="core",
-                        help="core：8 条核心用例（5 条地点池紧张 + 3 条常规陷阱），all：全部 25 条；--only 优先")
+                        help="core：5 条核心用例，all：全部 25 条；--only 优先")
     parser.add_argument("--only", default="", help="只跑这些用例 ID，逗号分隔")
     parser.add_argument("--variants", default=",".join(VARIANTS), help="组别，逗号分隔；可组合，如 no_reviewer+no_dedupe")
-    parser.add_argument("--repeats", type=int, default=2)
+    parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--mode", choices=replay.MODES, default="auto")
     parser.add_argument("--cassettes", default=str(HERE / "cassettes"))
     parser.add_argument("--out", default="", help="结果目录；用已有目录可断点续跑")

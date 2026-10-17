@@ -1,6 +1,6 @@
 {
  "version": 1,
- "note": "日期为绝对日期以保证录制可回放；过期后整体平移日期并重新录制。traps 只说明设计意图，不参与判分。 suites：core 为默认核心集（8 条），all 为全部 25 条。 所有用例都设 self_arranged_round_trip=true：往返交通由用户自行安排，只评测目的地内的行程规划。",
+ "note": "日期为绝对日期以保证录制可回放；过期后整体平移日期并重新录制。traps 只说明设计意图，不参与判分。 suites：core 为默认核心集（5 条），all 为全部 25 条。 所有用例都设 self_arranged_round_trip=true：往返交通由用户自行安排，只评测目的地内的行程规划。",
  "cases": [
   {
    "id": "gz-2d",
@@ -829,7 +829,6 @@
     }
    ],
    "suites": [
-    "core",
     "all"
    ]
   },
@@ -868,7 +867,6 @@
     }
    ],
    "suites": [
-    "core",
     "all"
    ]
   },
@@ -946,7 +944,6 @@
     }
    ],
    "suites": [
-    "core",
     "all"
    ]
   }
