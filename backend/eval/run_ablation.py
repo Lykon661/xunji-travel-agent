@@ -147,12 +147,18 @@ async def run_one(case, variant, repeat, out, cassette, args):
             doc = store.trip(trip["id"])["document"]
             candidate = (doc.get("candidates") or [None])[0]
             pool = {stop["id"] for source in store.sources(trip["id"]) for stop in (source.get("extraction") or {}).get("stops", [])}
-            row.update(evaluate(doc["requirements"], candidate, pool))
+            # 先保存方案再判分：判分出错时也能事后核查，并用 --report 之外的方式重新判分。
             plans = out / "plans"
             plans.mkdir(parents=True, exist_ok=True)
             (plans / f"{case['id']}-{variant}-{repeat}.json").write_text(json.dumps(
                 {"requirements": doc["requirements"], "candidate": candidate, "decision_history": doc.get("decision_history", []),
-                 "warnings": doc.get("warnings", [])}, ensure_ascii=False, indent=1), encoding="utf-8")
+                 "warnings": doc.get("warnings", [])}, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+            try:
+                row.update(evaluate(doc["requirements"], candidate, pool))
+            except Exception as exc:
+                # 判分脚本的问题不是规划结果：保留规划结局，单独标记，续跑时会重新执行。
+                row.update(outcome="score_error", error=f"判分失败 {type(exc).__name__}: {exc}"[:300])
+                logging.getLogger(__name__).error("scoring %s/%s/%s failed\n%s", case["id"], variant, repeat, traceback.format_exc())
         except Exception as exc:
             row.update(outcome="failed", error=f"{type(exc).__name__}: {exc}"[:300])
             logging.getLogger(__name__).error("run %s/%s/%s crashed\n%s", case["id"], variant, repeat, traceback.format_exc())
@@ -209,6 +215,9 @@ async def run_all(args):
                         continue
                     print(f"[{finished + 1}/{total}] {case['id']} · {variant} · 第{repeat}次 ...", flush=True)
                     row = await run_one(case, variant, repeat, out, cassette, args)
+                    if row["outcome"] == "score_error":
+                        print(f"    → {row['error']}（方案已保存，本次不记录）", flush=True)
+                        continue
                     if row["outcome"] == "model_unavailable":
                         # 额度或登录问题不是规划结果：不写入，续跑时会重新执行这一组合。
                         unavailable += 1

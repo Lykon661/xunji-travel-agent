@@ -68,10 +68,12 @@ def expected_dates(req):
 
 
 def evaluate(requirements: dict, candidate: dict | None, stop_pool: set[str]) -> dict:
-    candidate = candidate or {}
-    draft = copy.deepcopy(candidate.get("draft") or {})
-    days = draft.get("days") or []
-    route_days = [{"date": day["date"], "city": day["city"]} for day in (days or candidate.get("days") or [])]
+    candidate = candidate if isinstance(candidate, dict) else {}
+    draft = copy.deepcopy(candidate.get("draft") or {}) if isinstance(candidate.get("draft"), dict) else {}
+    days = [day for day in draft.get("days") or [] if isinstance(day, dict)] if isinstance(draft.get("days"), list) else []
+    # 草稿还没有逐日安排时退回到候选路线的日期；任一处结构异常都按“没有方案”判分，而不是让判分崩溃。
+    fallback = candidate.get("days") if isinstance(candidate.get("days"), list) else []
+    route_days = [{"date": day.get("date"), "city": day.get("city")} for day in (days or fallback) if isinstance(day, dict)]
     visits = [(day, item) for day in days for item in day.get("activities", []) if item.get("kind") == "visit"]
     meals = [(day, item) for day in days for item in day.get("meal_recommendations", [])]
     result = {"has_plan": bool(visits), "days": len(route_days), "visits": len(visits), "meal_options": len(meals)}
