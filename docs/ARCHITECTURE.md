@@ -61,6 +61,7 @@ flowchart TD
     assess -->|需用户决定| decision_gate
     assess --> review_gate
     decision_gate -->|按 decision_resume| guide_analysis & discover & assess & review_result
+    decision_gate -->|同一问题已答两次| selection_gate
     review_gate -->|审查未通过| planning_failed
     review_gate -->|通过| selection_gate
     planning_failed --> decision_gate
@@ -80,7 +81,7 @@ flowchart TD
 |---|---|---|
 | `requirements_gate` | `requirements` | 补全日期、人数等必填项 |
 | `guides_gate` | `guides` | 勾选参考攻略 |
-| `decision_gate` | `decision` | 回答一道取舍问题 |
+| `decision_gate` | `decision` | 回答一道取舍问题；同一问题已回答两次仍出现时不再暂停，带着阻断进入 `selection_gate` |
 | `interview_gate` | `interview` | 需求追问（旧流程，保留兼容） |
 | `selection_gate` | `selection` / `sources` | 确认候选，或提交局部修改 |
 
@@ -91,7 +92,9 @@ flowchart TD
 - **guide_analysis**：GuideAgent 整理区域分组、必去/排除，发现必须由用户决定的问题。
 - **discover**：RouteAgent 生成分日初案（哪天在哪个城市、去哪些地点），代码校验日期覆盖、城市顺序、地点来源。
 - **assess**：对初案依次调用 `transport → hotels → activities → tickets`（ResourceAgent 查资源，RouteAgent 排每日时间线），然后进入**审查-修复循环**（见下）。
-- **review_gate / planning_failed**：审查没通过且无法自动修复时，转为一道用户问题。
+- **review_gate / planning_failed**：审查没通过且无法自动修复时，转为一道用户问题。行程 Agent 与检验 Agent 只能提出回答能记录的问题（偏好、预算、交通方式、步行上限、时间限制、住宿区域、重复授权、必去/排除）；选酒店、某天出发地址、往返班次写成资料缺口。
+- **transport**：按城市顺序生成城际段。需求勾选 `self_arranged_round_trip`（往返交通自行安排）时，不生成出发地往返两段，只保留目的地之间的交通。
+- **activities**：排每日时间线前用 `resolve_hubs` 把到达/出发的车站、机场固定到一个高德 POI：名称唯一或班次航站楼唯一时直接定位，否则返回一道「选择航站楼/进出站口」问题，回答记入 `decision_history` 并复用。
 - **confirm_route → save**：再次校验审查报告仍然有效，把同一份快照原子写入。
 
 ### 审查-修复循环
@@ -136,6 +139,7 @@ RouteAgent 额外把超过 24 个字符的内部 ID 替换为 `stop_1` 这样的
 
 - `bind_report` 在报告上记录 `plan_hash`（行程内容，排除导出链接）、`review_basis_hash`（需求 + 所选攻略 + 约束 + 锁定 + 用户决策 + 查询记录 + 策略版本）、`draft_revision`、`policy_version`、`expires_at`（取 10 分钟和已选报价有效期中较早的一个）。
 - `review_blockers` 在展示、确认、保存时重新计算上述哈希，任何一项不一致、过期、检查维度不全（必须正好 10 项）或存在 blocker，都不能确认。
+- `review_scope` 把可计算的事实预先算好交给检验 Agent：景点间衔接（`transfer_timing`）、逐活动的开放窗口比较，以及城际班次的到达/出发衔接（`transport_connections`，已扣除进站或出站预留）。
 - 模型返回的报告还要经过三层代码校验：Pydantic 模型校验（blocker 存在时状态不能是 pass）→ `review_semantic_errors`（与代码计算的时间、日期事实矛盾）→ `review_reference_errors`（证据 ID、字段路径、日期必须真实存在）。各有一次纠正机会，仍不合格就记为 `review_unavailable`。
 
 ## 存储与并发

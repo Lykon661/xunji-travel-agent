@@ -81,14 +81,13 @@ test.bat
 
 依次运行后端单元测试、model-runtime 测试和前端类型检查。CI 在每次 push 时于 Windows + Python 3.11 + Node 22 上运行同样的检查并完整构建前端。
 
-最近一次本地运行（2026-10-17，Windows 11，Python 3.14.4 / 3.11.9，Node 24.16）：
+当前状态（以 CI 为准，见上方徽章）：
 
-| 检查 | 结果 |
+| 检查 | 规模 |
 |---|---|
-| 后端 `unittest`（57 个文件） | 573 个用例全部通过，约 27 秒 |
-| model-runtime `node --test` | 8 个用例全部通过 |
-| 前端 `vue-tsc --noEmit && vite build` | 通过 |
-| 启动服务并调用 API（建旅行、查询、404/422 校验）+ 浏览器打开首页 | 正常，控制台无报错 |
+| 后端 `unittest` | 61 个测试文件，约 600 个用例 |
+| model-runtime `node --test` | 8 个用例 |
+| 前端 `vue-tsc --noEmit && vite build` | 类型检查与生产构建 |
 
 **测试覆盖范围说明**：后端测试用 mock 替代了模型、高德、飞猪和采集器，覆盖的是规划流程、状态机、规则校验、审查门禁、中断恢复、版本冲突和存储。真实模型输出质量和外部接口的实际返回无法在 CI 中验证，对应的手工检查清单在 [docs/MANUAL_TESTING.md](docs/MANUAL_TESTING.md)。
 

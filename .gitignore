@@ -25,5 +25,10 @@ external/
 .DS_Store
 Thumbs.db
 
-# 消融实验运行结果（录制数据 eval/cassettes 可按需提交）
+# 消融实验运行结果与外部接口录制（含飞猪、高德原始返回，只保留在本机）
 backend/eval/runs/
+backend/eval/cassettes/
+backend/eval/nightly-*.log
+
+# 本地编辑器与助手配置
+.claude/

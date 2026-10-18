@@ -30,7 +30,7 @@ Windows 下 CLI 退出时可能触发 libuv 的 `UV_HANDLE_CLOSING` 断言，所
 
 费用口径（[backend/app/rules.py](../backend/app/rules.py) `resource_cost`）：
 
-- 车票/机票 `ticketPrice` 按每人每段计；
+- 车票/机票按每人每段计：行程结果中的 `adultPrice`（旧版 CLI）、`ticketPrice`（航班）或 `price`（火车）都按此口径读取；
 - 酒店 `pricePerNight` 按每间每晚计，多晚报价不假设每晚相同；
 - 只有 `price` 没有口径、或只有 `minPrice` 起价的，不计入已知费用；
 - 门票缺价时按用户设置可默认 0 元，但标记为 `assumed_free`，和供应商确认免费（`reported_free`）区分；

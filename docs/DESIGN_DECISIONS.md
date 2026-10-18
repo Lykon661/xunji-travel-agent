@@ -166,7 +166,7 @@ DeepSeek 与 GPT-5.6 Luna 两个模型 × 5 条需求 × 每组 1 次的结果�
 
 1. **修复循环不在图上**。真正的审查-修复循环是 `assess_result()`（[nodes/review_loop.py](../backend/app/nodes/review_loop.py)）里的 `while True`，它直接调用 `repair()`。这样做是因为循环需要 `backup`、`no_progress`、`diagnosed` 等局部变量，放进图里就要把它们都加入 `TripState`。代价是从图上看不到这个循环，修复轮次也没有单独的检查点。更好的做法是把循环变量放进 state，用条件边表达循环。（图上原有一条恒不触发的 `check → repair` 边，已删除。）
 
-2. **检验 Agent 的提示词太长**（约 80 行），其中很多是针对具体误判打的补丁，例如关于「北京路」、「16:40–17:40」的规则。这说明仍有不少本该由代码计算的判断留给了模型。方向是继续把可计算的比较移进 `review_scope`，让提示词只描述原则。
+2. **检验 Agent 的提示词太长**（约 70 行），其中很多是针对具体误判打的补丁，例如关于「北京路」、「16:40–17:40」的规则。这说明仍有不少本该由代码计算的判断留给了模型。方向是继续把可计算的比较移进 `review_scope`，让提示词只描述原则。
 
 3. **`TripState` 是一个约 50 个字段的宽松 `TypedDict`**，很多字段是任意 dict，没有 reducer。节点之间的依赖关系靠约定维持，新增字段时容易遗漏清理（例如 `revise_candidate` 需要手动重置 `repair_round`、`keep_current_plan` 等）。
 
