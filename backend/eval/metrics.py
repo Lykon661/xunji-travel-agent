@@ -67,7 +67,17 @@ def expected_dates(req):
     return [(start + timedelta(days=i)).isoformat() for i in range((end - start).days + 1)]
 
 
-def evaluate(requirements: dict, candidate: dict | None, stop_pool: set[str]) -> dict:
+def visit_duplicates(visits, aliases=()):
+    """Extra visits of an earlier place: (counting known aliases, POI ID or base name only)."""
+    keys = [{*(["poi:" + str(item["map_place"]["id"])] if (item.get("map_place") or {}).get("id") else []),
+             "name:" + day["city"] + ":" + base_name(item.get("name"), day["city"])} for day, item in visits]
+    groups = [{base_name(name, "") for name in group} for group in aliases or ()]
+    with_aliases = [key | {f"alias:{index}" for index, group in enumerate(groups) if base_name(item.get("name"), day["city"]) in group}
+                    for key, (day, item) in zip(keys, visits)]
+    return extra_occurrences(with_aliases), extra_occurrences(keys)
+
+
+def evaluate(requirements: dict, candidate: dict | None, stop_pool: set[str], aliases=()) -> dict:
     candidate = candidate if isinstance(candidate, dict) else {}
     draft = copy.deepcopy(candidate.get("draft") or {}) if isinstance(candidate.get("draft"), dict) else {}
     days = [day for day in draft.get("days") or [] if isinstance(day, dict)] if isinstance(draft.get("days"), list) else []
@@ -83,9 +93,7 @@ def evaluate(requirements: dict, candidate: dict | None, stop_pool: set[str]) ->
     compressed = [city for index, city in enumerate(cities) if index == 0 or city != cities[index - 1]]
     result["city_order_error"] = int(bool(route_days) and compressed != requirements["cities"])
 
-    result["dup_visit"] = extra_occurrences([
-        {*(["poi:" + str(item["map_place"]["id"])] if (item.get("map_place") or {}).get("id") else []),
-         "name:" + day["city"] + ":" + base_name(item.get("name"), day["city"])} for day, item in visits])
+    result["dup_visit"], result["dup_visit_strict"] = visit_duplicates(visits, aliases)
     # 餐厅门店按 POI 区分分店；没有 POI 时用完整名称（保留括号内分店名）。
     result["dup_meal"] = extra_occurrences([
         {"poi:" + str(item["map_place"]["id"])} if (item.get("map_place") or {}).get("id")

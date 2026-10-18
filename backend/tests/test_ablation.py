@@ -87,6 +87,15 @@ class Scoring(unittest.TestCase):
         self.assertEqual(result["escaped_violations"],result["total_violations"])
         self.assertGreater(result["oracle_code_blockers"],0)
 
+    def test_known_aliases_with_different_pois_count_as_one_place(self):
+        from eval.metrics import visit_duplicates
+        day = {"date":"2026-12-26","city":"广州"}
+        visits = [(day,visit("a","陈氏书院（陈家祠）","poi-1","09:00","10:00")),
+                  ({**day,"date":"2026-12-27"},visit("b","陈家祠","poi-2","09:00","10:00")),
+                  ({**day,"date":"2026-12-27"},visit("c","北京路千年古道","poi-3","11:00","12:00"))]
+        self.assertEqual(visit_duplicates(visits),(0,0))
+        self.assertEqual(visit_duplicates(visits,[["陈家祠","陈氏书院"],["北京路步行街","北京路"]]),(1,0))
+
     def test_wrong_dates_and_city_order_are_counted(self):
         candidate = {"days":[{"date":"2026-12-12","city":"深圳"}],"draft":{}}
         result = evaluate({**REQUIREMENTS,"cities":["广州"]},candidate,set())

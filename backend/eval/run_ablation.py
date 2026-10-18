@@ -32,7 +32,7 @@ from app.planner import Planner
 from app.store import Store, now
 
 from . import replay
-from .metrics import VIOLATIONS, evaluate
+from .metrics import VIOLATIONS, evaluate, visit_duplicates
 
 HERE = Path(__file__).resolve().parent
 VARIANTS = {"full": "全部开启", "no_reviewer": "关掉检验 Agent", "no_dedupe": "关掉统一地点身份与全程去重",
@@ -154,7 +154,7 @@ async def run_one(case, variant, repeat, out, cassette, args):
                 {"requirements": doc["requirements"], "candidate": candidate, "decision_history": doc.get("decision_history", []),
                  "warnings": doc.get("warnings", [])}, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
             try:
-                row.update(evaluate(doc["requirements"], candidate, pool))
+                row.update(evaluate(doc["requirements"], candidate, pool, case.get("aliases", [])))
             except Exception as exc:
                 # 判分脚本的问题不是规划结果：保留规划结局，单独标记，续跑时会重新执行。
                 row.update(outcome="score_error", error=f"判分失败 {type(exc).__name__}: {exc}"[:300])
@@ -242,6 +242,41 @@ async def run_all(args):
     report(out)
 
 
+def rescore(out: Path, cases_file: str):
+    """Recount visit duplicates from saved plans with the cases' known aliases; no model or API calls.
+
+    Only dup_visit and the totals derived from it change. Other metrics need data that is not kept
+    after a run (e.g. the source stop pool), so they keep their recorded values.
+    """
+    aliases = {case["id"]: case.get("aliases", []) for case in json.loads(Path(cases_file).read_text(encoding="utf-8"))["cases"]}
+    file = out / "results.jsonl"
+    rows = load_rows(file)
+    backup = file.with_name("results.before-rescore.jsonl")
+    if not backup.exists():
+        # 只备份第一次重判前的原始结果，重复重判不覆盖它。
+        shutil.copy(file, backup)
+    changed = 0
+    for row in rows:
+        plan = out / "plans" / f"{row['case']}-{row['variant']}-{row['repeat']}.json"
+        if not plan.is_file() or not row.get("has_plan"):
+            continue
+        candidate = json.loads(plan.read_text(encoding="utf-8")).get("candidate") or {}
+        days = [day for day in (candidate.get("draft") or {}).get("days") or [] if isinstance(day, dict)]
+        visits = [(day, item) for day in days for item in day.get("activities", []) if item.get("kind") == "visit"]
+        with_aliases, strict = visit_duplicates(visits, aliases.get(row["case"], []))
+        previous = row.get("dup_visit", 0)
+        previous_strict = row.get("dup_visit_strict", previous)
+        row.update(dup_visit=with_aliases, dup_visit_strict=strict)
+        row["total_violations"] = row.get("total_violations", 0) - previous + with_aliases
+        row["escaped_violations"] = row["total_violations"] if row.get("confirmable") else 0
+        changed += with_aliases != previous
+        if strict != previous_strict:
+            print(f"注意：{row['case']}/{row['variant']}/{row['repeat']} 原口径重复数 {previous_strict} 与重算 {strict} 不一致")
+    file.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
+    print(f"{out}：重新判分 {len(rows)} 行，{changed} 行的重复景点数因已知别名改变；原结果另存为 results.before-rescore.jsonl")
+    report(out)
+
+
 def mean(values):
     values = [value for value in values if isinstance(value, (int, float))]
     return statistics.fmean(values) if values else None
@@ -257,7 +292,7 @@ def report(out: Path):
         print("还没有结果")
         return
     variants = list(dict.fromkeys(row["variant"] for row in rows))
-    metrics = [*VIOLATIONS, "total_violations", "escaped_violations", "confirmable", "reviewer_blockers",
+    metrics = [*VIOLATIONS, "dup_visit_strict", "total_violations", "escaped_violations", "confirmable", "reviewer_blockers",
                "oracle_code_blockers", "decisions", "model_calls", "elapsed_seconds"]
     summary = {}
     for variant in variants:
@@ -300,7 +335,7 @@ def report(out: Path):
     for variant, item in summary.items():
         lines.append(f"| {VARIANTS.get(variant, variant)} | {item['runs']} | {item['plans']} | "
                      + " | ".join(str(item["outcomes"].get(name, 0)) for name in OUTCOMES) + " |")
-    labels = {"date_coverage_error": "日期覆盖错误", "city_order_error": "城市顺序错误", "dup_visit": "重复安排地点",
+    labels = {"date_coverage_error": "日期覆盖错误", "city_order_error": "城市顺序错误", "dup_visit": "重复安排地点（含已知别名）", "dup_visit_strict": "其中仅按高德地点/名称识别",
               "dup_meal": "重复推荐餐厅", "sourceless_visit": "无来源地点", "time_conflict": "时间线冲突",
               "opening_violation": "营业/闭馆冲突", "lunch_missing": "未留午餐", "walking_over_limit": "步行超限",
               "over_budget": "超预算", "total_violations": "违反合计", "escaped_violations": "漏检违反",
@@ -349,9 +384,13 @@ def main():
     parser.add_argument("--max-resumes", type=int, default=2, help="遇到模型网络/格式错误或地图网络错误时自动继续任务的次数")
     parser.add_argument("--keep-work", action="store_true", help="保留每次运行的临时数据库")
     parser.add_argument("--report", default="", help="只根据已有结果目录重新生成汇总")
+    parser.add_argument("--rescore", default="", help="用已保存的方案和用例中的已知别名离线重算重复景点，不调用模型")
     args = parser.parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
                         handlers=[logging.FileHandler(HERE / "eval.log", encoding="utf-8"), logging.StreamHandler(sys.stderr)])
+    if args.rescore:
+        rescore(Path(args.rescore), args.cases)
+        return
     if args.report:
         report(Path(args.report))
         return
