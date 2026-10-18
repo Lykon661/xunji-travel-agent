@@ -34,6 +34,13 @@ class DailyRouteCompletion(RouteTurn):
     candidate: None = None
 
 
+# 回答只能修改这些内容（见 DECISION_REQUIREMENT_FIELDS 与必去/排除景点），问题必须落在其中。
+ANSWERABLE_QUESTIONS = (
+    "问题只能询问用户回答后系统能记录的内容：偏好、预算、是否打车、市内交通方式、每日步行上限、最早出发/最晚到达/最晚返回时刻、"
+    "交通时长上限、住宿区域、重复安排授权，以及现有景点中哪些必去或排除。选择具体酒店须由用户在住宿面板采用，不能通过回答完成；"
+    "某天的出发地址、往返班次及时刻等信息无法通过回答记录。遇到这些情况不得提问，写成资料缺口，保留其余安排。")
+
+
 class RouteAgent(AgentRuntime):
     def __init__(self, models, store):
         super().__init__("行程 Agent",models,store)
@@ -165,7 +172,7 @@ class RouteAgent(AgentRuntime):
             "只修改问题涉及的活动及必要的相邻衔接，其他日期与活动保持原样。"
             "给选项、推荐理由和影响日期；不要要求用户代查事实。不得把推荐当回答，也不得自行提高预算、"
             "删除必去项或修改交通限制。用户最新明确指令可以覆盖默认规则和历史偏好；用户已经接受的步行超限只做说明，"
-            "不得以未解除旧上限为由再次要求选择。已经回答的问题不要重复，提出新的具体取舍。"
+            "不得以未解除旧上限为由再次要求选择。已经回答的问题不要重复，提出新的具体取舍。"+ANSWERABLE_QUESTIONS+
             "requirements.self_arranged_round_trip=true表示出发地与目的地之间的去程、返程由用户自行安排：不检查、不查询、不追问去程返程班次、到离时刻或车站机场接驳，只规划目的地内的行程及多个目的地之间的交通。",
             {"requirements":state["requirements"],"issues":issues,"route":state.get("selected_route") or state.get("candidates",[]),
              "available_stops":state.get("stops",{}),"constraints":state.get("stop_constraints",{}),"history":state.get("decision_history",[])})
@@ -178,7 +185,7 @@ class RouteAgent(AgentRuntime):
             "问题必须列出无法同时满足的用户条件与具体可行选项，不得询问是否允许继续自动修复、重审或查询。"
             "接口失败、事实查不到、模型或系统未修好属于blocked，不能包装成用户偏好问题。"
             "地点及路线坐标以高德为准，飞猪仅查票；两平台坐标差异不是用户取舍，不因此要求选择场馆或清空高德定位。"
-            "只改变受影响日期，不虚构地点、耗时、价格和授权。已回答的取舍不重复追问。"
+            "只改变受影响日期，不虚构地点、耗时、价格和授权。已回答的取舍不重复追问。"+ANSWERABLE_QUESTIONS+
             "requirements.self_arranged_round_trip=true表示出发地与目的地之间的去程、返程由用户自行安排：不检查、不查询、不追问去程返程班次、到离时刻或车站机场接驳，只规划目的地内的行程及多个目的地之间的交通。",
             {"requirements":state["requirements"],"findings":findings,"itinerary":state["itinerary"],
              "constraints":state.get("stop_constraints",{}),"locks":state.get("locks",[]),

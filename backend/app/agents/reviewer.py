@@ -5,6 +5,7 @@ from ..adapters import ToolError
 from ..models import ReviewReport, ReviewReferenceCorrections
 from ..reviewing import canonical_review_path, correct_transfer_arithmetic, review_field_index, review_reference_errors, review_semantic_errors
 from ..store import dump
+from .route import ANSWERABLE_QUESTIONS
 from .runtime import AgentRuntime, digest
 
 
@@ -23,6 +24,7 @@ class ReviewerAgent(AgentRuntime):
             "同城的北京路与北京路步行街这类道路/步行街简称，若位置相符仍是同一游览地点，不能因POI ID不同放过跨日重复。"
             "possible_duplicate_ids只是同名同址近邻的疑点，不证明相同；对照原文与查询证据，不能凭距离合并不同POI门店。"
             "按完整时间线检查班次/接驳/进站缓冲/预约/返程和住宿覆盖、步行、预算口径。"
+            "status=needs_decision时的question同样遵守："+ANSWERABLE_QUESTIONS+
             "requirements.self_arranged_round_trip=true表示出发地与目的地之间的去程、返程由用户自行安排：不检查、不查询、不追问去程返程班次、到离时刻或车站机场接驳，只规划目的地内的行程及多个目的地之间的交通。"
             "景点间衔接以review_scope.activities.transfer_timing的代码计算为准：available_minutes已扣除紧邻的午餐、休息或等待时段，"
             "route_minutes是已采用高德路线总耗时，不能重复累加其中的步行接驳和换乘；available_minutes>=route_minutes表示移动时间足够。"

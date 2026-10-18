@@ -44,6 +44,15 @@ def interrupt(value):
     return graph_interrupt(value)
 
 
+def repeated_question(question, history):
+    """How many earlier rounds asked this question: same ID, or near-identical wording under a new ID."""
+    from difflib import SequenceMatcher
+    text = str(question.get("question") or "")
+    return sum(1 for entry in history for asked in entry.get("questions") or []
+               if asked.get("id") == question.get("id")
+               or text and SequenceMatcher(None,text,str(asked.get("question") or "")).ratio() >= 0.85)
+
+
 def error_leaves(error: BaseException):
     if isinstance(error, BaseExceptionGroup):
         for child in error.exceptions:
@@ -81,7 +90,7 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
         graph.add_edge("guides_gate","prepare_guides")
         graph.add_conditional_edges("prepare_guides",lambda s:"guide_analysis" if s.get("stops") else "selection_gate")
         graph.add_conditional_edges("guide_analysis",lambda s:"decision_gate" if s.get("decision") else "discover")
-        graph.add_conditional_edges("decision_gate",lambda s:s["decision_resume"],{"guide_analysis":"guide_analysis","discover":"discover","assess":"assess","review_result":"review_result"})
+        graph.add_conditional_edges("decision_gate",lambda s:s["decision_resume"],{"guide_analysis":"guide_analysis","discover":"discover","assess":"assess","review_result":"review_result","selection_gate":"selection_gate"})
         graph.add_edge("interview","interview_gate")
         graph.add_conditional_edges("interview_gate",lambda s:"discover" if s.get("interview",{}).get("confirmed") else "interview")
         graph.add_conditional_edges("discover",lambda s:"decision_gate" if s.get("decision") else "assess")
@@ -128,6 +137,15 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
                 self.emit(state,"assessing","已按你上一条保持规划的指令处理步行限制，不再重复追问")
                 return {"requirements":req,"decision":{},"decision_resume":"assess","keep_current_plan":True,
                         "assessment_dates":affected,"assessment_base":state["candidates"][0]["id"] if state.get("candidates") else ""}
+        if not state.get("decision_reopened") and repeated_question(question,history) >= 2:
+            # Two answers did not clear it, so answering cannot: keep the draft and its blockers for the user to act on elsewhere.
+            note = ("“"+(question.get("title") or "该问题")+"”已回答两次仍无法解决，不再重复追问；"
+                    "请在住宿、交通等面板操作，或修改需求后重新审查")
+            candidates = copy.deepcopy(state.get("candidates",[]))
+            for candidate in candidates[:1]:
+                candidate["confirmation_blockers"] = list(dict.fromkeys([*(candidate.get("confirmation_blockers") or []),note]))
+            return {"decision":{},"decision_resume":"selection_gate","candidates":candidates,"selected_route":{},
+                    "warnings":list(dict.fromkeys([*state.get("warnings",[]),note]))}
         token = digest({"question":question,"history":state.get("decision_history",[]),"generation":state["generation"],"revision":state.get("draft_revision",0)})[:40]
         answer = interrupt({"kind":"decision","message":question["question"],"questions":[question],"round_id":token,
                             "round":len(state.get("decision_history",[]))+1,"summary":question["why_needed"],
