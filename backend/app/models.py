@@ -33,6 +33,62 @@ class RepeatPermission(BaseModel):
     authorization: str = Field(min_length=1, max_length=2000)
 
 
+CONSTRAINT_KINDS = ("fewer_walking", "fixed_order", "time_anchor", "visit_duration",
+                    "transfer_buffer", "booking_prerequisite", "transit_rule")
+# Kinds that apply to exactly one stop, named by scope.stop_ids.
+SINGLE_STOP_KINDS = frozenset({"time_anchor", "visit_duration", "booking_prerequisite"})
+
+
+class ConstraintScope(BaseModel):
+    dates: list[Date] = Field(default_factory=list, max_length=30, description="生效日期；空表示全程")
+    stop_ids: list[str] = Field(default_factory=list, max_length=20, description="生效地点的完整ID；空表示不限地点")
+    cities: list[str] = Field(default_factory=list, max_length=8, description="生效城市；空表示不限城市")
+
+
+class ConstraintDraft(BaseModel):
+    """Model-facing shape: one user condition, quoted verbatim, with typed parameters per kind."""
+    kind: Literal["fewer_walking", "fixed_order", "time_anchor", "visit_duration",
+                  "transfer_buffer", "booking_prerequisite", "transit_rule"]
+    strength: Literal["hard", "soft"] = "hard"
+    scope: ConstraintScope = Field(default_factory=ConstraintScope)
+    before: str = Field(default="", max_length=200, description="fixed_order先去的地点ID")
+    after: str = Field(default="", max_length=200, description="fixed_order后去的地点ID")
+    anchor: Literal["", "sunrise", "sunset", "appointment"] = ""
+    at: str | None = Field(default=None, pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$", description="time_anchor的指定时刻HH:MM")
+    minutes: int | None = Field(default=None, ge=5, le=720, description="visit_duration游玩分钟数或transfer_buffer缓冲分钟数")
+    mode: Literal["", "train", "flight", "ferry"] = ""
+    rule: Literal["", "public_only", "auto_by_transit"] = ""
+    revoke: bool = Field(default=False, description="true表示取消此前同种类、同对象的条件")
+    quote: str = Field(min_length=1, max_length=200, description="逐字摘自用户原话")
+
+    @model_validator(mode="after")
+    def typed_parameters(self):
+        if self.kind == "fixed_order":
+            if not self.before or not self.after or self.before == self.after:
+                raise ValueError("fixed_order需要两个不同地点的before与after")
+            self.scope.stop_ids = [self.before, self.after]
+        elif self.kind in SINGLE_STOP_KINDS and len(self.scope.stop_ids) != 1:
+            raise ValueError(self.kind+"必须且只能指定一个地点")
+        if self.revoke:
+            return self
+        if self.kind == "time_anchor" and not self.anchor:
+            raise ValueError("time_anchor需要anchor")
+        if self.kind == "visit_duration" and self.minutes is None:
+            raise ValueError("visit_duration需要minutes")
+        if self.kind == "transfer_buffer" and (not self.mode or self.minutes is None):
+            raise ValueError("transfer_buffer需要mode与minutes")
+        if self.kind == "transit_rule" and not self.rule:
+            raise ValueError("transit_rule需要rule")
+        return self
+
+
+class Constraint(ConstraintDraft):
+    id: str = Field(min_length=1, max_length=40)
+    source: Literal["form", "message", "interview", "decision"]
+    round_id: str = Field(default="", max_length=200)
+    superseded_by: str = Field(default="", max_length=40)
+
+
 class Requirements(BaseModel):
     origin: str | None = None
     cities: list[str] = Field(default_factory=list, max_length=8)
@@ -67,6 +123,9 @@ class Requirements(BaseModel):
     required_stop_ids: list[str] = Field(default_factory=list, max_length=80)
     excluded_stop_ids: list[str] = Field(default_factory=list, max_length=80)
     repeat_exceptions: list[RepeatPermission] = Field(default_factory=list, max_length=20)
+    constraints: list[Constraint] = Field(default_factory=list, max_length=60)
+    # Digest of the preferences text the form-sourced constraints were extracted from.
+    constraints_basis: str = Field(default="", max_length=64)
 
     @model_validator(mode="after")
     def dates_valid(self):
@@ -79,8 +138,6 @@ class Requirements(BaseModel):
             raise ValueError("人数包含儿童，至少需要一位成人")
         if any(age < 0 or age > 17 for age in self.children_ages) or (self.children_ages and len(self.children_ages) != self.children):
             raise ValueError("儿童年龄须为0–17岁，填写时应覆盖每位儿童")
-        if re.search(r"(?:不|不要|不想|不能|禁止|拒绝)(?:乘坐|坐)?(?:打车|出租车|网约车)", self.preferences):
-            self.allow_taxi = False
         if self.start_date and self.end_date:
             days = (self.end_date - self.start_date).days + 1
             if days < 1 or days > 30:
@@ -243,10 +300,11 @@ class DecisionResolution(BaseModel):
     model_config = {"extra":"forbid", "json_schema_extra":{"minProperties":1}}
 
     requirements: dict = Field(default_factory=dict,
-        description="只返回本次回答明确授权的变更；条件式取舍写入preferences，不新建业务字段或复制完整原需求",
+        description="只返回本次回答明确授权的变更；条件式取舍写入constraints，不新建业务字段或复制完整原需求",
         json_schema_extra={"propertyNames":{"enum":sorted(DECISION_REQUIREMENT_FIELDS)}})
     required_ids: list[str] = Field(default_factory=list, description="只填allowed_stop_ids中的完整ID，且用户本次明确要求必去；条件式保留不能直接设为必去")
     excluded_ids: list[str] = Field(default_factory=list, description="只填allowed_stop_ids中的完整ID，且用户本次明确要求排除；待查询后再决定的景点不能立即排除")
+    constraints: list[ConstraintDraft] = Field(default_factory=list, max_length=20)
     explanation: str = Field(default="", validation_alias=AliasChoices("explanation","reason","summary"))
     walking_limit_action: Literal["unchanged", "relax", "restore"] = "unchanged"
     keep_current_plan: bool = False
@@ -379,7 +437,13 @@ class CandidateRevision(BaseModel):
 
 class RequirementUpdate(BaseModel):
     requirements: dict = Field(default_factory=dict)
+    constraints: list[ConstraintDraft] = Field(default_factory=list, max_length=20)
     explanation: str = ""
+
+
+class ConstraintExtraction(BaseModel):
+    constraints: list[ConstraintDraft] = Field(default_factory=list, max_length=20)
+    allow_taxi: bool | None = Field(default=None, description="用户原话明确不打车时为false，明确允许打车时为true，否则null")
 
 
 class ChangeRequest(BaseModel):
@@ -392,6 +456,7 @@ class ChangeRequest(BaseModel):
     add_stop_ids: list[str] = Field(default_factory=list)
     fewer_activities: bool = False
     cheaper_hotel: bool = False
+    constraints: list[ConstraintDraft] = Field(default_factory=list, max_length=20)
     explanation: str = ""
 
 

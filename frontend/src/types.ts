@@ -10,6 +10,14 @@ export interface Requirements {
   required_stop_ids?: string[]; excluded_stop_ids?: string[];
   walking_limit_exempt_dates?: string[];
   repeat_exceptions?: {place_id: string; role: 'visit' | 'dining'; dates: string[]; meals: ('lunch' | 'dinner')[]; authorization: string}[];
+  constraints?: PlanningConstraint[]; constraints_basis?: string;
+}
+export interface PlanningConstraint {
+  id: string; kind: 'fewer_walking' | 'fixed_order' | 'time_anchor' | 'visit_duration' | 'transfer_buffer' | 'booking_prerequisite' | 'transit_rule';
+  strength: 'hard' | 'soft'; scope: {dates: string[]; stop_ids: string[]; cities: string[]};
+  before: string; after: string; anchor: '' | 'sunrise' | 'sunset' | 'appointment'; at: string | null; minutes: number | null;
+  mode: '' | 'train' | 'flight' | 'ferry'; rule: '' | 'public_only' | 'auto_by_transit'; revoke: boolean;
+  quote: string; source: 'form' | 'message' | 'interview' | 'decision'; round_id: string; superseded_by: string;
 }
 export interface Evidence { kind: 'text' | 'image'; quote: string; image_index: number | null }
 export interface GuideStop {id: string; name: string; city: string; day: number; evidence: Evidence; category?: 'sight' | 'dining'; ticket_claim?: string | null}

@@ -8,9 +8,10 @@ from .models import REVIEW_DIMENSIONS
 from .places import fingerprint, plan_fingerprint, occurrences
 from .store import Conflict
 from .routing import coordinates, daily_route_scope, reference_opening
+from .constraints import active
 
 
-POLICY_VERSION = 13
+POLICY_VERSION = 14
 
 
 def evidence_ids(value):
@@ -57,6 +58,9 @@ def review_payload(state, itinerary, sources, queries):
             quotes = [stop.get("evidence",{}).get("quote","") for stop in (source.get("extraction") or {}).get("stops",[])]
             index["source:"+source["id"]]["text_evidence"] = [quote for quote in quotes if quote and quote in source.get("text","")]
     index["requirements"] = state["requirements"]
+    for item in state["requirements"].get("constraints",[]):
+        if not item.get("superseded_by") and not item.get("revoke"):
+            index["constraint:"+item["id"]] = item
     index["locks"] = state.get("locks",[])
     index["decisions"] = state.get("decision_history",[])
     scope = review_scope(itinerary,queries)
@@ -168,8 +172,7 @@ def correct_transfer_arithmetic(report, payload):
     """Correct only a disproven transfer-buffer blocker; preserve separately evidenced constraints."""
     if report.question:
         return report
-    preferences = payload.get("requirements",{}).get("preferences","")
-    if re.search(r"缓冲|提前.{0,12}(?:分钟|小时|进站|检票|登船)|预留.{0,10}(?:分钟|小时)",preferences):
+    if active(payload.get("requirements",{}),"transfer_buffer"):
         return report
     scope = payload.get("review_scope") or review_scope(payload["plan"])
     corrected = report.model_copy(deep=True)
@@ -271,7 +274,7 @@ def review_semantic_errors(report, payload):
                 and re.search(r"未知|未计入|待确认|无价",finding.message)
                 and not re.search(r"算术|加总错误|币种|重复计费",finding.message)):
             errors.append("budget.status=incomplete已明确未知费用不在小计内；仅因缺价不能认定按零计费、超预算或阻断路线")
-        explicit_booking = re.search(r"必须.{0,8}(?:(?:完成|成功)预约|预约(?:完成|成功))|(?:完成|成功)预约.{0,8}才|预约(?:完成|成功).{0,8}才|先.{0,8}预约.{0,8}再",payload.get("requirements",{}).get("preferences",""))
+        explicit_booking = active(payload.get("requirements",{}),"booking_prerequisite",stop_id=activity.get("id") if activity else None)
         if (not explicit_booking and re.search(r"门票|票价|票务|预约",finding.message)
                 and re.search(r"(?:票价|价格).{0,8}(?:null|无价|未确认|未知)|(?:门票|票价|预约).{0,8}(?:待确认|待核对|未完成|未取得)",finding.message,re.I)
                 and not re.search(r"已售罄|无法预约|无可预约|停止售票|闭馆|不适用|日期错误|币种|票种不符",finding.message)):

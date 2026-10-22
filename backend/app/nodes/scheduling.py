@@ -7,6 +7,7 @@ from datetime import date
 from ..adapters import ToolError, map_link, navigation_link
 from ..models import OrderChoice, PlanningDecision, Requirements
 from ..rules import enforce_locks, timestamp, walking_limit
+from ..constraints import active
 from ..routing import coordinates, daily_route_scope, daily_movements, transport_access_transfers, distance, early_finish, geographic_order, reference_opening
 from ..resource_planning import chosen_hotel, comparison
 from ..agents.runtime import digest
@@ -93,7 +94,8 @@ class SchedulingNodes:
             "只安排当前一天。stop_ids、durations和start_times的键只能使用available_stops中的完整ID，不能用名称、POI ID或序号，不能重复。"
             "可从当天原方案及尚未安排的已选攻略活动中补充或替换，required和locked_ids必须保留。"
             "工具也只能查询当前available_stops中的地点，其他日期的条件留给对应日期处理；已有坐标或route_evidence的真实耗时无需重复查询。"
-            "preferences中带明确日期或地点的公交条件仅对相应日期/地点生效，不能扩大到其他天或全部景点间。"
+            "requirements.constraints中的条件只在其scope内生效（scope为空表示全程），superseded_by非空的已失效；transit_rule等带日期或地点的条件不能扩大到其他天或全部景点间。"
+            "fixed_order按before、after的先后安排，time_anchor按日出、日落或预约时刻安排，visit_duration的minutes写入durations。"
             "先查实际步行路线；步行耗时不超过15分钟（含15分钟）的路段直接采用步行，不再查询或要求提供公交地铁。超过15分钟或步行耗时未取得时再按交通偏好查询，步行仍累计进每日限制。"
             "不得默认所有景点之间都有公共交通；公共交通无结果时保留真实缺口，不编造线路或耗时，也不因短途未查询公交而要求删点。"
             "公交transits为空仅表示没返回公交换乘方案；route_evidence或walking_alternative已有真实步行分钟数时，不得称该路段没有耗时、无法通行或步行未核实。"
@@ -273,7 +275,7 @@ class SchedulingNodes:
             if origin["location"] == destination["location"]:
                 return {"minutes":0,"mode":"walking","walking_meters":0,"provider":"amap","origin":origin_name,"destination":destination_name,
                         "origin_place":origin,"destination_place":destination,"navigation_url":navigation_link(origin,destination)},destination
-            fewer_walks = any(word in state["requirements"].get("preferences","") for word in ("少走路","少步行","不想走太多"))
+            fewer_walks = bool(active(state["requirements"],"fewer_walking"))
             long_leg = distance(coordinates(origin),coordinates(destination)) > 1500
             order = ["walking","transit"] if mode == "public" else [mode]
             if "driving" in modes and "driving" not in order:
@@ -360,7 +362,11 @@ class SchedulingNodes:
         gaps, ids = list(base_gaps),list(ordering.stop_ids)
         locked_ids = set(locked_ids)
         preserved_activities = preserved_activities or {}
-        if locked_ids or ordering.start_times or preserved_activities or any(reference_opening(stops[identity],day_date) for identity in ids) or any(word in req["preferences"] for word in ("预约","日落","日出","顺序","先去","再去")):
+        for anchor in active(req,"time_anchor",date=day_date):
+            if anchor["anchor"] == "appointment" and anchor["at"] and anchor["scope"]["stop_ids"][0] in ids:
+                ordering.start_times.setdefault(anchor["scope"]["stop_ids"][0],anchor["at"])
+        user_sequence = any(active(req,kind,date=day_date,stop_id=identity) for kind in ("fixed_order","time_anchor") for identity in ids)
+        if locked_ids or ordering.start_times or preserved_activities or any(reference_opening(stops[identity],day_date) for identity in ids) or user_sequence:
             route_basis = "保留锁定或用户指定的时间顺序，逐段查询地图路线；可能存在必要折返"
         else:
             ids,route_basis = await self.map_order(state,city,ids,tail.get("start_name"),tail["name"])
@@ -380,7 +386,8 @@ class SchedulingNodes:
             else:
                 move, place = {},stop.get("map_place")
             travel = move.get("minutes") if move.get("minutes") is not None else move.get("estimate_minutes",0)
-            duration = ordering.durations.get(stop_id) or stop.get("duration_minutes") or 90
+            fixed_duration = next((item["minutes"] for item in active(req,"visit_duration",date=day_date,stop_id=stop_id)),None)
+            duration = fixed_duration or ordering.durations.get(stop_id) or stop.get("duration_minutes") or 90
             requested_duration = duration
             opening = reference_opening({**stop,"map_place":place or stop.get("map_place")},day_date)
             if opening and opening.get("closed") and stop_id not in locked_ids and stop_id not in change.get("user_selected_ids",[]):
@@ -421,8 +428,7 @@ class SchedulingNodes:
             tail_move = (await self.movement(state,city,stop["name"],tail["name"],origin_place=place,destination_place=tail.get("end_place")))[0] if tail["name"] else {}
             tail_minutes = tail_move.get("minutes") if tail_move.get("minutes") is not None else tail_move.get("estimate_minutes",0)
             duration_adjustment = ""
-            user_time_text = req.get("preferences","")+" "+state.get("revision_request","")
-            explicit_duration = bool(re.search(r"[0-9一二三四五六七八九十百半两]+(?:\.\d+)?\s*(?:小时|分钟)",user_time_text))
+            explicit_duration = fixed_duration is not None or bool(re.search(r"[0-9一二三四五六七八九十百半两]+(?:\.\d+)?\s*(?:小时|分钟)",state.get("revision_request","")))
             if (hours and stop_id in ordering.durations and not preserve_timing and stop_id not in state.get("locks",[]) and
                     stop_id not in change.get("user_selected_ids",[]) and not stop.get("product") and not explicit_duration):
                 deadline = min(hours[1],end-(20+tail_minutes if tail["name"] else 0)-(60 if lunch_position == "after" else 0))

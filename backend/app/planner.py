@@ -25,6 +25,7 @@ from .agents import GuideAgent, ResourceAgent, RouteAgent, ReviewerAgent
 from .agents.route import resolve_stop_id
 from .agents.runtime import digest
 from .decisions import apply_walking_decision, confirmation_blockers, walking_question
+from .constraints import CONSTRAINT_GUIDE, check, merge, stop_catalog
 from .dining import is_dining
 from .places import canonicalize_stops, plan_fingerprint
 from .nodes.candidates import CandidateNodes
@@ -207,22 +208,23 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
         instruction = (
             "将用户当前问题的明确回答转成约束更新。requirements只填用户在这次回答中明确授权改变的字段；"
             "推荐选项不是回答。required_ids与excluded_ids仅包含现有景点ID，代表这次明确设为必去或排除的景点。"
-            "最新明确指令优先于默认规则与历史偏好，合并preferences时删除被本次指令推翻的旧限制。"
+            "最新明确指令优先于默认规则与历史偏好，合并preferences时删除被本次指令推翻的旧限制；推翻此前constraints时用revoke=true或填写新条件，由系统覆盖旧条件。"
             "在步行超限取舍问题中，用户说保持规划、不要删点或接受超限，就是授权对受影响日期豁免步行上限："
             "walking_limit_action=relax，keep_current_plan=true，不要求用户再给一个数字，不重复要求削减。"
             "用户要求恢复步行限制则walking_limit_action=restore；无相关授权为unchanged。"
             "keep_current_plan仅在用户明确要求保留现有路线时为true。"
             "用户说你决定时在已有约束内做选择并说明。不要虚构地点、事实或改变未授权的日期、城市及人数。"
-            '必须返回实际结果对象，六个字段直接放在根对象：{"requirements":{},"required_ids":[],"excluded_ids":[],"explanation":"概括用户本次回答","walking_limit_action":"unchanged","keep_current_plan":false}。'
+            '必须返回实际结果对象，七个字段直接放在根对象：{"requirements":{},"required_ids":[],"excluded_ids":[],"constraints":[],"explanation":"概括用户本次回答","walking_limit_action":"unchanged","keep_current_plan":false}。'
             "这是字段形状示例，必须根据当前回答填写真实值；没有变更的requirements返回{}，没有增删景点时对应数组返回[]。"
             "requirements的键只能使用allowed_requirement_fields；required_ids和excluded_ids只能使用allowed_stop_ids中的完整ID，不能用景点名、POI ID或canonical_place_id。"
-            "用户允许依据真实公共交通结果自动取舍时，把该条件合并到preferences，保留原偏好，不新增判断策略等自定义字段；"
+            "用户允许依据真实公共交通结果自动取舍时，写成constraints中的transit_rule=auto_by_transit，scope限定到回答提及的日期与地点，不新增判断策略等自定义字段；"
             "尚未查询成立的条件不能提前变成无条件必去或排除，此时required_ids与excluded_ids返回[]。"
-            "不要返回字段定义、JSON Schema、问题对象或properties包装，不要把完整原需求复制到requirements。")
+            "不要返回字段定义、JSON Schema、问题对象或properties包装，不要把完整原需求复制到requirements。"+CONSTRAINT_GUIDE)
         available = {identity:stop for identity,stop in state["stops"].items() if not is_dining(stop)}
         payload = {"requirements":state["requirements"],"question":question,"answer":values,"note":answer.get("note",""),
                    "available_stops":available,"constraints":state.get("stop_constraints",{}),
                    "allowed_requirement_fields":sorted(DECISION_REQUIREMENT_FIELDS),"allowed_stop_ids":sorted(available)}
+        answer_text = " ".join(values.values())+" "+answer.get("note","")
         for attempt in range(2):
             resolution = await self.models.ask(DecisionResolution,instruction,payload)
             resolution.required_ids = [resolve_stop_id(identity,available) or identity for identity in resolution.required_ids]
@@ -238,6 +240,9 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
             overlap = sorted(set(resolution.required_ids) & set(resolution.excluded_ids))
             if overlap:
                 issues.append({"field":"required_ids/excluded_ids","conflicting_ids":overlap})
+            new_constraints,rejected = check(resolution.constraints,answer_text,state["requirements"],state["stops"])
+            if rejected:
+                issues.append({"field":"constraints","invalid_values":[str(item["index"])+"："+"；".join(item["problems"]) for item in rejected]})
             try:
                 Requirements.model_validate({**state["requirements"],**{key:value for key,value in resolution.requirements.items()
                                                                          if key in DECISION_REQUIREMENT_FIELDS}})
@@ -260,9 +265,8 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
             payload = {**payload,"previous_resolution":resolution.model_dump(mode="json"),"validation_errors":issues}
             instruction += ("上一条解析未通过范围校验，请按validation_errors纠正，保留本次用户的真实意图。"
                 "只按原回答填写允许的变更；未知ID必须对照available_stops的完整键，不得猜测映射。"
-                "不复制未获授权的原需求字段，不为消除错误而删除用户明确要求；条件式授权用preferences表达。")
+                "不复制未获授权的原需求字段，不为消除错误而删除用户明确要求；条件式授权用constraints表达。")
         changes = dict(resolution.requirements)
-        answer_text = " ".join(values.values())+" "+answer.get("note","")
         for permission in changes.get("repeat_exceptions",[]):
             if permission.get("place_id") not in state["stops"] or not permission.get("authorization") or permission["authorization"] not in answer_text:
                 raise ToolError("decision_resolution","重复安排必须引用现有地点及本次用户明确回答，未采用推测授权")
@@ -288,14 +292,16 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
         required = (set(constraints.get("required",[]))-set(resolution.excluded_ids)) | set(resolution.required_ids)
         required = {identity for identity in required if not is_dining(state["stops"][identity])}
         excluded = (set(constraints.get("excluded",[]))-set(resolution.required_ids)) | set(resolution.excluded_ids)
-        req.update(required_stop_ids=sorted(required),excluded_stop_ids=sorted(excluded))
+        req.update(required_stop_ids=sorted(required),excluded_stop_ids=sorted(excluded),
+                   constraints=merge(req["constraints"],new_constraints,"decision",question.get("id","")))
         history = [*history,{"questions":[question],"answers":values,"note":answer.get("note",""),"summary":explanation,
                              "walking_limit_exempt_dates":req.get("walking_limit_exempt_dates",[]),"keep_current_plan":keep}]
         dates = question.get("affected_dates",[])
         base = state.get("candidates",[{}])[0].get("id") if state.get("candidates") else ""
         resume = state["decision_resume"]
         global_changes = set(changes)-{"preferences","hotel_areas"}
-        global_changes |= {"preferences"} if "preferences" in changes and re.search(r"全程|所有天|每天|整趟",answer_text) else set()
+        # A new constraint without a date scope applies to the whole trip.
+        global_changes |= {"constraints"} if any(not item["scope"]["dates"] for item in new_constraints) else set()
         if global_changes and resume in {"assess","review_result"}:
             dates = [day["date"] for day in state.get("candidates",[{}])[0].get("days",[])]
         elif "hotel_areas" in changes and state.get("candidates"):
@@ -461,12 +467,15 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
             "根据用户当前这一题的回答补充旅行偏好，只允许返回preferences、transport、local_transport、bed_type、allow_taxi、earliest_departure、latest_arrival、latest_return、direct_only、max_transport_hours、max_walk_per_day、flight_cabin、train_seat、hotel_type、hotel_stars字段。"
             "local_transport表示市内出行：公交地铁为public，只步行为walking，自驾为driving，骑行为bicycling；明确允许打车才填allow_taxi=true，与跨城transport分开。时间为HH:MM。"
             "preferences合并保留历史明确偏好，明确修正的偏好用新值替换，不把推荐选项当成回答。"
-            "不改变日期、城市、人数、房间数或预算。不明确的字段不填写。",
-            {"current":state["requirements"],"questions":questions,"answers":answer.get("answers",{}),"note":answer.get("note","")})
+            "不改变日期、城市、人数、房间数或预算。不明确的字段不填写。"+CONSTRAINT_GUIDE,
+            {"current":state["requirements"],"questions":questions,"answers":answer.get("answers",{}),"note":answer.get("note",""),
+             "available_stops":stop_catalog(state.get("stops",{}))})
         changes = {k:v for k,v in update.requirements.items() if k in {"preferences","transport","local_transport","bed_type","allow_taxi","earliest_departure","latest_arrival","latest_return","direct_only","max_transport_hours","max_walk_per_day","flight_cabin","train_seat","hotel_type","hotel_stars"}}
         if re.search(r"(?:不|不要|不想|不能|禁止|拒绝)(?:乘坐|坐)?(?:打车|出租车|网约车)",str(answer)):
             changes["allow_taxi"] = False
         req = Requirements.model_validate({**state["requirements"],**changes}).model_dump(mode="json")
+        valid,_ = check(update.constraints," ".join(answer.get("answers",{}).values())+" "+answer.get("note",""),req,state.get("stops",{}))
+        req = Requirements.model_validate({**req,"constraints":merge(req["constraints"],valid,"interview",interview["round_id"])}).model_dump(mode="json")
         return {"requirements":req,"interview":{**interview,"history":history,"confirmed":False}}
 
     async def selection_gate(self,state):

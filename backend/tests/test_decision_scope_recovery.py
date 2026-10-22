@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from app.adapters import ToolError
 from app.agents.runtime import digest
-from app.models import DECISION_REQUIREMENT_FIELDS, DecisionResolution, Requirements
+from app.models import DECISION_REQUIREMENT_FIELDS, ConstraintDraft, DecisionResolution, Requirements
 from app.planner import Planner
 
 
@@ -71,6 +71,27 @@ class DecisionScopeRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(private,"\n".join(captured.output))
         self.assertNotIn(self.answer,"\n".join(captured.output))
         self.assertEqual(result["decision_history"][-1]["answers"],{"transit":self.answer})
+
+    async def test_conditional_transit_choice_becomes_a_dated_constraint(self):
+        rule = ConstraintDraft(kind="transit_rule",rule="auto_by_transit",quote="按实时公共交通结果自动判断",
+                               scope={"dates":["2026-10-16"],"stop_ids":["guide:dsk","guide:zj"]})
+        self.planner.models.ask.return_value = DecisionResolution(constraints=[rule],explanation="已记录条件式取舍")
+        result = await self.resolve()
+        self.planner.models.ask.assert_awaited_once()
+        [stored] = result["requirements"]["constraints"]
+        self.assertEqual((stored["kind"],stored["rule"],stored["source"]),("transit_rule","auto_by_transit","decision"))
+        self.assertEqual(stored["scope"]["dates"],["2026-10-16"])
+        self.assertEqual(result["requirements"]["preferences"],self.state["requirements"]["preferences"])
+
+    async def test_constraint_quote_outside_the_answer_is_corrected_once(self):
+        invented = ConstraintDraft(kind="fewer_walking",quote="用户说过少走路")
+        self.planner.models.ask.side_effect = [DecisionResolution(constraints=[invented]),
+                                               DecisionResolution(explanation="按回答继续")]
+        result = await self.resolve()
+        self.assertEqual(self.planner.models.ask.await_count,2)
+        issues = self.planner.models.ask.await_args_list[1].args[2]["validation_errors"]
+        self.assertEqual([item["field"] for item in issues],["constraints"])
+        self.assertEqual(result["requirements"]["constraints"],[])
 
     async def test_invalid_requirement_value_is_corrected_instead_of_crashing_the_run(self):
         self.answer = "返程最晚下午3点到家"

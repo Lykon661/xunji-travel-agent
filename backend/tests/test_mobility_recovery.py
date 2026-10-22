@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from app.adapters import Amap, ToolError
-from app.models import REVIEW_DIMENSIONS, Requirements, ReviewRepairResolution
+from app.models import REVIEW_DIMENSIONS, Constraint, Requirements, ReviewRepairResolution
 from app.planner import Planner
 from app.planning_recovery import previous_round, regression_reason
 from app.reviewing import bind_report, review_basis
@@ -61,7 +61,8 @@ class Mobility(unittest.IsolatedAsyncioTestCase):
 
     async def test_fifteen_minute_walk_skips_transit_despite_old_less_walking_preference(self):
         self.planner.amap.route.return_value = {"minutes":15,"mode":"walking","walking_meters":1400}
-        state = {**self.state,"requirements":{**REQ,"local_transport":"public","preferences":"少走路"}}
+        fewer = Constraint(id="c_walk",source="form",kind="fewer_walking",strength="soft",quote="少走路").model_dump(mode="json")
+        state = {**self.state,"requirements":{**REQ,"local_transport":"public","preferences":"少走路","constraints":[fewer]}}
         move,_ = await self.planner.movement(state,"杭州","甲","乙")
         self.assertEqual(move["mode"],"walking")
         self.assertFalse(move["transit_queried"])

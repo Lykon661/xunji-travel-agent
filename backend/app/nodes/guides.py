@@ -11,6 +11,7 @@ from ..store import Conflict, dump
 from ..routing import coordinates
 from ..agents.runtime import digest
 from ..decisions import apply_walking_decision, walking_question
+from ..constraints import CONSTRAINT_GUIDE, check, merge, preferences_basis, refresh_form_constraints, stop_catalog
 from ..dining import is_dining
 from ..workflow.state import TripState
 
@@ -155,17 +156,22 @@ class GuideNodes:
             question = (last.get("questions") or [{}])[0]
             if walking_question(question):
                 req,_ = apply_walking_decision(req,question," ".join(last.get("answers",{}).values())+" "+last.get("note",""))
+        # Stops are only needed to resolve constraint targets: a new message or edited preferences text.
+        reextract = preferences_basis(req.get("preferences","")) != req.get("constraints_basis","")
+        available = self.source_stops(state["trip_id"], state.get("selected_source_ids", [])) if reextract or state.get("message") and not change else {}
+        drafts = []
         if state.get("message") and not change:
             if state["mode"] == "modify":
-                available = self.source_stops(state["trip_id"], state.get("selected_source_ids", []))
                 update = await self.models.ask(ChangeRequest,
                     "识别用户修改：只填写明确的需求变化。scopes可同时包括酒店、活动、交通；日期或城市顺序变化必须full。"
                     "cities和dates指定受影响范围，未指定时为空。减少走路或活动用fewer_activities；酒店变便宜用cheaper_hotel。"
                     "用户明确要求保留的城市填preserve_cities。第二天等相对日期转换成当前行程中对应的准确日期，不扩大到其他天。"
                     "新增活动只可使用已有攻略stop_id；无相应资料时使用full重新检索，不编造ID。"
-                    "市内local_transport：公交地铁为public，只步行为walking，自驾为driving，骑行为bicycling；明确允许打车才填allow_taxi=true，跨城transport单独填写。",
+                    "市内local_transport：公交地铁为public，只步行为walking，自驾为driving，骑行为bicycling；明确允许打车才填allow_taxi=true，跨城transport单独填写。"
+                    +CONSTRAINT_GUIDE,
                     {"requirements":req,"message":state["message"],"current":state.get("old_itinerary"),"available_stops":available})
                 change = update.model_dump(mode="json")
+                drafts = change.pop("constraints",[])
                 before = Requirements.model_validate(state.get("old_requirements") or req).model_dump(mode="json")
                 req = Requirements.model_validate({**req,**change["requirements"]}).model_dump(mode="json")
                 if any(before.get(k) != req.get(k) for k in ("cities","origin","start_date","end_date","people","rooms","return_to_origin","self_arranged_round_trip","children","earliest_departure","latest_arrival","latest_return","direct_only","max_transport_hours")):
@@ -177,13 +183,20 @@ class GuideNodes:
             else:
                 update = await self.models.ask(RequirementUpdate,
                     "提取用户明确的旅行需求。不要推测年份、人数、房间数或日期。预算是整趟旅行总预算。保留用户目的地顺序。"
-                    "市内local_transport：公交地铁为public，只步行为walking，自驾为driving，骑行为bicycling；明确允许打车才填allow_taxi=true，跨城transport单独填写。",
-                    {"current":req,"message":state["message"]})
+                    "市内local_transport：公交地铁为public，只步行为walking，自驾为driving，骑行为bicycling；明确允许打车才填allow_taxi=true，跨城transport单独填写。"
+                    +CONSTRAINT_GUIDE,
+                    {"current":req,"message":state["message"],"available_stops":stop_catalog(available)})
                 req = Requirements.model_validate({**req,**update.requirements}).model_dump(mode="json")
+                drafts = [item.model_dump(mode="json") for item in update.constraints]
                 change = {"explanation":update.explanation}
         if re.search(r"(?:不|不要|不想|不能|禁止|拒绝)(?:乘坐|坐)?(?:打车|出租车|网约车)",state.get("message","")):
             req = {**req,"allow_taxi":False}
         req = Requirements.model_validate(req).model_dump(mode="json")
+        if preferences_basis(req["preferences"]) != req["constraints_basis"]:
+            req = Requirements.model_validate(await refresh_form_constraints(self.models,req,available)).model_dump(mode="json")
+        if drafts:
+            valid,_ = check(drafts,state["message"],req,available)
+            req = Requirements.model_validate({**req,"constraints":merge(req["constraints"],valid,"message")}).model_dump(mode="json")
         previous_limit = state.get("old_requirements",state["requirements"]).get("max_walk_per_day",8000)
         if req["max_walk_per_day"] != previous_limit:
             req["walking_limit_exempt_dates"] = []

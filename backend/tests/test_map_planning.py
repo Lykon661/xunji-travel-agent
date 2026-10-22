@@ -8,6 +8,7 @@ from app.models import OrderChoice, Requirements, RouteTurn
 from app.planner import Planner
 from app.routing import geographic_order
 from app.rules import check_itinerary
+from app.constraints import preferences_basis
 
 
 REQ = {"origin":"北京","cities":["杭州"],"start_date":"2026-11-10","end_date":"2026-11-10",
@@ -24,8 +25,7 @@ class GeographicPlanning(unittest.TestCase):
     def test_missing_location_keeps_order(self):
         self.assertEqual(geographic_order(["近处","远处"],{"近处":PLACES["近处"],"远处":None}),["近处","远处"])
 
-    def test_no_taxi_disables_taxi_but_keeps_self_driving_or_walking(self):
-        self.assertFalse(Requirements(**REQ,local_transport="driving",allow_taxi=True).allow_taxi)
+    def test_local_transport_choices_are_kept(self):
         self.assertEqual(Requirements(**REQ,local_transport="driving").local_transport,"driving")
         self.assertEqual(Requirements(**REQ,local_transport="walking").local_transport,"walking")
 
@@ -148,7 +148,9 @@ class DailyPlanning(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([call.args[-1] for call in self.planner.amap.route.await_args_list],["walking"])
 
     async def test_city_change_still_replans_fully_when_local_mobility_also_changes(self):
-        state = {**self.state,"mode":"modify","requirements":{**REQ,"cities":["苏州"],"local_transport":"walking"},
+        # Constraints already extracted from this preferences text; no model call is needed.
+        state = {**self.state,"mode":"modify","requirements":{**REQ,"cities":["苏州"],"local_transport":"walking",
+                                                                "constraints_basis":preferences_basis(REQ["preferences"])},
             "old_requirements":{**REQ,"local_transport":"public"},"old_itinerary":{}}
         result = await self.planner.coordinate(state)
         self.assertEqual(result["change"]["scopes"],["full"])

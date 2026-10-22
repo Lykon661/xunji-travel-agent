@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from app.adapters import ToolError
-from app.models import OrderChoice, RouteTurn
+from app.models import Constraint, OrderChoice, RouteTurn
 from app.planner import Planner
 from app.routing import early_finish, reference_opening
 from app.rules import check_itinerary
@@ -378,7 +378,8 @@ class DailyCoverage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scheduled["return_move"]["minutes"],15)
 
     async def test_explicit_duration_or_locked_activity_is_not_silently_shortened(self):
-        for extra in ({"locks":["zoo"]},{"requirements":{"preferences":"长隆至少游玩9小时"}}):
+        duration = Constraint(id="c_zoo",source="form",kind="visit_duration",scope={"stop_ids":["zoo"]},minutes=540,quote="长隆至少游玩9小时")
+        for extra in ({"locks":["zoo"]},{"requirements":{"preferences":"长隆至少游玩9小时","constraints":[duration.model_dump(mode="json")]}}):
             with self.subTest(extra=extra):
                 state = self.state({"zoo":stop("zoo",540,map_place=opening_place(ZOO_HOURS))},["zoo"])
                 state["selected_route"]["days"][0]["date"] = ZOO_DATE

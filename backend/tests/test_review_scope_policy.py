@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock
 from app.adapters import ToolError
 from app.agents.reviewer import ReviewerAgent
 from app.decisions import confirmation_blockers
-from app.models import Requirements, ReviewReport, REVIEW_DIMENSIONS
+from app.models import Constraint, Requirements, ReviewReport, REVIEW_DIMENSIONS
 from app.planner import Planner
 from app.reviewing import correct_transfer_arithmetic, review_payload, review_scope, review_semantic_errors
 from app.rules import check_itinerary
@@ -75,7 +75,8 @@ class ScopePolicy(unittest.TestCase):
         value.findings[0].evidence_ids.append("query:boarding-deadline")
         self.assertEqual(correct_transfer_arithmetic(value,self.payload).status,"revise")
         value.findings[0].evidence_ids = ["query:route"]
-        self.payload["requirements"] = {**REQ,"preferences":"用户要求至少预留30分钟缓冲"}
+        buffer = Constraint(id="c_buffer",source="form",kind="transfer_buffer",mode="train",minutes=30,quote="至少预留30分钟缓冲")
+        self.payload["requirements"] = {**REQ,"constraints":[buffer.model_dump(mode="json")]}
         self.assertEqual(correct_transfer_arithmetic(value,self.payload).status,"revise")
 
     def test_meals_and_waiting_are_already_excluded_from_available_transfer_time(self):
@@ -159,8 +160,11 @@ class ScopePolicy(unittest.TestCase):
         self.assertFalse(review_semantic_errors(report("门票已售罄，无法预约",path="/days/0/activities/0"),self.payload))
 
     def test_explicit_user_booking_prerequisite_is_still_enforced(self):
-        self.payload["requirements"] = {**REQ,"preferences":"预约成功后才安排参观"}
+        booking = Constraint(id="c_booking",source="form",kind="booking_prerequisite",scope={"stop_ids":["guide:a"]},quote="预约成功后才安排参观")
+        self.payload["requirements"] = {**REQ,"constraints":[booking.model_dump(mode="json")]}
         self.assertFalse(review_semantic_errors(report("预约未完成，尚未满足用户前置条件"),self.payload))
+        self.payload["requirements"]["constraints"][0]["superseded_by"] = "c_newer"
+        self.assertTrue(review_semantic_errors(report("预约未完成，尚未满足用户前置条件"),self.payload))
 
     def test_unsupported_opening_conflict_summary_is_rejected_but_negation_is_not(self):
         self.assertTrue(review_semantic_errors(report(summary="存在明确的开放时间冲突"),self.payload))

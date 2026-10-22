@@ -22,7 +22,7 @@ import SourceModal from './SourceModal.vue'
 import BudgetPanel from './BudgetPanel.vue'
 import { money } from './format'
 import { resolveWorkflowTab, workflowStamp, type WorkflowTab } from './workflow'
-import type { Capabilities, ModelConfiguration, Candidate, InterviewResponse, ProgressEvent, Requirements, Source, Trip, TripSummary, Version, VersionSummary, TripDocument, MapResult } from './types'
+import type { Capabilities, ModelConfiguration, Candidate, InterviewResponse, ProgressEvent, PlanningConstraint, Requirements, Source, Trip, TripSummary, Version, VersionSummary, TripDocument, MapResult } from './types'
 
 const trips = ref<TripSummary[]>([]), current = ref<Trip | null>(null), versions = ref<VersionSummary[]>([])
 const versionDocuments = ref<Record<number,TripDocument>>({})
@@ -97,6 +97,24 @@ const canSaveItinerary = computed(() => canEdit.value && !!itinerary.value && sa
 const itineraryStatus = computed(() => isHistory.value ? `已保存 · v${selectedVersion.value}` : savedItineraryVersion.value !== null ? `已保存 · v${savedItineraryVersion.value}` : '未保存的草稿')
 const visibleSources = computed(() => isHistory.value ? doc.value?.sources_snapshot || current.value?.sources || [] : current.value?.sources || [])
 const sourceStops = computed(() => new Map([...visibleSources.value.flatMap(s => s.extraction?.stops || []),...(doc.value?.supplements || [])].map(s => [s.id,s])))
+const activeConstraints = computed(() => (requirements.constraints || []).filter(item => !item.superseded_by && !item.revoke))
+const preferencesEdited = computed(() => requirements.preferences !== (doc.value?.requirements.preferences ?? ''))
+const anchorLabels = {sunrise:'看日出',sunset:'看日落',appointment:'按预约时刻','':''}
+const modeLabels = {train:'火车',flight:'航班',ferry:'船班','':'班次'}
+function stopName(id: string) { return sourceStops.value.get(id)?.name || '攻略依据已变化的地点' }
+function constraintText(item: PlanningConstraint) {
+  const stop = item.scope.stop_ids[0] ? stopName(item.scope.stop_ids[0]) : ''
+  const body = {
+    fewer_walking:'尽量少走路',
+    fixed_order:`先去${stopName(item.before)}，再去${stopName(item.after)}`,
+    time_anchor:`${stop}${anchorLabels[item.anchor]}${item.at ? ' '+item.at : ''}`,
+    visit_duration:`${stop}游玩${item.minutes}分钟`,
+    transfer_buffer:`${modeLabels[item.mode]}出发前预留${item.minutes}分钟`,
+    booking_prerequisite:`${stop}须先完成预约再安排`,
+    transit_rule:item.rule === 'public_only' ? '市内只用公共交通' : '按真实公交查询结果自动取舍',
+  }[item.kind]
+  return (item.scope.dates.length ? item.scope.dates.join('、')+'：' : '')+body+(item.strength === 'soft' ? '（尽量）' : '')
+}
 const sourceMap = computed(() => new Map(visibleSources.value.map(s => [s.id,s])))
 const interviewPending = computed(() => ['interview','interview_confirmation','decision'].includes(doc.value?.pending?.kind || '') ? doc.value?.pending : null)
 const tripDayCount = computed(() => {
@@ -806,6 +824,14 @@ onUnmounted(() => {events?.close();window.clearInterval(runPoll);window.removeEv
                   <label class="wide-label">兴趣与旅行节奏
                     <textarea v-model="requirements.preferences" placeholder="例如：不打车、少走路、喜欢园林和博物馆、不想太赶" rows="3" maxlength="2000"></textarea>
                   </label>
+
+                  <div v-if="activeConstraints.length" class="wide-label stop-marks">
+                    <strong>已识别的条件</strong>
+                    <p v-for="item in activeConstraints" :key="item.id">
+                      {{ constraintText(item) }} <small class="subtle">「{{ item.quote }}」</small>
+                    </p>
+                    <small v-if="preferencesEdited" class="subtle">修改上面的文字后，会在下次生成路线时重新识别。</small>
+                  </div>
 
                   <div v-if="requirements.required_stop_ids?.length" class="wide-label stop-marks">
                     <strong>必去景点标记</strong>
