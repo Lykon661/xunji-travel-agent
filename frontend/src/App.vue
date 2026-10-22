@@ -99,13 +99,19 @@ const visibleSources = computed(() => isHistory.value ? doc.value?.sources_snaps
 const sourceStops = computed(() => new Map([...visibleSources.value.flatMap(s => s.extraction?.stops || []),...(doc.value?.supplements || [])].map(s => [s.id,s])))
 const activeConstraints = computed(() => (requirements.constraints || []).filter(item => !item.superseded_by && !item.revoke))
 const preferencesEdited = computed(() => requirements.preferences !== (doc.value?.requirements.preferences ?? ''))
+const constraintsEdited = computed(() => JSON.stringify(requirements.constraints || []) !== JSON.stringify(doc.value?.requirements.constraints || []))
+// Deleting keeps whatever this condition replaced inactive: the user asked to drop the condition, not to restore an older one.
+function removeConstraint(id: string) { requirements.constraints = (requirements.constraints || []).filter(item => item.id !== id) }
+function toggleConstraintStrength(id: string) {
+  requirements.constraints = (requirements.constraints || []).map(item => item.id === id ? {...item,strength:item.strength === 'hard' ? 'soft' : 'hard'} : item)
+}
 const anchorLabels = {sunrise:'看日出',sunset:'看日落',appointment:'按预约时刻','':''}
 const modeLabels = {train:'火车',flight:'航班',ferry:'船班','':'班次'}
 function stopName(id: string) { return sourceStops.value.get(id)?.name || '攻略依据已变化的地点' }
 function constraintText(item: PlanningConstraint) {
   const stop = item.scope.stop_ids[0] ? stopName(item.scope.stop_ids[0]) : ''
   const body = {
-    fewer_walking:'尽量少走路',
+    fewer_walking:item.meters ? `每天步行不超过${item.meters}米` : '少走路',
     fixed_order:`先去${stopName(item.before)}，再去${stopName(item.after)}`,
     time_anchor:`${stop}${anchorLabels[item.anchor]}${item.at ? ' '+item.at : ''}`,
     visit_duration:`${stop}游玩${item.minutes}分钟`,
@@ -113,7 +119,9 @@ function constraintText(item: PlanningConstraint) {
     booking_prerequisite:`${stop}须先完成预约再安排`,
     transit_rule:item.rule === 'public_only' ? '市内只用公共交通' : '按真实公交查询结果自动取舍',
   }[item.kind]
-  return (item.scope.dates.length ? item.scope.dates.join('、')+'：' : '')+body+(item.strength === 'soft' ? '（尽量）' : '')
+  // Without a distance, "less walking" is only ever a target.
+  const soft = item.strength === 'soft' || (item.kind === 'fewer_walking' && !item.meters)
+  return (item.scope.dates.length ? item.scope.dates.join('、')+'：' : '')+body+(soft ? '（尽量）' : '')
 }
 const sourceMap = computed(() => new Map(visibleSources.value.map(s => [s.id,s])))
 const interviewPending = computed(() => ['interview','interview_confirmation','decision'].includes(doc.value?.pending?.kind || '') ? doc.value?.pending : null)
@@ -829,8 +837,11 @@ onUnmounted(() => {events?.close();window.clearInterval(runPoll);window.removeEv
                     <strong>已识别的条件</strong>
                     <p v-for="item in activeConstraints" :key="item.id">
                       {{ constraintText(item) }} <small class="subtle">「{{ item.quote }}」</small>
+                      <button v-if="item.kind !== 'fewer_walking' || item.meters" class="text-button" type="button" @click="toggleConstraintStrength(item.id)">{{ item.strength === 'hard' ? '改为尽量满足' : '改为必须满足' }}</button>
+                      <button class="text-button" type="button" @click="removeConstraint(item.id)">删除</button>
                     </p>
                     <small v-if="preferencesEdited" class="subtle">修改上面的文字后，会在下次生成路线时重新识别。</small>
+                    <small v-else-if="constraintsEdited" class="subtle">条件的改动在保存需求后生效。</small>
                   </div>
 
                   <div v-if="requirements.required_stop_ids?.length" class="wide-label stop-marks">

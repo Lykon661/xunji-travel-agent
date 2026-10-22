@@ -4,13 +4,13 @@ import json
 import logging
 import re
 
-from .models import ConstraintDraft, ConstraintExtraction, SINGLE_STOP_KINDS
+from .models import CONSTRAINT_RECORD_FIELDS, ConstraintDraft, ConstraintExtraction, SINGLE_STOP_KINDS, constraint_id
 
 
 MAX_CONSTRAINTS = 60
 
 CONSTRAINT_GUIDE = (
-    "constraints只记录用户原话明确提出、可归入以下种类的条件：fewer_walking少走路；"
+    "constraints只记录用户原话明确提出、可归入以下种类的条件：fewer_walking少走路（用户给出每天步行距离或时长上限时填meters，时长按每分钟80米换算；没给数字留空）；"
     "fixed_order两个地点的先后（before先去、after后去；城市先后由cities顺序表达，不写入）；"
     "time_anchor某地点的日出/日落/预约时刻（anchor=sunrise/sunset/appointment，已知时刻填at）；"
     "visit_duration某地点的游玩时长（minutes）；transfer_buffer城际班次前预留缓冲（mode=train/flight/ferry，minutes）；"
@@ -82,8 +82,8 @@ def merge(existing, drafts, source, round_id=""):
     """Append validated drafts; an equal active constraint is kept once, an overlapping older one is superseded."""
     result = [dict(item) for item in existing]
     for draft in drafts:
-        item = {key_:value for key_,value in draft.items() if key_ not in {"id","source","round_id","superseded_by"}}
-        identity = "c_"+digest({key_:value for key_,value in item.items() if key_ != "quote"})[:12]
+        item = {key_:value for key_,value in draft.items() if key_ not in CONSTRAINT_RECORD_FIELDS-{"quote"}}
+        identity = constraint_id(item)
         live = [entry for entry in result if not entry.get("superseded_by")]
         if any(entry["id"] == identity for entry in live):
             continue
@@ -110,6 +110,29 @@ def active(req, kind, *, date=None, stop_id=None):
             if item["kind"] == kind and not item.get("superseded_by") and not item.get("revoke")
             and (date is None or not item["scope"]["dates"] or str(date) in item["scope"]["dates"])
             and (stop_id is None or not item["scope"]["stop_ids"] or stop_id in item["scope"]["stop_ids"])]
+
+
+# 「少走路」没有给出数字时的每日步行目标（约一小时步行），超过只提示、不阻断。
+FEWER_WALKING_METERS = 5000
+
+
+def walking_target(req, date=None):
+    """Soft daily walking target from fewer_walking constraints without a hard meter cap; None when there is none."""
+    targets = [item["meters"] or FEWER_WALKING_METERS for item in active(req,"fewer_walking",date=date)
+               if not item["meters"] or item["strength"] == "soft"]
+    return min(targets) if targets else None
+
+
+def public_only(req):
+    """A trip-wide "public transport only" rule; date- or stop-scoped rules are checked on the plan instead."""
+    return any(item["rule"] == "public_only" and not item["scope"]["dates"] and not item["scope"]["stop_ids"]
+               for item in active(req,"transit_rule"))
+
+
+def station_buffer(req, kind, date=None):
+    """Pre-departure buffer for a train or flight, raised to any stricter user transfer_buffer."""
+    default = 120 if kind == "flight" else 60
+    return max([default,*(item["minutes"] for item in active(req,"transfer_buffer",date=date) if item["mode"] == kind)])
 
 
 def stop_catalog(stops):

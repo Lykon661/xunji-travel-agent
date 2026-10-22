@@ -8,6 +8,7 @@ from ..store import now
 from ..routing import coordinates, distance
 from ..resource_planning import chosen_hotel, comparison, same_resource, transport_issues
 from ..reviewing import quote_expiry
+from ..constraints import station_buffer
 
 
 class ResourceNodes:
@@ -225,7 +226,7 @@ class ResourceNodes:
                 result.append(kept)
             else:
                 result.append({**segment,"options":options,"selected":selected,"reason":reason,"evidence_ids":query_ids,
-                               "buffer_minutes":120 if selected and selected["kind"] == "flight" else 60,"errors":list(dict.fromkeys(failures)),
+                               "buffer_minutes":station_buffer(req,selected["kind"] if selected else "",segment["context"]["date"]),"errors":list(dict.fromkeys(failures)),
                                "comparison":[comparison(option,req) for option in options]})
             warnings.extend(segment["label"]+"："+failure for failure in failures)
         itinerary = copy.deepcopy(state.get("itinerary") or {}); itinerary["transport"] = result

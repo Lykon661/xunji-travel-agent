@@ -7,12 +7,15 @@ from .models import Candidate, Requirements
 from .dining import is_dining
 from .places import canonicalize_stops, canonical_key, repeat_allowed, duplicate_issues
 from .routing import daily_route_scope, daily_movements, transport_access_transfers
+from .constraints import active, walking_target
 
 
 def walking_limit(req, day_date=None):
     if day_date and day_date in req.get("walking_limit_exempt_dates",[]):
         return None
-    return req.get("max_walk_per_day",8000)
+    # A "less walking" condition with an explicit distance tightens the daily cap.
+    caps = [item["meters"] for item in active(req,"fewer_walking",date=day_date) if item["meters"] and item["strength"] == "hard"]
+    return min([req.get("max_walk_per_day",8000),*caps])
 
 
 def ticket_policy(item):
@@ -181,6 +184,66 @@ def validate_candidate(candidate: Candidate, req: Requirements, stops: dict) -> 
     return candidate
 
 
+def constraint_issues(itinerary: dict, req: dict):
+    """Check the user constraints a finished plan can show: order, appointment times, visit lengths, walking and transit."""
+    issues, notes, placed = [], [], {}
+    for day in itinerary.get("days",[]):
+        for index,activity in enumerate(day.get("activities",[])):
+            if activity.get("kind") == "visit":
+                placed.setdefault(activity["id"],(day["date"],index,activity))
+    def violated(item, target, message, blocking=None, **extra):
+        issues.append({"code":"user_constraint","constraint_id":item["id"],"target":target,
+                       "message":message+"（用户要求："+item["quote"]+"）",
+                       "blocking":item["strength"] == "hard" if blocking is None else blocking,**extra})
+    def in_scope(item, *found):
+        return all(entry[0] in item["scope"]["dates"] for entry in found) if item["scope"]["dates"] else True
+    for item in active(req,"fixed_order"):
+        first,second = placed.get(item["before"]),placed.get(item["after"])
+        if first and second and in_scope(item,first,second) and first[:2] > second[:2]:
+            violated(item,item["after"],second[2]["name"]+"被安排在"+first[2]["name"]+"之前")
+    for kind in ("time_anchor","visit_duration","booking_prerequisite"):
+        for item in active(req,kind):
+            found = placed.get(item["scope"]["stop_ids"][0])
+            if not found or not in_scope(item,found):
+                continue
+            day_date,_,activity = found
+            start,end = timestamp(activity.get("start"),day_date),timestamp(activity.get("end"),day_date)
+            if kind == "time_anchor" and item["anchor"] == "appointment" and item["at"] and start != timestamp(item["at"],day_date):
+                violated(item,activity["id"],activity["name"]+"安排在"+str(activity.get("start"))+"开始，与预约时刻"+item["at"]+"不符")
+            elif kind == "visit_duration" and start and end:
+                meal = activity.get("meal_break") if isinstance(activity.get("meal_break"),dict) else {}
+                meal_start,meal_end = timestamp(meal.get("start"),day_date),timestamp(meal.get("end"),day_date)
+                length = (end-start).total_seconds()/60-((meal_end-meal_start).total_seconds()/60 if meal_start and meal_end else 0)
+                if length < item["minutes"]:
+                    violated(item,activity["id"],activity["name"]+"实际游玩约"+str(round(length))+"分钟，少于要求的"+str(item["minutes"])+"分钟")
+            elif kind == "booking_prerequisite":
+                notes.append(activity["name"]+"：按你的要求须先完成预约再前往，请出发前确认预约")
+    for day in itinerary.get("days",[]):
+        target,limit = walking_target(req,day["date"]),walking_limit(req,day["date"])
+        walked = day.get("walking_meters") or 0
+        if target is not None and limit is not None and target < limit and walked > target:
+            item = next(entry for entry in active(req,"fewer_walking",date=day["date"]) if not entry["meters"] or entry["strength"] == "soft")
+            # Without a number from the user this is a target, not a cap: it is reported but never blocks.
+            violated(item,day["date"],day["date"]+"预计步行约"+str(walked)+"米，超过少走路的目标"+str(target)+"米",blocking=False)
+        for item in active(req,"transit_rule",date=day["date"]):
+            stops = set(item["scope"]["stop_ids"])
+            visits = [activity for activity in day.get("activities",[])
+                      if activity.get("kind") == "visit" and (not stops or activity["id"] in stops)]
+            if item["rule"] == "public_only":
+                moves = [(activity["id"],activity.get("move_before") or {}) for activity in visits]
+                if not stops:
+                    moves += [(day["date"],day.get("return_move") or {})]+[(day["date"],transfer["move"]) for transfer in day.get("transfers",[])]
+                for target,move in moves:
+                    if move.get("mode") in {"driving","bicycling"}:
+                        violated(item,target,day["date"]+"有一段路线使用了"+("驾车" if move["mode"] == "driving" else "骑行")+"，不是公共交通或步行")
+            else:
+                for activity in visits:
+                    if activity.get("move_before") and activity["move_before"].get("minutes") is None:
+                        # The user authorised dropping a stop without a real route; the repair step removes it.
+                        violated(item,activity["id"],activity["name"]+"没有查到可用的公共交通路线，按约定应取消而不是保留",repair="drop")
+    return issues,notes
+
+
 def check_itinerary(itinerary: dict, req: dict) -> dict:
     issues, lines, unknown, information_unknown, constraint_notes = [], [], [], [], []
     mobility = Requirements.model_validate(req).local_transport
@@ -345,6 +408,9 @@ def check_itinerary(itinerary: dict, req: dict) -> dict:
     total_estimate = known + estimates + estimated_resources + estimated_tickets + estimated_local
     if total_estimate > money(req["budget"]):
         issues.append({"code":"over_budget","message":f"已知费用加各项估算 {total_estimate} 元超过预算 {money(req['budget'])} 元","target":"budget","blocking":True})
+    user_issues,user_notes = constraint_issues(itinerary,req)
+    issues.extend(user_issues)
+    constraint_notes.extend(user_notes)
     unknown = list(dict.fromkeys(unknown))
     if ablation.disabled("code_checks"):
         issues = []

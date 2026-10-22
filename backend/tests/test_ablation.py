@@ -96,6 +96,17 @@ class Scoring(unittest.TestCase):
         self.assertEqual(visit_duplicates(visits),(0,0))
         self.assertEqual(visit_duplicates(visits,[["陈家祠","陈氏书院"],["北京路步行街","北京路"]]),(1,0))
 
+    def test_user_constraints_are_scored_and_extraction_is_compared_by_kind(self):
+        from app.constraints import merge
+        from app.models import ConstraintDraft
+        order = ConstraintDraft(kind="fixed_order",before="c",after="a",quote="先去小蛮腰再去广州塔").model_dump(mode="json")
+        requirements = {**REQUIREMENTS,"constraints":merge([],[order],"form")}
+        candidate = {"draft":plan(),"days":[{"date":"2026-12-12","city":"广州"},{"date":"2026-12-13","city":"广州"}]}
+        result = evaluate(requirements,candidate,{"a","b","c","d","e"},expected_constraints=[{"kind":"fixed_order"},{"kind":"fewer_walking"}])
+        self.assertEqual(result["user_constraint_violation"],1)
+        self.assertEqual((result["constraints_expected"],result["constraints_extracted"],result["constraints_matched"]),(2,1,1))
+        self.assertNotIn("constraints_expected",evaluate(REQUIREMENTS,candidate,set()))
+
     def test_wrong_dates_and_city_order_are_counted(self):
         candidate = {"days":[{"date":"2026-12-12","city":"深圳"}],"draft":{}}
         result = evaluate({**REQUIREMENTS,"cities":["广州"]},candidate,set())

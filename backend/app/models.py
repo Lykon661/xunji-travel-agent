@@ -1,4 +1,6 @@
 from datetime import date as Date
+import hashlib
+import json
 import re
 from typing import Literal
 
@@ -56,6 +58,7 @@ class ConstraintDraft(BaseModel):
     anchor: Literal["", "sunrise", "sunset", "appointment"] = ""
     at: str | None = Field(default=None, pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$", description="time_anchor的指定时刻HH:MM")
     minutes: int | None = Field(default=None, ge=5, le=720, description="visit_duration游玩分钟数或transfer_buffer缓冲分钟数")
+    meters: int | None = Field(default=None, ge=500, le=50000, description="fewer_walking用户给出的每天步行上限（米）")
     mode: Literal["", "train", "flight", "ferry"] = ""
     rule: Literal["", "public_only", "auto_by_transit"] = ""
     revoke: bool = Field(default=False, description="true表示取消此前同种类、同对象的条件")
@@ -82,11 +85,25 @@ class ConstraintDraft(BaseModel):
         return self
 
 
+CONSTRAINT_RECORD_FIELDS = frozenset({"id", "source", "round_id", "superseded_by", "quote"})
+
+
+def constraint_id(item: dict) -> str:
+    """Identity from the condition itself, so an edited constraint never keeps a stale ID."""
+    content = {key:value for key,value in item.items() if key not in CONSTRAINT_RECORD_FIELDS}
+    return "c_"+hashlib.sha256(json.dumps(content,ensure_ascii=False,sort_keys=True,default=str).encode()).hexdigest()[:12]
+
+
 class Constraint(ConstraintDraft):
-    id: str = Field(min_length=1, max_length=40)
+    id: str = Field(default="", max_length=40)
     source: Literal["form", "message", "interview", "decision"]
     round_id: str = Field(default="", max_length=200)
     superseded_by: str = Field(default="", max_length=40)
+
+    @model_validator(mode="after")
+    def content_identity(self):
+        self.id = constraint_id(self.model_dump(mode="json"))
+        return self
 
 
 class Requirements(BaseModel):

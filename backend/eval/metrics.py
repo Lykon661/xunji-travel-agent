@@ -6,6 +6,7 @@
 """
 import copy
 import re
+from collections import Counter
 import unicodedata
 from datetime import date, timedelta
 
@@ -17,7 +18,8 @@ from app.rules import check_itinerary
 
 # 计入「硬约束违反」总数的指标；其余为辅助信息。
 VIOLATIONS = ("date_coverage_error", "city_order_error", "dup_visit", "dup_meal", "sourceless_visit",
-              "time_conflict", "opening_violation", "lunch_missing", "walking_over_limit", "over_budget")
+              "time_conflict", "opening_violation", "lunch_missing", "walking_over_limit", "over_budget",
+              "user_constraint_violation")
 SUFFIXES = ("风景名胜区", "风景区", "旅游区", "步行街", "步行区", "景区")
 
 
@@ -77,7 +79,7 @@ def visit_duplicates(visits, aliases=()):
     return extra_occurrences(with_aliases), extra_occurrences(keys)
 
 
-def evaluate(requirements: dict, candidate: dict | None, stop_pool: set[str], aliases=()) -> dict:
+def evaluate(requirements: dict, candidate: dict | None, stop_pool: set[str], aliases=(), expected_constraints=None) -> dict:
     candidate = candidate if isinstance(candidate, dict) else {}
     draft = copy.deepcopy(candidate.get("draft") or {}) if isinstance(candidate.get("draft"), dict) else {}
     days = [day for day in draft.get("days") or [] if isinstance(day, dict)] if isinstance(draft.get("days"), list) else []
@@ -142,6 +144,16 @@ def evaluate(requirements: dict, candidate: dict | None, stop_pool: set[str], al
     result["lunch_missing"] = codes.count("lunch_missing")
     result["walking_over_limit"] = codes.count("walking_limit")
     result["over_budget"] = int(budget.get("status") == "over")
+    # 用户条件约束（顺序、预约时刻、游玩时长）由 rules.constraint_issues 按完整规则判定。
+    result["user_constraint_violation"] = codes.count("user_constraint")
+    if expected_constraints is not None:
+        # 抽取只按种类比对：地点ID是运行时生成的，用例里无法预先写出。
+        extracted = Counter(item.get("kind") for item in requirements.get("constraints", [])
+                            if item.get("source") == "form" and not item.get("superseded_by") and not item.get("revoke"))
+        expected = Counter(item["kind"] for item in expected_constraints)
+        result["constraints_expected"] = sum(expected.values())
+        result["constraints_extracted"] = sum(extracted.values())
+        result["constraints_matched"] = sum((expected & extracted).values())
     result["budget_estimate"] = budget.get("known_plus_estimates")
     result["oracle_code_blockers"] = len(blockers)
     result["missing_route_times"] = sum("实际交通耗时尚未取得" in blocker or "实际耗时尚未取得" in blocker for blocker in blockers)

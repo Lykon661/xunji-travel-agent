@@ -124,7 +124,8 @@ backend/
     nodes/              图节点实现：攻略、候选、资源、定位、日程、审查-修复循环
     agents/             四个 Agent：guide / resource / route / reviewer，共享 runtime
     reviewing.py        审查报告校验、哈希绑定、门禁判断
-    rules.py            预算、时间线、日期覆盖、锁定等确定性规则
+    rules.py            预算、时间线、日期覆盖、锁定、用户条件约束等确定性规则
+    constraints.py      偏好条件约束：抽取校验、覆盖关系、按日期/地点查询
     decisions.py        确认门禁、用户决策处理
     dining.py places.py routing.py   餐饮去重、地点身份、路线排序
     adapters.py         模型 / 高德 MCP / 飞猪 CLI 适配与缓存

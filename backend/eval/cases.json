@@ -1,6 +1,6 @@
 {
  "version": 1,
- "note": "日期为绝对日期以保证录制可回放；过期后整体平移日期并重新录制。traps 只说明设计意图，不参与判分。 suites：core 为默认核心集（5 条），all 为全部 25 条。 所有用例都设 self_arranged_round_trip=true：往返交通由用户自行安排，只评测目的地内的行程规划。 aliases 为已知别名组（同一实际地点的不同叫法），判分时视为同一地点；景区内的子景点不算别名（如北京路千年古道之于北京路、大雁塔之于大慈恩寺）。",
+ "note": "日期为绝对日期以保证录制可回放；过期后整体平移日期并重新录制。traps 只说明设计意图，不参与判分。 suites：core 为默认核心集（5 条），all 为全部 26 条，constraints 为偏好条件约束用例。 所有用例都设 self_arranged_round_trip=true：往返交通由用户自行安排，只评测目的地内的行程规划。 aliases 为已知别名组（同一实际地点的不同叫法），判分时视为同一地点；景区内的子景点不算别名（如北京路千年古道之于北京路、大雁塔之于大慈恩寺）。 expected_constraints 为偏好原文中应抽取的条件，判分只比对种类；names 等字段仅供人工核对。",
  "cases": [
   {
    "id": "gz-2d",
@@ -25,6 +25,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "广州两天一夜经典路线",
@@ -39,6 +40,88 @@
    ],
    "suites": [
     "core",
+    "all"
+   ],
+   "aliases": [
+    [
+     "广州塔",
+     "小蛮腰"
+    ],
+    [
+     "陈家祠",
+     "陈氏书院",
+     "陈家祠堂"
+    ],
+    [
+     "北京路步行街",
+     "北京路"
+    ]
+   ]
+  },
+  {
+   "id": "gz-2d-constraints",
+   "title": "广州两日（偏好条件）",
+   "traps": [
+    "沙面须排在广州塔之前",
+    "陈家祠游玩不少于120分钟",
+    "广东省博物馆按14:00预约时刻开始",
+    "少走路只影响路线选择，不作为可判定条件"
+   ],
+   "requirements": {
+    "origin": "武汉",
+    "cities": [
+     "广州"
+    ],
+    "start_date": "2026-12-12",
+    "end_date": "2026-12-13",
+    "people": 2,
+    "rooms": 1,
+    "budget": 4000,
+    "preferences": "先去沙面再去广州塔看夜景；陈家祠至少游玩2小时；广东省博物馆已预约下午2点；少走路",
+    "local_transport": "public",
+    "self_arranged_round_trip": true
+   },
+   "expected_constraints": [
+    {
+     "kind": "fixed_order",
+     "names": [
+      "沙面",
+      "广州塔"
+     ]
+    },
+    {
+     "kind": "visit_duration",
+     "names": [
+      "陈家祠"
+     ],
+     "minutes": 120
+    },
+    {
+     "kind": "time_anchor",
+     "names": [
+      "广东省博物馆"
+     ],
+     "anchor": "appointment",
+     "at": "14:00"
+    },
+    {
+     "kind": "fewer_walking"
+    }
+   ],
+   "guides": [
+    {
+     "title": "广州两天一夜经典路线",
+     "city_hint": "广州",
+     "text": "Day1：上午去陈家祠看岭南建筑雕刻，大概1.5小时；中午去北京路步行街逛逛，午饭推荐点都德吃早茶点心；下午去沙面拍欧式老建筑；晚上去广州塔看夜景。\nDay2：上午永庆坊，下午红砖厂，晚上坐珠江夜游。"
+    },
+    {
+     "title": "第一次来广州这样玩不踩雷",
+     "city_hint": "广州",
+     "text": "第一天：陈氏书院（就是陈家祠）一定要去，建筑太美了。然后去北京路，千年古道遗址免费看。午餐点都德或者陶陶居。\n第二天：小蛮腰白天登塔也很值，旁边花城广场散步；下午去广东省博物馆，周一闭馆注意。晚饭陶陶居。"
+    }
+   ],
+   "suites": [
+    "constraints",
     "all"
    ],
    "aliases": [
@@ -79,6 +162,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "广州三天穷游攻略",
@@ -122,6 +206,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "深圳两日城市漫游",
@@ -171,6 +256,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "广州深圳三日联游",
@@ -215,6 +301,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "成都三天吃喝玩乐",
@@ -260,6 +347,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "重庆两天一夜",
@@ -309,6 +397,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "西安三天历史线",
@@ -361,6 +450,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "杭州西湖两日",
@@ -410,6 +500,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "上海两天citywalk",
@@ -454,6 +545,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "上海一日",
@@ -493,6 +585,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "南京两日",
@@ -537,6 +630,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "苏州园林两日",
@@ -576,6 +670,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "厦门三天",
@@ -620,6 +715,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "长沙两天吃吃吃",
@@ -664,6 +760,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "武汉两日",
@@ -707,6 +804,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "青岛两天",
@@ -747,6 +845,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "北京五日深度游",
@@ -791,6 +890,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "昆明两天看海鸥",
@@ -835,6 +935,11 @@
     "max_walk_per_day": 3000,
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [
+    {
+     "kind": "fewer_walking"
+    }
+   ],
    "guides": [
     {
      "title": "广州一日暴走",
@@ -869,6 +974,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "成渝三日",
@@ -903,6 +1009,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "广州老城区慢游",
@@ -965,6 +1072,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "西湖四季",
@@ -1025,6 +1133,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "成都慢生活",
@@ -1083,6 +1192,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "西安古都四日",
@@ -1143,6 +1253,7 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
+   "expected_constraints": [],
    "guides": [
     {
      "title": "北京经典五日",

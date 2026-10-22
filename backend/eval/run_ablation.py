@@ -154,7 +154,7 @@ async def run_one(case, variant, repeat, out, cassette, args):
                 {"requirements": doc["requirements"], "candidate": candidate, "decision_history": doc.get("decision_history", []),
                  "warnings": doc.get("warnings", [])}, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
             try:
-                row.update(evaluate(doc["requirements"], candidate, pool, case.get("aliases", [])))
+                row.update(evaluate(doc["requirements"], candidate, pool, case.get("aliases", []), case.get("expected_constraints")))
             except Exception as exc:
                 # 判分脚本的问题不是规划结果：保留规划结局，单独标记，续跑时会重新执行。
                 row.update(outcome="score_error", error=f"判分失败 {type(exc).__name__}: {exc}"[:300])
@@ -293,7 +293,8 @@ def report(out: Path):
         return
     variants = list(dict.fromkeys(row["variant"] for row in rows))
     metrics = [*VIOLATIONS, "dup_visit_strict", "total_violations", "escaped_violations", "confirmable", "reviewer_blockers",
-               "oracle_code_blockers", "decisions", "model_calls", "elapsed_seconds"]
+               "oracle_code_blockers", "decisions", "model_calls", "elapsed_seconds",
+               "constraints_expected", "constraints_extracted", "constraints_matched"]
     summary = {}
     for variant in variants:
         group = [row for row in rows if row["variant"] == variant]
@@ -338,9 +339,10 @@ def report(out: Path):
     labels = {"date_coverage_error": "日期覆盖错误", "city_order_error": "城市顺序错误", "dup_visit": "重复安排地点（含已知别名）", "dup_visit_strict": "其中仅按高德地点/名称识别",
               "dup_meal": "重复推荐餐厅", "sourceless_visit": "无来源地点", "time_conflict": "时间线冲突",
               "opening_violation": "营业/闭馆冲突", "lunch_missing": "未留午餐", "walking_over_limit": "步行超限",
-              "over_budget": "超预算", "total_violations": "违反合计", "escaped_violations": "漏检违反",
+              "over_budget": "超预算", "user_constraint_violation": "违反用户条件", "total_violations": "违反合计", "escaped_violations": "漏检违反",
               "confirmable": "可确认方案", "reviewer_blockers": "检验 Agent 额外阻断", "oracle_code_blockers": "完整代码规则阻断",
-              "decisions": "追问次数", "model_calls": "模型调用", "elapsed_seconds": "用时(秒)"}
+              "decisions": "追问次数", "model_calls": "模型调用", "elapsed_seconds": "用时(秒)",
+              "constraints_expected": "应抽取的偏好条件", "constraints_extracted": "实际抽取的偏好条件", "constraints_matched": "其中种类正确"}
     lines += ["", "## 指标合计（只统计得到方案的运行）", "", "| 指标 | " + " | ".join(VARIANTS.get(v, v) for v in variants) + " |",
               "|---|" + "---|" * len(variants)]
     for name in metrics:
@@ -371,8 +373,8 @@ def report(out: Path):
 def main():
     parser = argparse.ArgumentParser(description="旅行规划四 Agent 消融实验")
     parser.add_argument("--cases", default=str(HERE / "cases.json"))
-    parser.add_argument("--suite", choices=("core", "all"), default="core",
-                        help="core：5 条核心用例，all：全部 25 条；--only 优先")
+    parser.add_argument("--suite", choices=("core", "all", "constraints"), default="core",
+                        help="core：5 条核心用例，all：全部用例，constraints：偏好条件约束用例；--only 优先")
     parser.add_argument("--only", default="", help="只跑这些用例 ID，逗号分隔")
     parser.add_argument("--variants", default=",".join(VARIANTS), help="组别，逗号分隔；可组合，如 no_reviewer+no_dedupe")
     parser.add_argument("--repeats", type=int, default=1)

@@ -7,7 +7,7 @@ from datetime import date
 from ..adapters import ToolError, map_link, navigation_link
 from ..models import OrderChoice, PlanningDecision, Requirements
 from ..rules import enforce_locks, timestamp, walking_limit
-from ..constraints import active
+from ..constraints import active, public_only, walking_target
 from ..routing import coordinates, daily_route_scope, daily_movements, transport_access_transfers, distance, early_finish, geographic_order, reference_opening
 from ..resource_planning import chosen_hotel, comparison
 from ..agents.runtime import digest
@@ -100,7 +100,7 @@ class SchedulingNodes:
             "不得默认所有景点之间都有公共交通；公共交通无结果时保留真实缺口，不编造线路或耗时，也不因短途未查询公交而要求删点。"
             "公交transits为空仅表示没返回公交换乘方案；route_evidence或walking_alternative已有真实步行分钟数时，不得称该路段没有耗时、无法通行或步行未核实。"
             "place只核实POI位置，不能核实开放时间、预约或门票，不能把位置查询成功当成营业查证成功。"
-            "考虑实际可用时段、开放与预约说法、游玩时长、天气和步行上限。"
+            "考虑实际可用时段、开放与预约说法、游玩时长、天气和步行上限；walking_target_per_day非空时是用户少走路的每日目标，尽量不超过。"
             "中午默认预留60分钟午餐，通常在11:30至14:00之间；durations只填实际游玩分钟数，系统另计用餐时间。"
             "全天园区的午餐在该活动内部预留，不新增餐厅或重复园区；不得用午餐替代游玩时长或省略用餐以塞入更多景点。"
             "time_window给出真实可用起止时刻及结束地点，不只是时长总数。对完整游览日安排上午和下午，不能照抄稀疏候选就结束。"
@@ -242,7 +242,7 @@ class SchedulingNodes:
     async def movement(self,state,city,origin_name,destination_name,origin_place=None,destination_place=None):
         mode = Requirements.model_validate(state["requirements"]).local_transport
         modes = ["walking","transit"] if mode == "public" else [mode]
-        if state["requirements"].get("allow_taxi") and "driving" not in modes:
+        if state["requirements"].get("allow_taxi") and "driving" not in modes and not public_only(state["requirements"]):
             modes.append("driving")
         unknown = {"minutes":None,"estimate_minutes":45,"allowed_modes":modes,"origin":origin_name,"destination":destination_name,"note":"起终点待确认"}
         if not origin_name or not destination_name:
@@ -623,7 +623,7 @@ class SchedulingNodes:
                     edge_evidence.append({"origin_id":first,"destination_id":second,"movement":move})
                 day_payload = {"city":city,"date":day_date,"day_adjustment":route_day.get("adjustment",""),"requirements":req,"change":change,"user_request":state.get("revision_request","") if not state.get("assessment_dates") or day_date in state["assessment_dates"] else "",
                      "current_activities":old_days.get(day_date,{}).get("activities",[]),
-                     "effective_max_walk_per_day":walking_limit(req,day_date),
+                     "effective_max_walk_per_day":walking_limit(req,day_date),"walking_target_per_day":walking_target(req,day_date),
                      "scheduled_stop_ids":[a["id"] for day in days for a in day["activities"] if a["kind"] == "visit"],
                      "time_window":{"start":self.clock(start),"end":self.clock(end),"end_place":tail["name"],"end_label":tail["label"]},
                      "available_minutes":max(0,end-start),"hotel":hotel,"weather":day_weather,"locked_ids":sorted(locked_ids),

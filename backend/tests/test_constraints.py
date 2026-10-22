@@ -5,8 +5,10 @@ from unittest.mock import AsyncMock
 
 from pydantic import ValidationError
 
-from app.constraints import active, check, drop_source, merge, preferences_basis, refresh_form_constraints
-from app.models import ConstraintDraft, ConstraintExtraction, Requirements
+from app.constraints import (FEWER_WALKING_METERS, active, check, drop_source, merge, preferences_basis, public_only,
+                             refresh_form_constraints, station_buffer, walking_target)
+from app.models import Constraint, ConstraintDraft, ConstraintExtraction, Requirements
+from app.rules import constraint_issues, walking_limit
 
 
 REQ = Requirements(origin="上海",cities=["杭州"],start_date="2026-11-10",end_date="2026-11-12",
@@ -28,6 +30,12 @@ class ConstraintShape(unittest.TestCase):
             ConstraintDraft(kind="fixed_order",before="guide:xh",after="guide:xh",quote="先去西湖")
         order = ConstraintDraft(kind="fixed_order",before="guide:xh",after="guide:ly",quote="先去西湖再去灵隐寺")
         self.assertEqual(order.scope.stop_ids,["guide:xh","guide:ly"])
+
+    def test_identity_follows_the_condition_not_the_stored_id(self):
+        stored = Constraint(id="stale",source="form",kind="fewer_walking",quote="少走路")
+        self.assertEqual(stored.id,merge([],[draft(kind="fewer_walking",quote="少走路")],"form")[0]["id"])
+        softer = Constraint(**{**stored.model_dump(),"strength":"soft"})
+        self.assertNotEqual(softer.id,stored.id)
 
     def test_old_documents_without_constraints_still_load(self):
         legacy = {key:value for key,value in REQ.items() if key not in {"constraints","constraints_basis"}}
@@ -91,6 +99,84 @@ class ConstraintLookup(unittest.TestCase):
         self.assertFalse(active(req,"fixed_order",date="2026-11-10",stop_id="guide:ly"))
         self.assertFalse(active(req,"fixed_order",date="2026-11-11",stop_id="guide:other"))
         self.assertTrue(active(req,"fixed_order"))
+
+
+def visit(identity, start, end, **extra):
+    return {"id":identity,"kind":"visit","name":STOPS[identity]["name"],"start":start,"end":end,**extra}
+
+
+class PlanChecks(unittest.TestCase):
+    def plan(self, first, second):
+        return {"days":[{"date":"2026-11-10","city":"杭州","activities":first},{"date":"2026-11-11","city":"杭州","activities":second}]}
+
+    def test_order_appointment_and_duration_are_checked_against_the_plan(self):
+        req = {"constraints":merge([],[
+            draft(kind="fixed_order",before="guide:xh",after="guide:ly",quote="先去西湖再去灵隐寺"),
+            draft(kind="time_anchor",anchor="appointment",at="14:00",scope={"stop_ids":["guide:xh"]},quote="西湖下午2点"),
+            draft(kind="visit_duration",minutes=180,scope={"stop_ids":["guide:ly"]},quote="灵隐寺玩3小时")],"form")}
+        issues,_ = constraint_issues(self.plan([visit("guide:ly","09:00","11:00")],[visit("guide:xh","13:00","15:00")]),req)
+        self.assertEqual(len(issues),3)
+        self.assertTrue(all(issue["code"] == "user_constraint" and issue["blocking"] for issue in issues))
+        issues,_ = constraint_issues(self.plan([visit("guide:xh","14:00","15:00")],[visit("guide:ly","09:00","12:00")]),req)
+        self.assertEqual(issues,[])
+
+    def test_meal_break_is_not_counted_as_visit_time(self):
+        req = {"constraints":merge([],[draft(kind="visit_duration",minutes=180,scope={"stop_ids":["guide:ly"]},quote="灵隐寺玩3小时")],"form")}
+        lunch = {"start":"11:30","end":"12:30"}
+        issues,_ = constraint_issues(self.plan([visit("guide:ly","09:00","12:30",meal_break=lunch)],[]),req)
+        self.assertEqual(len(issues),1)
+
+    def test_soft_out_of_scope_and_booking_constraints(self):
+        req = {"constraints":merge([],[
+            draft(kind="fixed_order",strength="soft",before="guide:xh",after="guide:ly",quote="最好先去西湖"),
+            draft(kind="visit_duration",minutes=300,scope={"stop_ids":["guide:xh"],"dates":["2026-11-12"]},quote="最后一天西湖玩5小时"),
+            draft(kind="booking_prerequisite",scope={"stop_ids":["guide:ly"]},quote="灵隐寺约好了再去")],"form")}
+        issues,notes = constraint_issues(self.plan([visit("guide:ly","09:00","10:00")],[visit("guide:xh","09:00","10:00")]),req)
+        self.assertEqual([issue["blocking"] for issue in issues],[False])
+        self.assertEqual(len(notes),1)
+
+    def test_user_transfer_buffer_only_raises_the_default(self):
+        req = {"constraints":merge([],[draft(kind="transfer_buffer",mode="train",minutes=90,quote="火车提前一个半小时")],"form")}
+        self.assertEqual((station_buffer(req,"train"),station_buffer(req,"flight"),station_buffer({},"train")),(90,120,60))
+        req = {"constraints":merge([],[draft(kind="transfer_buffer",mode="train",minutes=30,quote="火车提前半小时")],"form")}
+        self.assertEqual(station_buffer(req,"train"),60)
+
+
+class WalkingAndTransit(unittest.TestCase):
+    def day(self, walked, *activities, date="2026-11-10"):
+        return {"days":[{"date":date,"city":"杭州","walking_meters":walked,"activities":list(activities)}]}
+
+    def test_a_walking_distance_tightens_the_daily_cap(self):
+        req = {**REQ,"constraints":merge([],[draft(kind="fewer_walking",meters=4000,quote="每天走路别超过4公里")],"form")}
+        self.assertEqual((walking_limit(req,"2026-11-10"),walking_target(req,"2026-11-10")),(4000,None))
+        self.assertIsNone(walking_limit({**req,"walking_limit_exempt_dates":["2026-11-10"]},"2026-11-10"))
+
+    def test_less_walking_without_a_number_is_a_reported_target(self):
+        req = {**REQ,"constraints":merge([],[draft(kind="fewer_walking",quote="少走路")],"form")}
+        self.assertEqual((walking_limit(req,"2026-11-10"),walking_target(req,"2026-11-10")),(8000,FEWER_WALKING_METERS))
+        issues,_ = constraint_issues(self.day(6200),req)
+        self.assertEqual([(issue["code"],issue["blocking"]) for issue in issues],[("user_constraint",False)])
+        self.assertEqual(constraint_issues(self.day(4800),req)[0],[])
+        self.assertEqual(constraint_issues(self.day(6200),{**req,"walking_limit_exempt_dates":["2026-11-10"]})[0],[])
+
+    def test_public_only_flags_driving_and_disables_taxi_routes_trip_wide(self):
+        rule = draft(kind="transit_rule",rule="public_only",quote="只坐公交地铁")
+        req = {**REQ,"constraints":merge([],[rule],"form")}
+        self.assertTrue(public_only(req))
+        driven = visit("guide:ly","10:00","11:00",move_before={"mode":"driving","minutes":12})
+        self.assertEqual(len(constraint_issues(self.day(0,driven),req)[0]),1)
+        dated = {**REQ,"constraints":merge([],[{**rule,"scope":{**rule["scope"],"dates":["2026-11-11"]}}],"form")}
+        self.assertFalse(public_only(dated))
+        self.assertEqual(constraint_issues(self.day(0,driven),dated)[0],[])
+
+    def test_stop_without_a_transit_route_is_marked_for_removal(self):
+        req = {**REQ,"constraints":merge([],[draft(kind="transit_rule",rule="auto_by_transit",scope={"stop_ids":["guide:ly"]},
+                                                     quote="公交到不了就不去灵隐寺")],"form")}
+        missing = visit("guide:ly","10:00","11:00",move_before={"mode":"transit","minutes":None})
+        [issue] = constraint_issues(self.day(0,missing),req)[0]
+        self.assertEqual((issue["target"],issue["repair"],issue["blocking"]),("guide:ly","drop",True))
+        reached = visit("guide:ly","10:00","11:00",move_before={"mode":"transit","minutes":25})
+        self.assertEqual(constraint_issues(self.day(0,reached),req)[0],[])
 
 
 class FormExtraction(unittest.IsolatedAsyncioTestCase):

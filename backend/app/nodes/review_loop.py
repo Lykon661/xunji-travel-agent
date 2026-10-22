@@ -14,6 +14,7 @@ from ..resource_planning import resource_changes, resource_context_issues, trans
 from ..agents.runtime import digest
 from ..decisions import confirmation_blockers, input_hash, route_structure
 from ..dining import is_dining
+from ..constraints import station_buffer
 from ..places import canonicalize_itinerary, canonical_key, duplicate_issues, repeat_allowed, plan_fingerprint
 from ..reviewing import bind_report, evidence_ids, require_review, review_basis, review_blockers, review_payload, review_repair_dates
 from ..planning_recovery import previous_round, regression_reason, route_moves
@@ -430,7 +431,7 @@ class ReviewLoopNodes:
                     selected = entry.get("selected")
                     if usable_score(option) != float("inf") and (selected is None or usable_score(option) < usable_score(selected)):
                         entry["selected"] = option
-                        entry["buffer_minutes"] = 120 if option["kind"] == "flight" else 60
+                        entry["buffer_minutes"] = station_buffer(state["requirements"],option["kind"],context["date"])
                         entry["reason"] = "时间检查后选择可用游玩时间更充足的班次，重新计算接驳"
                         changed_transport.update((context["origin"],context["destination"]))
         if any(issue["code"] == "walking_limit" for issue in issues):
@@ -535,7 +536,7 @@ class ReviewLoopNodes:
             return {"itinerary":reroute["itinerary"],"stops":reroute["stops"],"weather":reroute.get("weather",{}),
                     "decision":reroute.get("decision",{}),"place_selection":reroute.get("place_selection",{}),"repair_round":state.get("repair_round",0)+1}
         for issue in issues:
-            if issue["code"] in {"arrival_conflict","departure_conflict","overlap","move_gap"}:
+            if issue["code"] in {"arrival_conflict","departure_conflict","overlap","move_gap"} or issue.get("repair") == "drop":
                 for day in itinerary["days"]:
                     if day["city"] in state.get("change",{}).get("preserve_cities",[]):
                         continue
