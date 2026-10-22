@@ -211,6 +211,26 @@ def uneven():
 
 
 class AcceptedShortage(unittest.TestCase):
+    def test_numeric_daily_shortage_is_settled_after_acceptance(self):
+        current,plan = uneven()
+        plan["days"][1]["activities"] = [plan["days"][0]["activities"].pop()]
+        current["candidates"][0]["draft"] = plan
+        for text in ("无法安排每天3个景点","无法安排每日都最少三个景点","当天少于 3 个景点","当天路线时长不足"):
+            with self.subTest(text=text):
+                question = {"title":"景点安排","question":text,"affected_dates":[B]}
+                self.assertEqual(accepted_shortage(current,question),text != "当天路线时长不足")
+                strict = {**current,"requirements":{**current["requirements"],"constraints":minimum(3)}}
+                self.assertFalse(accepted_shortage(strict,question))
+
+    def test_suffix_alias_is_not_an_unused_stop_and_a_move_is_offered(self):
+        current,plan = uneven()
+        current["stops"]["ld"] = {**STOPS["ld"],"name":"上下九"}
+        current["stops"]["ld2"] = {**current["stops"]["ld"],"id":"ld2","name":"上下九步行街"}
+        plan["days"][0]["activities"][-1]["name"] = "上下九"
+        question,options = pool_question(current,plan,B,lambda:[])
+        self.assertEqual(options[question["options"][0]]["type"],"move")
+        self.assertEqual(options[question["options"][0]]["stop_id"],"ld")
+
     def test_an_empty_day_still_blocks_and_offers_a_stop_from_a_fuller_day(self):
         current,plan = uneven()
         [issue] = constraint_issues(plan,current["requirements"])[0]

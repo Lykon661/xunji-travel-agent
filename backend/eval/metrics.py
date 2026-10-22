@@ -148,12 +148,15 @@ def evaluate(requirements: dict, candidate: dict | None, stop_pool: set[str], al
     result["user_constraint_violation"] = codes.count("user_constraint")
     if expected_constraints is not None:
         # 抽取只按种类比对：地点ID是运行时生成的，用例里无法预先写出。
-        extracted = Counter(item.get("kind") for item in requirements.get("constraints", [])
-                            if item.get("source") == "form" and not item.get("superseded_by") and not item.get("revoke"))
+        # 局部覆盖会把表单条件的剩余日期另存一份（原话相同），按种类+原话去重后才是抽到的条数。
+        extracted = Counter(kind for kind, _ in {(item.get("kind"), item.get("quote")) for item in requirements.get("constraints", [])
+                                                 if item.get("source") == "form" and not item.get("revoke")})
         expected = Counter(item["kind"] for item in expected_constraints)
         result["constraints_expected"] = sum(expected.values())
         result["constraints_extracted"] = sum(extracted.values())
         result["constraints_matched"] = sum((expected & extracted).values())
+        result["constraints_active_form"] = sum(item.get("source") == "form" and not item.get("superseded_by") and not item.get("revoke")
+                                                for item in requirements.get("constraints", []))
     result["budget_estimate"] = budget.get("known_plus_estimates")
     result["oracle_code_blockers"] = len(blockers)
     result["missing_route_times"] = sum("实际交通耗时尚未取得" in blocker or "实际耗时尚未取得" in blocker for blocker in blockers)

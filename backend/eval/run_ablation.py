@@ -13,6 +13,7 @@ import argparse
 import re
 import asyncio
 import csv
+import difflib
 import json
 import logging
 import shutil
@@ -51,7 +52,9 @@ def auto_answer(question: dict) -> str:
         return options[0]
     recommendation = question.get("recommendation", "").strip()
     match = next((option for option in options if option in recommendation), None)
-    return match or recommendation or (options[0] if options else "你决定，按推荐处理")
+    if options:
+        return match or max(options, key=lambda option: difflib.SequenceMatcher(None, option, recommendation).ratio())
+    return recommendation or "你决定，按推荐处理"
 
 
 async def wait_run(planner, run_id, timeout):
@@ -340,7 +343,7 @@ def report(out: Path):
     variants = list(dict.fromkeys(row["variant"] for row in rows))
     metrics = [*VIOLATIONS, "dup_visit_strict", "total_violations", "escaped_violations", "confirmable", "reviewer_blockers",
                "oracle_code_blockers", "decisions", "code_option_decisions", "model_calls", "elapsed_seconds",
-               "constraints_expected", "constraints_extracted", "constraints_matched"]
+               "constraints_expected", "constraints_extracted", "constraints_matched", "constraints_active_form"]
     summary = {}
     for variant in variants:
         group = [row for row in rows if row["variant"] == variant]
@@ -388,7 +391,8 @@ def report(out: Path):
               "over_budget": "超预算", "user_constraint_violation": "违反用户条件", "total_violations": "违反合计", "escaped_violations": "漏检违反",
               "confirmable": "可确认方案", "reviewer_blockers": "检验 Agent 额外阻断", "oracle_code_blockers": "完整代码规则阻断",
               "decisions": "追问次数", "code_option_decisions": "其中代码给出选项", "model_calls": "模型调用", "elapsed_seconds": "用时(秒)",
-              "constraints_expected": "应抽取的偏好条件", "constraints_extracted": "实际抽取的偏好条件", "constraints_matched": "其中种类正确"}
+              "constraints_expected": "应抽取的偏好条件", "constraints_extracted": "实际抽取的偏好条件", "constraints_matched": "其中种类正确",
+              "constraints_active_form": "仍生效的表单条件"}
     lines += ["", "## 指标合计（只统计得到方案的运行）", "", "| 指标 | " + " | ".join(VARIANTS.get(v, v) for v in variants) + " |",
               "|---|" + "---|" * len(variants)]
     for name in metrics:

@@ -25,7 +25,7 @@ from .agents import GuideAgent, ResourceAgent, RouteAgent, ReviewerAgent
 from .agents.route import resolve_stop_id
 from .agents.runtime import digest
 from .decisions import apply_walking_decision, confirmation_blockers, walking_question
-from .constraints import CONSTRAINT_GUIDE, UNQUOTED, check, merge, stop_catalog
+from .constraints import CONSTRAINT_GUIDE, UNQUOTED, check, merge, stop_catalog, trip_dates
 from .conflicts import accepted_shortage, apply_option
 from .dining import is_dining
 from .places import canonicalize_stops, plan_fingerprint
@@ -336,7 +336,7 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
         required = {identity for identity in required if not is_dining(state["stops"][identity])}
         excluded = (set(constraints.get("excluded",[]))-set(resolution.required_ids)) | set(resolution.excluded_ids)
         req.update(required_stop_ids=sorted(required),excluded_stop_ids=sorted(excluded),
-                   constraints=merge(req["constraints"],new_constraints,"decision",question.get("id","")))
+                   constraints=merge(req["constraints"],new_constraints,"decision",question.get("id",""),trip_dates=trip_dates(req)))
         history = [*history,{"questions":[question],"answers":values,"note":answer.get("note",""),"summary":explanation,
                              "walking_limit_exempt_dates":req.get("walking_limit_exempt_dates",[]),"keep_current_plan":keep}]
         dates = question.get("affected_dates",[])
@@ -518,7 +518,7 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
             changes["allow_taxi"] = False
         req = Requirements.model_validate({**state["requirements"],**changes}).model_dump(mode="json")
         valid,_ = check(update.constraints," ".join(answer.get("answers",{}).values())+" "+answer.get("note",""),req,state.get("stops",{}))
-        req = Requirements.model_validate({**req,"constraints":merge(req["constraints"],valid,"interview",interview["round_id"])}).model_dump(mode="json")
+        req = Requirements.model_validate({**req,"constraints":merge(req["constraints"],valid,"interview",interview["round_id"],trip_dates=trip_dates(req))}).model_dump(mode="json")
         return {"requirements":req,"interview":{**interview,"history":history,"confirmed":False}}
 
     async def selection_gate(self,state):

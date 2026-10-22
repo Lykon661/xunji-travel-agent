@@ -31,6 +31,10 @@ def local_name(value, city):
     return name
 
 
+def strip_suffix(name):
+    return re.sub(r"(?:步行街|步行区|风景名胜区|风景区|旅游区|景区)$","",name)
+
+
 def street_alias(item, city=""):
     if item.get("category") == "dining" or item.get("source_kind") == "flyai":
         return None
@@ -95,6 +99,26 @@ def canonicalize_stops(stops):
             if len(keys) == 2:
                 parents[keys[1]] = keys[0]
         streets.setdefault(alias[:2],[]).append((stop,alias[2]))
+    aliases = {}
+    for stop in result.values():
+        if stop.get("category") == "dining" or stop.get("source_kind") == "flyai":
+            continue
+        place = stop.get("map_place") or {}
+        city = stop.get("city") or place.get("cityname")
+        name = strip_suffix(local_name(stop.get("name"),city))
+        if len(name) < 2:
+            continue
+        alias = normalized(city).removesuffix("市"),name
+        for previous in aliases.get(alias,[]):
+            if normalized(stop.get("name")) == normalized(previous.get("name")):
+                continue
+            point, other = coordinates(place),coordinates(previous.get("map_place"))
+            if bool(point) != bool(other) or point and other and distance(point,other) > 800:
+                continue
+            keys = sorted({root(stop["canonical_place_id"]),root(previous["canonical_place_id"])})
+            if len(keys) == 2:
+                parents[keys[1]] = keys[0]
+        aliases.setdefault(alias,[]).append(stop)
     for stop in result.values():
         stop["canonical_place_id"] = root(stop["canonical_place_id"])
     # Different POI IDs may be distinct branches even at the same address; leave equivalence to evidence review.

@@ -2,13 +2,13 @@
 
 每个选项都对应一个结构化操作，用户点选后由代码直接执行，不经过模型理解。
 """
-from datetime import date as Date, timedelta
+from datetime import date as Date
 import re
 
-from .constraints import active, merge
+from .constraints import active, merge, trip_dates
 from .models import ConstraintDraft
 from .dining import is_dining
-from .places import canonical_key, canonicalize_stops, local_name
+from .places import canonical_key, canonicalize_stops, local_name, strip_suffix
 from .routing import coordinates, early_finish
 from .rules import timestamp
 
@@ -20,7 +20,7 @@ MAX_OPTIONS = 4
 FULL_DAY_MINUTES = 360
 FULL_DAY = re.compile(r"一整天|整整一天|全天|整天|一天时间")
 # A model question about the number of stops, as opposed to time, order or a place choice on the same day.
-SHORTAGE = re.compile(r"每天至少|每日至少|(?:景点|地点)(?:数量|不足|不够)")
+SHORTAGE = re.compile(r"每天至少|每日至少|(?:景点|地点)(?:数量|不足|不够)|每[天日](?:都)?(?:至少|最少)?\s*[0-9一二两三四五六七八九十]+\s*个|少于\s*[0-9一二两三四五六七八九十]+\s*个")
 
 
 def _label_date(day):
@@ -169,13 +169,6 @@ def capacity_question(state, itinerary, day):
             "affected_dates":sorted({day,*(action["to"] for _,action in options if action["type"] == "move")})},{label:action for label,action in options}
 
 
-def _trip_days(req):
-    if not req.get("start_date") or not req.get("end_date"):
-        return []
-    start,end = Date.fromisoformat(str(req["start_date"])),Date.fromisoformat(str(req["end_date"]))
-    return [(start+timedelta(days=offset)).isoformat() for offset in range((end-start).days+1)]
-
-
 def _minimum(req, day, city):
     """The strictest hard "at least N stops a day" for this day and city; 0 when there is none.
 
@@ -235,10 +228,10 @@ def pool_question(state, itinerary, day, sources):
              and early_finish(plan_day))
     if not timed and count >= floor:
         return None
-    used = {canonical_key(item,place_city) for item,place_city in placed.values()}
+    used = set().union(*(group["keys"] for group in _places([{**item,"city":place_city} for item,place_city in placed.values()])))
     used_names = {item.get("name") for item,_ in placed.values()}
     unused = [identity for identity,stop in stops.items() if stop.get("city") == city and identity not in placed
-              and canonical_key(stop) not in used and _usable(state,{**stop,"id":identity},day)]
+              and not _places([stop])[0]["keys"] & used and _usable(state,{**stop,"id":identity},day)]
     # With time left and stops left, the scheduler can still fill the day; a full day below the minimum cannot take more.
     # Before scheduling there is no time to judge by, so the day counts as having room.
     room = bool(timed) if plan_day else True
@@ -281,7 +274,7 @@ def _places(stops):
     """Group stops that are one real place: the same identity, the same name without the city prefix, or a shared alias."""
     groups = []
     for stop in stops:
-        keys = {canonical_key(stop),*("name:"+local_name(name,stop.get("city"))
+        keys = {canonical_key(stop),*("name:"+strip_suffix(local_name(name,stop.get("city")))
                                       for name in [stop.get("name"),*(stop.get("alias_names") or [])] if name)}
         group = {"keys":keys,"stops":[stop]}
         for other in [entry for entry in groups if entry["keys"] & keys]:
@@ -345,7 +338,7 @@ def trip_pool_question(state, sources):
     every answer except adding a guide turns the minimum into a target, so later short days are noted instead of blocking.
     """
     req = state.get("requirements",{})
-    days = _trip_days(req)
+    days = trip_dates(req)
     needs = sorted(_minimum(req,day,"") for day in days)
     if not any(needs):
         return None
@@ -394,16 +387,15 @@ def code_decision(state, itinerary, dates, sources):
 
 
 def _carve(req, dates, label):
-    """Replace each daily minimum covering these dates with one for its remaining dates (or a revoke when none remain)."""
+    """Revoke each daily minimum on these dates while merge preserves its remaining dates."""
     drafts = []
     for item in active(req,"daily_min_stops"):
-        covered = set(item["scope"]["dates"] or _trip_days(req))
+        covered = set(item["scope"]["dates"] or trip_dates(req))
         if not covered & set(dates):
             continue
-        rest = sorted(covered-set(dates))
         fields = {key:item[key] for key in ConstraintDraft.model_fields if key in item}
-        drafts.append(ConstraintDraft(**{**fields,"scope":{**item["scope"],"dates":rest},"revoke":not rest,"quote":label}).model_dump(mode="json"))
-    return merge(req.get("constraints",[]),drafts,"decision")
+        drafts.append(ConstraintDraft(**{**fields,"scope":{**item["scope"],"dates":sorted(covered & set(dates))},"revoke":True,"quote":label}).model_dump(mode="json"))
+    return merge(req.get("constraints",[]),drafts,"decision",trip_dates=trip_dates(req))
 
 
 def apply_option(state, action, label):
@@ -436,7 +428,7 @@ def apply_option(state, action, label):
     elif kind == "shorten":
         duration = ConstraintDraft(kind="visit_duration",scope={"dates":[action["date"]],"stop_ids":[identity]},
                                    minutes=action["minutes"],quote=label).model_dump(mode="json")
-        req["constraints"] = merge(req.get("constraints",[]),[duration],"decision")
+        req["constraints"] = merge(req.get("constraints",[]),[duration],"decision",trip_dates=trip_dates(req))
         summary = "按你的选择把"+name+"的游玩时长调整为"+str(action["minutes"])+"分钟"
     elif kind == "add_source":
         updates["selected_source_ids"] = [*state.get("selected_source_ids",[]),action["source_id"]]
@@ -450,7 +442,7 @@ def apply_option(state, action, label):
         drafts = [ConstraintDraft(**{**{key:item[key] for key in ConstraintDraft.model_fields if key in item},"strength":"soft",
                                      "count":action.get("count") or item["count"],"quote":label}).model_dump(mode="json")
                   for item in active(req,"daily_min_stops")]
-        req["constraints"] = merge(req.get("constraints",[]),drafts,"decision")
+        req["constraints"] = merge(req.get("constraints",[]),drafts,"decision",trip_dates=trip_dates(req))
         summary = ("按你的选择，改为每天至少"+str(action["count"])+"个景点" if kind == "lower_count"
                    else "按你的选择，用现有攻略安排")+"；景点不够的日子只在方案里提示"
     else:

@@ -12,7 +12,7 @@ from ..routing import coordinates
 from ..agents.runtime import digest
 from ..decisions import apply_walking_decision, walking_question
 from ..conflicts import trip_pool_question
-from ..constraints import CONSTRAINT_GUIDE, check, merge, preferences_basis, refresh_form_constraints, stop_catalog
+from ..constraints import CONSTRAINT_GUIDE, check, merge, preferences_basis, refresh_form_constraints, stop_catalog, trip_dates
 from ..dining import is_dining
 from ..workflow.state import TripState
 
@@ -206,7 +206,7 @@ class GuideNodes:
             req = Requirements.model_validate(await refresh_form_constraints(self.models,req,available)).model_dump(mode="json")
         if drafts:
             valid,_ = check(drafts,state["message"],req,available)
-            req = Requirements.model_validate({**req,"constraints":merge(req["constraints"],valid,"message")}).model_dump(mode="json")
+            req = Requirements.model_validate({**req,"constraints":merge(req["constraints"],valid,"message",trip_dates=trip_dates(req))}).model_dump(mode="json")
         previous_limit = state.get("old_requirements",state["requirements"]).get("max_walk_per_day",8000)
         if req["max_walk_per_day"] != previous_limit:
             req["walking_limit_exempt_dates"] = []

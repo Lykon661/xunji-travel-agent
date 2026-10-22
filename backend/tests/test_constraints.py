@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock
 from pydantic import ValidationError
 
 from app.constraints import (FEWER_WALKING_METERS, active, check, drop_source, merge, preferences_basis, public_only,
-                             refresh_form_constraints, station_buffer, walking_target)
-from app.models import Constraint, ConstraintDraft, ConstraintExtraction, Requirements
+                             refresh_form_constraints, station_buffer, trip_dates, walking_target)
+from app.models import Constraint, ConstraintDraft, ConstraintExtraction, Requirements, constraint_id
 from app.rules import constraint_issues, walking_limit
 
 
@@ -71,6 +71,48 @@ class ConstraintChecks(unittest.TestCase):
 
 
 class ConstraintMerging(unittest.TestCase):
+    def test_partial_override_preserves_other_trip_dates_and_provenance(self):
+        dates = trip_dates({"start_date":"2026-12-26","end_date":"2026-12-29"})
+        first = merge([],[draft(kind="daily_min_stops",strength="soft",count=2,quote="每天两个")],"form","original")
+        changed = merge(first,[draft(kind="daily_min_stops",strength="soft",count=1,scope={"dates":[dates[-1]]},quote="最后一天一个")],
+                        "decision","q1",trip_dates=dates)
+        req = {"constraints":changed}
+        for date in dates[:-1]:
+            [item] = active(req,"daily_min_stops",date=date)
+            self.assertEqual((item["count"],item["strength"]),(2,"soft"))
+            self.assertEqual(item["scope"]["dates"],dates[:-1])
+            self.assertEqual((item["source"],item["round_id"],item["quote"]),("form","original","每天两个"))
+            self.assertEqual(item["id"],constraint_id(item))
+            self.assertNotEqual(item["id"],first[0]["id"])
+        self.assertEqual([item["count"] for item in active(req,"daily_min_stops",date=dates[-1])],[1])
+        self.assertEqual(changed[0]["superseded_by"],changed[-1]["id"])
+        self.assertFalse(first[0]["superseded_by"])
+
+    def test_partial_revoke_preserves_other_trip_dates(self):
+        dates = trip_dates({"start_date":"2026-12-26","end_date":"2026-12-29"})
+        items = merge([],[draft(kind="daily_min_stops",strength="soft",count=2,quote="每天两个")],"form")
+        items = merge(items,[draft(kind="daily_min_stops",revoke=True,scope={"dates":[dates[-1]]},quote="最后一天不限")],
+                      "decision",trip_dates=dates)
+        for date in dates[:-1]:
+            self.assertEqual([item["count"] for item in active({"constraints":items},"daily_min_stops",date=date)],[2])
+        self.assertEqual(active({"constraints":items},"daily_min_stops",date=dates[-1]),[])
+
+    def test_explicit_date_override_preserves_remaining_dates_without_trip_dates(self):
+        items = merge([],[draft(kind="daily_min_stops",count=2,scope={"dates":["2026-12-28","2026-12-29"]},quote="两天两个")],"form")
+        items = merge(items,[draft(kind="daily_min_stops",count=1,scope={"dates":["2026-12-29"]},quote="最后一天一个")],"decision")
+        self.assertEqual([item["count"] for item in active({"constraints":items},"daily_min_stops",date="2026-12-28")],[2])
+        self.assertEqual([item["count"] for item in active({"constraints":items},"daily_min_stops",date="2026-12-29")],[1])
+
+    def test_trip_wide_override_without_trip_dates_keeps_legacy_behavior(self):
+        items = merge([],[draft(kind="daily_min_stops",count=2,quote="每天两个")],"form")
+        items = merge(items,[draft(kind="daily_min_stops",count=1,scope={"dates":["2026-12-29"]},quote="最后一天一个")],"decision")
+        self.assertEqual(len(items),2)
+        self.assertEqual(active({"constraints":items},"daily_min_stops",date="2026-12-28"),[])
+
+    def test_trip_dates_include_both_ends_and_allow_missing_bounds(self):
+        self.assertEqual(trip_dates({"start_date":"2026-12-29","end_date":"2026-12-29"}),["2026-12-29"])
+        self.assertEqual(trip_dates({}),[])
+
     def test_equal_constraint_is_kept_once_and_overlapping_one_is_superseded(self):
         first = merge([],[draft(kind="visit_duration",scope={"stop_ids":["guide:xh"]},minutes=120,quote="西湖两小时")],"form")
         again = merge(first,[draft(kind="visit_duration",scope={"stop_ids":["guide:xh"]},minutes=120,quote="西湖玩两小时")],"decision")
@@ -189,6 +231,40 @@ class WalkingAndTransit(unittest.TestCase):
 
 
 class FormExtraction(unittest.IsolatedAsyncioTestCase):
+    async def test_daily_minimum_fallback_when_model_returns_none(self):
+        models = SimpleNamespace(ask=AsyncMock(return_value=ConstraintExtraction()))
+        text = "每天都想安排满，每天至少三个景点"
+        with self.assertLogs("app.constraints",level="WARNING") as logs:
+            req = await refresh_form_constraints(models,{**REQ,"preferences":text},STOPS)
+        [item] = req["constraints"]
+        self.assertEqual((item["kind"],item["count"],item["source"],item["quote"]),("daily_min_stops",3,"form","每天至少三个景点"))
+        self.assertNotIn(text,logs.output[0])
+        self.assertIn("fallback",logs.output[0])
+
+    async def test_daily_minimum_fallback_skips_negation_and_invalid_counts(self):
+        for text in ("不要求每天至少三个景点","不用每天至少三个景点","不要每天至少三个景点","无需每天至少三个景点",
+                     "不必每天至少三个景点","每天至少0个景点","每天至少13个景点"):
+            with self.subTest(text=text):
+                models = SimpleNamespace(ask=AsyncMock(return_value=ConstraintExtraction()))
+                req = await refresh_form_constraints(models,{**REQ,"preferences":text},STOPS)
+                self.assertEqual(req["constraints"],[])
+
+    async def test_daily_minimum_fallback_accepts_numbers_and_variants(self):
+        for text,count in (("每日都起码要去两个地方",2),("每天最少安排10个地点",10),("每天至少十个景点",10),("每天至少12个景点",12)):
+            with self.subTest(text=text):
+                models = SimpleNamespace(ask=AsyncMock(return_value=ConstraintExtraction()))
+                with self.assertLogs("app.constraints",level="WARNING"):
+                    req = await refresh_form_constraints(models,{**REQ,"preferences":text},STOPS)
+                self.assertEqual([item["count"] for item in req["constraints"]],[count])
+
+    async def test_daily_minimum_from_model_is_not_duplicated(self):
+        text = "每天至少三个景点"
+        models = SimpleNamespace(ask=AsyncMock(return_value=ConstraintExtraction(
+            constraints=[ConstraintDraft(kind="daily_min_stops",count=3,quote=text)])))
+        with self.assertNoLogs("app.constraints",level="WARNING"):
+            req = await refresh_form_constraints(models,{**REQ,"preferences":text},STOPS)
+        self.assertEqual([item["count"] for item in req["constraints"]],[3])
+
     async def test_extracts_once_per_preferences_text(self):
         models = SimpleNamespace(ask=AsyncMock(return_value=ConstraintExtraction(
             constraints=[ConstraintDraft(kind="fewer_walking",quote="少走路"),

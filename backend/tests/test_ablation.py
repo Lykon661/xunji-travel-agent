@@ -12,6 +12,7 @@ from app.places import canonicalize_stops, duplicate_issues
 from app.rules import check_itinerary
 from eval import replay
 from eval.metrics import evaluate
+from eval.run_ablation import auto_answer
 
 
 def visit(identity, name, poi, start, end):
@@ -105,7 +106,38 @@ class Scoring(unittest.TestCase):
         result = evaluate(requirements,candidate,{"a","b","c","d","e"},expected_constraints=[{"kind":"fixed_order"},{"kind":"fewer_walking"}])
         self.assertEqual(result["user_constraint_violation"],1)
         self.assertEqual((result["constraints_expected"],result["constraints_extracted"],result["constraints_matched"]),(2,1,1))
+        self.assertEqual(result["constraints_active_form"],1)
         self.assertNotIn("constraints_expected",evaluate(REQUIREMENTS,candidate,set()))
+
+    def test_superseded_form_constraint_still_counts_as_extracted(self):
+        from app.constraints import merge
+        from app.models import ConstraintDraft
+        form = ConstraintDraft(kind="daily_min_stops",count=3,quote="每天至少三个景点").model_dump(mode="json")
+        constraints = merge([],[form],"form")
+        constraints = merge(constraints,[{**form,"strength":"soft","quote":"少于三个也可以"}],"decision")
+        result = evaluate({**REQUIREMENTS,"constraints":constraints},None,set(),expected_constraints=[{"kind":"daily_min_stops"}])
+        self.assertEqual((result["constraints_extracted"],result["constraints_matched"],result["constraints_active_form"]),(1,1,0))
+
+    def test_a_partially_overridden_form_constraint_counts_once(self):
+        from app.constraints import merge
+        from app.models import ConstraintDraft
+        form = ConstraintDraft(kind="daily_min_stops",count=3,quote="每天至少三个景点").model_dump(mode="json")
+        days = ["2026-12-26","2026-12-27"]
+        constraints = merge([],[form],"form",trip_dates=days)
+        constraints = merge(constraints,[{**form,"scope":{**form["scope"],"dates":days[1:]},"revoke":True,"quote":"这天少排"}],"decision",trip_dates=days)
+        result = evaluate({**REQUIREMENTS,"constraints":constraints},None,set(),expected_constraints=[{"kind":"daily_min_stops"}])
+        self.assertEqual((result["constraints_extracted"],result["constraints_matched"],result["constraints_active_form"]),(1,1,1))
+
+    def test_extraction_counts_form_quotes_once_and_excludes_revokes_and_other_sources(self):
+        from app.constraints import merge
+        from app.models import ConstraintDraft
+        form = ConstraintDraft(kind="daily_min_stops",count=3,quote="每天至少三个景点").model_dump(mode="json")
+        constraints = merge([],[form],"form")
+        constraints = merge(constraints,[{**form,"count":2}],"form")
+        constraints = merge(constraints,[{**form,"revoke":True}],"form")
+        constraints = merge(constraints,[ConstraintDraft(kind="fewer_walking",quote="少走路").model_dump(mode="json")],"message")
+        result = evaluate({**REQUIREMENTS,"constraints":constraints},None,set(),expected_constraints=[{"kind":"daily_min_stops"}])
+        self.assertEqual((result["constraints_extracted"],result["constraints_matched"],result["constraints_active_form"]),(1,1,0))
 
     def test_failed_run_keeps_its_events_and_app_warnings(self):
         import json, logging
@@ -135,6 +167,25 @@ class Scoring(unittest.TestCase):
         candidate = {"days":[{"date":"2026-12-12","city":"深圳"}],"draft":{}}
         result = evaluate({**REQUIREMENTS,"cities":["广州"]},candidate,set())
         self.assertEqual((result["date_coverage_error"],result["city_order_error"],result["has_plan"]),(1,1,False))
+
+
+class AutoAnswer(unittest.TestCase):
+    def test_similar_recommendation_returns_the_exact_option(self):
+        self.assertEqual(auto_answer({"recommendation":"建议合并为一次，避免重复","options":["合并为一次游览","分别安排两次"]}),"合并为一次游览")
+
+    def test_recommendation_containing_an_option_takes_priority(self):
+        self.assertEqual(auto_answer({"recommendation":"建议分别安排两次，留出时间","options":["合并为一次游览","分别安排两次"]}),"分别安排两次")
+
+    def test_place_and_hub_still_choose_the_first_option(self):
+        for identity in ("place-x","hub-x"):
+            self.assertEqual(auto_answer({"id":identity,"recommendation":"第二项","options":["第一项","第二项"]}),"第一项")
+
+    def test_without_options_returns_the_recommendation(self):
+        self.assertEqual(auto_answer({"recommendation":"建议合并为一次，避免重复","options":[]}),"建议合并为一次，避免重复")
+        self.assertEqual(auto_answer({}),"你决定，按推荐处理")
+
+    def test_empty_recommendation_uses_the_first_nonblank_option(self):
+        self.assertEqual(auto_answer({"options":[" ","合并为一次游览","分别安排两次"]}),"合并为一次游览")
 
 
 class Replay(unittest.TestCase):

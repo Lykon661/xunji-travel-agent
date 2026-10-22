@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import re
+from datetime import date as Date, timedelta
 
 from .models import CONSTRAINT_RECORD_FIELDS, ConstraintDraft, ConstraintExtraction, SINGLE_STOP_KINDS, constraint_id
 
@@ -80,7 +81,14 @@ def check(drafts, text, req, stops):
     return valid,issues
 
 
-def merge(existing, drafts, source, round_id=""):
+def trip_dates(req):
+    if not req.get("start_date") or not req.get("end_date"):
+        return []
+    start,end = Date.fromisoformat(str(req["start_date"])),Date.fromisoformat(str(req["end_date"]))
+    return [(start+timedelta(days=offset)).isoformat() for offset in range((end-start).days+1)]
+
+
+def merge(existing, drafts, source, round_id="", *, trip_dates=()):
     """Append validated drafts; an equal active constraint is kept once, an overlapping older one is superseded."""
     result = [dict(item) for item in existing]
     for draft in drafts:
@@ -92,6 +100,11 @@ def merge(existing, drafts, source, round_id=""):
         for entry in live:
             if key(entry) == key(item) and overlaps(entry,item):
                 entry["superseded_by"] = identity
+                if item["scope"]["dates"]:
+                    remaining = sorted(set(entry["scope"]["dates"] or trip_dates)-set(item["scope"]["dates"]))
+                    if remaining:
+                        rest = {**entry,"scope":{**entry["scope"],"dates":remaining},"superseded_by":""}
+                        result.append({**rest,"id":constraint_id(rest)})
         result.append({**item,"id":identity,"source":source,"round_id":round_id,"superseded_by":""})
     # Stay within Requirements.constraints max_length by forgetting the oldest superseded entries first.
     while len(result) > MAX_CONSTRAINTS and any(entry["superseded_by"] for entry in result):
@@ -167,7 +180,20 @@ async def refresh_form_constraints(models, req, stops):
             logging.getLogger(__name__).warning("Form constraints rejected: attempt=%s issues=%s",attempt+1,issues)
             payload = {**payload,"previous_constraints":[item.model_dump(mode="json") for item in extraction.constraints],
                        "validation_errors":issues}
-        constraints = merge(constraints,valid,"form")
+        if not any(item["kind"] == "daily_min_stops" for item in valid):
+            for match in re.finditer(r"每[天日](?:都)?(?:至少|最少|起码)(?:要)?(?:安排|去|逛|玩|看)?\s*([0-9]+|[一二两三四五六七八九十]+)\s*个(?:景点|地方|地点)",text):
+                if re.search(r"不|不用|不要|无需|不必",text[max(0,match.start()-4):match.start()]):
+                    continue
+                value = match.group(1)
+                count = int(value) if value.isascii() and value.isdigit() else {"一":1,"二":2,"两":2,"三":3,"四":4,"五":5,"六":6,"七":7,"八":8,"九":9,"十":10}.get(value,0)
+                if not 1 <= count <= 12:
+                    continue
+                fallback,issues = check([ConstraintDraft(kind="daily_min_stops",count=count,quote=match.group())],text,req,stops)
+                if fallback:
+                    valid += fallback
+                    logging.getLogger(__name__).warning("Form daily_min_stops added by deterministic fallback")
+                    break
+        constraints = merge(constraints,valid,"form",trip_dates=trip_dates(req))
         if extraction.allow_taxi is False:
             updates["allow_taxi"] = False
     return {**req,**updates,"constraints":constraints,"constraints_basis":basis}
