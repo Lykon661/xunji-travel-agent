@@ -4,6 +4,7 @@ import copy
 import re
 from datetime import date
 
+from .. import ablation
 from ..adapters import ToolError, map_link, navigation_link
 from ..models import OrderChoice, PlanningDecision, Requirements
 from ..rules import enforce_locks, timestamp, walking_limit
@@ -501,6 +502,27 @@ class SchedulingNodes:
         if visits and not lunch_done and visits[0]["start"] < "13:00" and visits[-1]["end"] > "13:30":
             gaps.append("当前固定时段或可用时间未留足60分钟午餐，需要调整这一天的活动安排")
         return_move = (await self.movement(state,city,origin,tail["name"],origin_place=origin_place,destination_place=tail.get("end_place")))[0] if origin and tail["name"] else {}
+        if not ablation.disabled("clustering") and route_day.get("adjustment","").startswith("空间分日："):
+            visit_ids = {item["id"] for item in visits}
+            def readable(part):
+                if part.startswith("当日安排") and "个景点" in part:
+                    return ""
+                if not part.startswith("移日："):
+                    return part
+                fields = [field.strip() for field in part[3:].split("|")]
+                if len(fields) != 4:
+                    return ""
+                identity = resolve_stop_id(fields[0],stops,city)
+                if identity is None:
+                    aliases = [i for i,s in stops.items() if s.get("city") == city and fields[0] in s.get("alias_names",[])]
+                    identity = aliases[0] if len(aliases) == 1 else None
+                if identity not in visit_ids:
+                    return ""
+                return f"跨天调整：将{stops[identity]['name']}从{fields[1]}移至{fields[2]}，原因：{fields[3]}"
+            route_basis = "；".join(dict.fromkeys(value for note in (route_day["adjustment"],route_basis)
+                for line in note.splitlines()
+                for part in ([line] if line.strip().startswith("移日：") else re.split(r"；|(?<=。)",line))
+                if (value := readable(part.strip()))))
         return {"date":day_date,"city":city,"activities":activities,"gaps":gaps,
                 "transfers":transfers,"weather":day_weather,"route_basis":route_basis,
                 "start_place":tail.get("start_name"),"end_place":tail["name"],"end_label":tail["label"],

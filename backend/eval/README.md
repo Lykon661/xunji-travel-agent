@@ -10,6 +10,7 @@
 | `no_reviewer` | 不调用检验 Agent，报告固定为 pass；代码规则仍有否决权 | `nodes/review_loop.py` `audit` |
 | `no_dedupe` | 跨攻略的统一地点身份（广州塔=小蛮腰）、候选重复合并、全程餐厅占用表 | `places.py`、`dining.py`、`rules.merge_candidate_duplicates` |
 | `no_code_checks` | 代码硬约束：日期覆盖、城市顺序、必去/排除、时间线、预算、营业窗口、重复等，只靠行程 Agent 和检验 Agent 自己发现 | `rules.py`、`decisions.confirmation_blockers`、`review_loop.check`、`candidates.discover` |
+| `no_clustering` | 空间分日聚类及其偏离检查，恢复原有定位池、prompt 和路线生成路径 | `app/day_clustering.py`、`nodes/candidates.discover` |
 
 开关在 [app/ablation.py](../app/ablation.py)，默认全部不生效；也可以组合，例如 `no_reviewer+no_dedupe`。
 
@@ -21,14 +22,14 @@
 .venv/Scripts/python.exe -m eval.run_ablation --mode auto --out eval/runs/main
 ```
 
-默认只跑**核心集**：5 条用例（`stress-gz-4d`、`stress-xa-4d` 地点池紧张，`gz-2d` 别名重复，`xa-3d` 周一闭馆，`bj-3d` 攻略天数多于行程）× 4 组 × 1 次 = 20 次，单次约 2～6 分钟，整体约 1～2 小时。需要第二轮时用同一个 `--out` 加 `--repeats 2`。
+默认只跑**核心集**：5 条用例（`stress-gz-4d`、`stress-xa-4d` 地点池紧张，`gz-2d` 别名重复，`xa-3d` 周一闭馆，`bj-3d` 攻略天数多于行程）× 5 组 × 1 次 = 25 次；只比较 `full,no_clustering` 则为 5 × 2 × 1 = 10 次。这些仅为运行数量计算，实际耗时和费用取决于模型与接口调用。需要第二轮时用同一个 `--out` 加 `--repeats 2`。
 
 - 第一次跑到某个用例时，高德和飞猪的真实返回会录制到 `eval/cassettes/`，之后各组复用同一份数据。
 - 想跑全部 26 条用 `--suite all`；只跑偏好条件约束用例用 `--suite constraints`；已完成的组合续跑时会跳过。
 - 也可以按组分批：`--variants full,no_dedupe` 先跑去重对比，再跑 `--variants no_reviewer,no_code_checks`（同一个 `--out`）。
 
-- `auto`：命中录制就回放，没命中（关掉某项设计后查了新地点）才实时查询并补录。汇总末尾会给出实时查询次数。
-- `replay`：完全离线，没命中按查询失败处理。各组外部数据严格一致，但关掉设计后新出现的地点会缺少数据。
+- `auto`：高德/飞猪查询命中录制就回放，没命中才实时查询并补录。聚类扩大定位范围后新增的定位、地点或路段查询也会补录，可能产生额外接口费用。汇总末尾会给出实时查询次数。
+- `replay`：只回放高德/飞猪数据，未命中按查询失败处理；新增地点或路段可能缺少数据。模型仍会真实调用并付费，不能视为完全离线或免费运行。
 - 中断后用同一个 `--out` 重跑，已完成的组合会被跳过。
 - 只跑部分用例：`--only gz-2d,cd-3d`；只重新生成汇总：`--report eval/runs/main`。
 - 不要用 `--mode record`：它会覆盖已有录制。
@@ -46,6 +47,8 @@
 - `results.jsonl` / `results.csv`：每次运行一行，包含全部指标、结果、错误、模型调用次数和用时。
 - `plans/`：每次运行的最终候选方案，用来人工抽查判分是否合理。
 - `failures/`：失败、超时、未形成候选的运行，保存各次运行的状态、进度事件和应用告警（含出错位置），临时数据库删除后仍可排查。
+
+后续获授权开展空间分日对比时，先补齐并冻结两组所需的 cassette，再使用全新结果目录，以 `--suite core --variants full,no_clustering --mode replay` 配对运行相同用例和重复轮次。冻结后若仍有未命中，应先处理数据缺口再比较。`replay` 仍有模型费用；不要用旧目录续跑来混合不同版本的结果。本次实现不执行真实评测、不生成或覆盖 cassette，也没有改善幅度数据。性能数字只能引用实际生成的 `results.jsonl` / `summary.json` 路径。
 
 ## 判分（[metrics.py](metrics.py)）
 
@@ -65,6 +68,25 @@
 | 追问次数 / 其中代码给出选项 | 运行中回答的追问数；后者是由 `conflicts.py` 算出冲突项与可行选项、回答后由代码直接执行的追问 |
 | 违反用户条件 | 用户在偏好里写明的硬性条件没被满足：地点先后顺序、预约时刻、最少游玩时长、每天最少景点数、只用公共交通、公交查不到仍保留的景点（`rules.constraint_issues`）。用户在追问中接受某天少排的日期不计入。给了距离的「少走路」计入步行超限；没给距离的只是目标，不计入 |
 | 偏好条件抽取 | 用例 `expected_constraints` 列出偏好原文中应抽取的条件；统计应抽取数、实际从表单抽取数和种类正确数。实际抽取与种类匹配统计所有非撤销的表单条目，包括已被覆盖的条目，同一原话只算一次；`constraints_active_form` 单独统计仍生效的表单条件。地点 ID 运行时才生成，所以只比对种类 |
+
+### 空间指标
+
+空间指标独立读取最终草稿的 `visit` 活动，不使用初始簇或生产聚类的距离结果；不计入 `VIOLATIONS`，不改变违反合计、可确认或漏检口径。
+
+| 字段 | 定义与解释边界 |
+|---|---|
+| `visit_path_geo_m` | 每个坐标完整且非空日，按实际 visit 顺序累加相邻点球面距离后求和；单点日为 0，没有可计算日为 null。缺坐标日整日不计，不跳过未知点连接前后点；不含酒店、枢纽、餐饮和跨日边。须同时查看 `spatial_complete_days` |
+| `within_day_dispersion_m` | 各日已定位点到独立 medoid 的距离总和 / 已定位 visit 数；medoid 距离和相同取活动原位置。允许使用不完整日的已知坐标，无定位时为 null，须同时看坐标覆盖率 |
+| `cross_day_outlier_count` | 只比较同城、坐标完整且非空的不同日期；某点距其他日 medoid 比距所属日 medoid 近超过 1000 米计 1，每点至多一次；没有可比较日对为 null |
+| `spatial_coordinate_coverage` | 已定位 visit 数 / 全部 visit 数；无 visit 为 null |
+| `visits` / `visit_minutes` | 最终景点访问数 / 已知实际游玩分钟。分钟优先读 `visit_minutes`，否则用 end-start 扣内部 `meal_break`，最后用 `duration_minutes` 扣内部午餐；不估算缺失时长，全缺失为 null，已知 0 保留 |
+| `spatial_located_visits` / `spatial_complete_days` / `visit_minutes_known_count` | 已定位 visit 数 / 坐标完整非空日期数 / 实际游玩分钟已知的 visit 数，供加权、有效日期及时间完整性判断 |
+
+球面距离只是直线代理，不反映道路绕行或真实交通耗时。outlier 是空间混杂代理，不是真实错误标签，也不代表移日后必定可行；固定日期、预约等合理安排也可能被计数。
+
+汇总仅统计得到方案的运行：距离、outlier、visits、游玩分钟和辅助计数按有效值求和，全缺失保留 null；分散度按 `spatial_located_visits` 加权平均；覆盖率按有效运行的 `sum(spatial_located_visits) / sum(visits)` 计算，不相加或简单平均比例。加权指标要求数值、分子和正权重完整，缺失运行不进入分母。`summary.json` 的 `mean` 对应位置保存加权值，`sum` 仅保存可求和指标，`valid_runs` 逐项记录有效运行数；Markdown 表同时标注合计、加权均值、比例和有效样本数。
+
+比较时同时查看成功数、visits、游玩分钟、缺失数、坐标覆盖率和完整日期数，避免把删点或缺数据导致的短路线当作改善。每项缺失运行数可由得到方案数减 `valid_runs` 得到；对同时具备计数的运行，visits 减 `visit_minutes_known_count` 表示时长缺失的访问数，减 `spatial_located_visits` 表示未定位访问数。旧结果缺少新字段会保留为 null（Markdown 显示 `-`），逐运行值保留在 JSONL/CSV。既有 `--rescore` 仍只重算重复指标及其派生总数；新空间指标需要新增运行或另行安排后续重判，本次不扩展重判。
 
 测试需求在 [cases.json](cases.json) 里。每条用 1～2 篇合成攻略，故意放了别名重复（广州塔/小蛮腰、陈家祠/陈氏书院、北京路/北京路步行街）、两篇攻略推荐同一家餐厅、攻略天数多于行程天数、周一闭馆、预算偏紧、城市顺序和攻略顺序相反等情况，`traps` 字段写明了每条的设计意图。
 

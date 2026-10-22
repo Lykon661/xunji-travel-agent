@@ -37,10 +37,16 @@ from .metrics import VIOLATIONS, evaluate, visit_duplicates
 
 HERE = Path(__file__).resolve().parent
 VARIANTS = {"full": "全部开启", "no_reviewer": "关掉检验 Agent", "no_dedupe": "关掉统一地点身份与全程去重",
-            "no_code_checks": "关掉代码硬约束校验"}
+            "no_code_checks": "关掉代码硬约束校验", "no_clustering": "关掉空间分日聚类"}
 UNAVAILABLE = re.compile(r"额度|重新登录|模型权限")
 TRANSIENT = {"model_network", "model_format", "amap_network", "amap_rate_limit", "flyai_timeout"}
 RUN_LEVEL = {"decisions", "code_option_decisions", "model_calls", "elapsed_seconds"}
+SPATIAL_LABELS = {"visit_path_geo_m": "visit 路径直线距离（米）", "within_day_dispersion_m": "日内分散度（米）",
+                  "cross_day_outlier_count": "跨日空间 outlier", "spatial_coordinate_coverage": "坐标覆盖率",
+                  "visits": "景点访问数（visits）", "visit_minutes": "已知游玩分钟（visit_minutes）",
+                  "spatial_located_visits": "已定位 visit 数", "spatial_complete_days": "坐标完整非空日期数",
+                  "visit_minutes_known_count": "游玩分钟已知 visit 数"}
+SPATIAL_WEIGHTS = {"within_day_dispersion_m": "spatial_located_visits", "spatial_coordinate_coverage": "visits"}
 OUTCOMES = {"selection": "得到候选", "decision_limit": "追问超过上限", "failed": "运行失败",
             "no_candidate": "未形成候选", "timeout": "超时", "invalid_case": "用例无效"}
 
@@ -348,8 +354,12 @@ def report(out: Path):
     for variant in variants:
         group = [row for row in rows if row["variant"] == variant]
         planned = [row for row in group if row.get("has_plan")]
-        visits = sum(row.get("visits", 0) for row in planned)
+        visits = sum(row.get("visits") or 0 for row in planned)
         meals = sum(row.get("meal_options", 0) for row in planned)
+        spatial = {name: [row for row in planned if row.get(name) is not None
+                         and (name not in SPATIAL_WEIGHTS or (row.get(SPATIAL_WEIGHTS[name]) or 0) > 0)
+                         and (name != "spatial_coordinate_coverage" or row.get("spatial_located_visits") is not None)]
+                   for name in SPATIAL_LABELS}
         # 每轮重复各算一个总数，再取均值和标准差，体现模型随机性。
         per_repeat = {}
         for row in planned:
@@ -368,6 +378,16 @@ def report(out: Path):
             "violations_per_repeat_mean": mean(totals),
             "violations_per_repeat_stdev": statistics.stdev(totals) if len(totals) > 1 else None,
         }
+        item = summary[variant]
+        item["mean"].update({name: mean([row[name] for row in values]) for name, values in spatial.items()})
+        item["sum"].update({name: sum(row[name] for row in values) if values else None
+                            for name, values in spatial.items() if name not in SPATIAL_WEIGHTS})
+        item["valid_runs"] = {name: len(values) for name, values in spatial.items()}
+        for name, weight in SPATIAL_WEIGHTS.items():
+            denominator = sum(row[weight] for row in spatial[name])
+            numerator = sum(row["spatial_located_visits"] if name == "spatial_coordinate_coverage"
+                            else row[name] * row[weight] for row in spatial[name])
+            item["mean"][name] = numerator / denominator if denominator else None
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8")
     with (out / "results.csv").open("w", encoding="utf-8-sig", newline="") as output:
         fields = list(dict.fromkeys(key for row in rows for key in row if key != "replay"))
@@ -408,6 +428,16 @@ def report(out: Path):
     lines.append("| 每轮违反合计 均值±标准差 | " + " | ".join(
         fmt(summary[v]["violations_per_repeat_mean"], 1) + ("" if summary[v]["violations_per_repeat_stdev"] is None else
         "±" + fmt(summary[v]["violations_per_repeat_stdev"], 1)) for v in variants) + " |")
+    lines += ["", "## 空间指标（只统计得到方案的运行）", "",
+              "缺失运行数 = 得到方案数 - 各项有效运行数；请同时查看成功数、visits、游玩分钟、已知时长数及坐标覆盖。",
+              "距离是直线代理，outlier 不是实际错误标签；缺失显示 -，合法 0 参与统计。", "",
+              "| 指标 | 聚合口径（合计/加权均值/比例） | " + " | ".join(f"{VARIANTS.get(v, v)} | 有效样本（运行数）" for v in variants) + " |",
+              "|---|---|" + "---|---|" * len(variants)]
+    for name, label in SPATIAL_LABELS.items():
+        aggregate = "mean" if name in SPATIAL_WEIGHTS else "sum"
+        kind = "比例（合计定位数/合计 visits）" if name == "spatial_coordinate_coverage" else "定位数加权均值" if aggregate == "mean" else "合计"
+        lines.append(f"| {label} | {kind} | " + " | ".join(
+            f"{fmt(summary[v][aggregate][name])} | {summary[v]['valid_runs'][name]}" for v in variants) + " |")
     failures = [row for row in rows if row["outcome"] in {"failed", "timeout", "invalid_case", "no_candidate"}]
     if failures:
         lines += ["", "## 未完成的运行", "", "| 用例 | 组别 | 次 | 结果 | 错误 |", "|---|---|---|---|---|"]
@@ -415,7 +445,7 @@ def report(out: Path):
                   for row in failures]
     misses = sum(row.get("replay", {}).get("live", 0) for row in rows)
     lines += ["", f"回放说明：累计 {misses} 次查询未命中录制而走了实时接口（auto 模式会补录）。"
-              "若希望各组外部数据完全一致，请先 record 一轮，再用 replay 模式跑。"]
+              "获授权补齐并冻结高德/飞猪录制后，再用新结果目录配对 replay；模型仍真实调用并付费。"]
     (out / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
 

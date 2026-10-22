@@ -73,6 +73,13 @@ def _mandatory(state, identity, day):
     return reasons
 
 
+def visit_minutes(stop: dict, req: dict, day: str | None = None,
+                  scheduled_minutes: int | None = None) -> int:
+    fixed = next((item["minutes"] for item in active(req,"visit_duration",date=day,stop_id=stop.get("id"))
+                  if item.get("minutes")),None)
+    return fixed or scheduled_minutes or stop.get("duration_minutes") or DEFAULT_VISIT_MINUTES
+
+
 def day_demand(state, itinerary, plan_day, route_day, unplaced=True):
     """Each intended stop of a day with its estimated visit+move minutes and why it is mandatory.
 
@@ -94,9 +101,8 @@ def day_demand(state, itinerary, plan_day, route_day, unplaced=True):
         stop = state.get("stops",{}).get(identity) or scheduled.get(identity)
         if not stop or is_dining(stop):
             continue
-        fixed = next((item["minutes"] for item in active(state.get("requirements",{}),"visit_duration",date=day,stop_id=identity)),None)
         activity = scheduled.get(identity)
-        visit = fixed or (activity and _visit_minutes(activity,day)) or stop.get("duration_minutes") or DEFAULT_VISIT_MINUTES
+        visit = visit_minutes({**stop,"id":identity},state.get("requirements",{}),day,activity and _visit_minutes(activity,day))
         move = ((activity or {}).get("move_before") or {}).get("minutes")
         items.append({"id":identity,"name":stop.get("name") or identity,"visit":visit,
                       "move":move if move is not None else typical,"reasons":_mandatory(state,identity,day)})

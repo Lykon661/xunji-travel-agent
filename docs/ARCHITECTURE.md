@@ -33,6 +33,7 @@ FastAPI (backend/app/main.py)
 | [workflow/submit.py](../backend/app/workflow/submit.py) | 用户入口：`submit` / `back_to_step` / `reopen_decision` / `delete_trip` 及其版本校验 |
 | [nodes/guides.py](../backend/app/nodes/guides.py) | `coordinate`、攻略解析 `prepare_guides`、`guide_analysis`、`interview`、Agent 工具分发 `agent_tool` |
 | [nodes/candidates.py](../backend/app/nodes/candidates.py) | `discover` / `assess` / `revise_candidate` 与受影响范围计算 |
+| [day_clustering.py](../backend/app/day_clustering.py) | 代码空间分日：`build_spatial_plan`（各城天数、每日初始分配）、`spatial_errors`、`cluster_deviation`（模型微调的偏离校验） |
 | [nodes/resources.py](../backend/app/nodes/resources.py) | `transport` / `hotels` / `tickets`、`query_ticket_prices`、`enrich_*`、`refresh_expired_resources` |
 | [nodes/locations.py](../backend/app/nodes/locations.py) | `locate_stops`（高德定位与同名地点澄清）、天气上下文 |
 | [nodes/scheduling.py](../backend/app/nodes/scheduling.py) | `activities` / `schedule_activity_day` / `daily_order` / `movement` / `map_order` / `window` / `refresh_day_routes` |
@@ -90,7 +91,7 @@ flowchart TD
 - **coordinate**：读取需求和用户消息；修改请求由模型解析为 `ChangeRequest`（影响哪些城市、日期、资源）。不是 Agent，只是一次结构化抽取。
 - **prepare_guides**：解析所选攻略的正文和图片，产出带证据的地点池 `stops`。
 - **guide_analysis**：GuideAgent 整理区域分组、必去/排除，发现必须由用户决定的问题。
-- **discover**：RouteAgent 生成分日初案（哪天在哪个城市、去哪些地点），代码校验日期覆盖、城市顺序、地点来源。
+- **discover**：代码先按候选游玩时长分配各城天数，再按坐标、每日容量、固定日期和闭馆信息形成初始分日（[day_clustering.py](../backend/app/day_clustering.py)）；RouteAgent 在此基础上微调，跨天移动须写明原因，偏离过大时重试一次，仍超限则采用代码初始分配。代码校验日期覆盖、城市顺序、地点来源。消融开关 `no_clustering` 恢复由 RouteAgent 自行分日。
 - **assess**：对初案依次调用 `transport → hotels → activities → tickets`（ResourceAgent 查资源，RouteAgent 排每日时间线），然后进入**审查-修复循环**（见下）。
 - **review_gate / planning_failed**：审查没通过且无法自动修复时，转为一道用户问题。行程 Agent 与检验 Agent 只能提出回答能记录的问题（偏好、预算、交通方式、步行上限、时间限制、住宿区域、重复授权、必去/排除）；选酒店、某天出发地址、往返班次写成资料缺口。
 - **transport**：按城市顺序生成城际段。需求勾选 `self_arranged_round_trip`（往返交通自行安排）时，不生成出发地往返两段，只保留目的地之间的交通。

@@ -45,6 +45,20 @@ class Switches(unittest.TestCase):
         with self.assertRaises(ValueError):
             ablation.parse("no_planner")
 
+    def test_clustering_switch_and_combined_names_are_parsed(self):
+        self.assertIn("clustering",ablation.SWITCHES)
+        self.assertEqual(ablation.parse("clustering"),{"clustering"})
+        self.assertEqual(ablation.parse("no_clustering"),{"clustering"})
+        self.assertEqual(ablation.parse("full"),frozenset())
+        self.assertEqual(ablation.parse("full+no_clustering+no_code_checks"),{"clustering","code_checks"})
+        self.assertEqual(ablation.parse(" no_clustering, no_reviewer "),{"clustering","reviewer"})
+        self.assertEqual(ablation.parse(["full","no_clustering","no_dedupe"]),{"clustering","dedupe"})
+        with ablation.use("full"):
+            self.assertFalse(ablation.disabled("clustering"))
+            with ablation.use("no_clustering"):
+                self.assertTrue(ablation.disabled("clustering"))
+            self.assertFalse(ablation.disabled("clustering"))
+
     def test_dedupe_switch_drops_shared_identity_and_duplicate_issues(self):
         stops = {"a":{"id":"a","city":"广州","name":"广州塔","map_place":{"id":"tower","location":"113.3,23.1"}},
                  "b":{"id":"b","city":"广州","name":"小蛮腰","map_place":{"id":"tower","location":"113.3,23.1"}}}

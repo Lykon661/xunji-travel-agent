@@ -3,6 +3,7 @@
 开关名表示「被关掉的设计」：
 - reviewer：不调用检验 Agent，审查报告固定为 pass，只保留代码规则的否决。
 - dedupe：不做跨攻略的统一地点身份（每条攻略引用各算一个地点），不做全程地点与餐饮去重。
+- clustering：关掉代码空间分日，回到路线 Agent 自行分日和原定位预算。
 - code_checks：不做代码硬约束校验（日期覆盖、城市顺序、时间线、预算、营业窗口、重复等），
   只靠行程 Agent 与检验 Agent 自身发现问题；为避免崩溃，仍会丢弃引用不存在的地点 ID。
 
@@ -12,7 +13,7 @@ import os
 from contextlib import contextmanager
 from contextvars import ContextVar
 
-SWITCHES = ("reviewer", "dedupe", "code_checks")
+SWITCHES = ("reviewer", "dedupe", "code_checks", "clustering")
 
 _current: ContextVar[frozenset | None] = ContextVar("travel_ablation", default=None)
 

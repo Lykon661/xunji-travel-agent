@@ -11,16 +11,20 @@ from ..store import now
 from ..routing import coordinates
 from ..agents.route import resolve_stop_id
 from ..dining import is_dining
-from ..places import canonicalize_stops, planning_stop_pool, represented_ids
+from ..places import canonical_key, canonicalize_stops, planning_stop_pool, represented_ids
 from ..conflicts import code_decision, trip_pool_question
+from ..day_clustering import ORDINARY_LOCATION_LIMIT, build_spatial_plan, cluster_deviation, spatial_errors
 
 
 class CandidateNodes:
     async def discover(self,state):
+        enabled = not ablation.disabled("clustering")
         chosen = {s["id"]:s for s in self.selected_sources(state["trip_id"],state["selected_source_ids"])}
         stale_geography = any(source.get("extraction_version") in {1,2,3} for source in chosen.values())
         prepared = await self.prepare_guides(state) if "stops" not in state or stale_geography else {}
         stops = prepared.get("stops",state.get("stops",{}))
+        if enabled:
+            stops = copy.deepcopy(stops)
         if prepared:
             for identity,stop in stops.items():
                 previous = state.get("stops",{}).get(identity,{})
@@ -45,15 +49,29 @@ class CandidateNodes:
             return {"candidates":[],"stops":stops,"selected_route":{},"warnings":list(dict.fromkeys([
                 *warnings,"所选攻略的游览景点已全部排除，请补充攻略或调整排除项"]))}
         priority &= set(eligible)
-        # Locate required places and a few anchors first; actual chosen days locate all their visits later.
-        city_anchors = [next((identity for identity,stop in eligible.items() if stop["city"] == city),None) for city in req.cities]
-        grouped = [identity for group in state.get("guide_brief",{}).get("groups",[]) for identity in group.get("stop_ids",[])[:2]
-                   if identity in eligible]
-        anchors = [identity for identity in dict.fromkeys([*city_anchors,*grouped,*eligible]) if identity and identity not in priority]
-        pool = list(dict.fromkeys([*sorted(priority),*list(dict.fromkeys(anchors))[:24]]))
+        clarification_ids = set(priority)
+        if enabled:
+            required = set(state.get("stop_constraints",{}).get("required",[])) | set(req.required_stop_ids) | set(state.get("locks",[]))
+            priority = {i for i,s in eligible.items() if represented_ids([s]) & required or s.get("assigned_date")}
+            city_anchors = [next((i for i in sorted(eligible) if eligible[i]["city"] == city),None) for city in req.cities]
+            grouped = sorted({i for group in state.get("guide_brief",{}).get("groups",[])
+                              for i in sorted(group.get("stop_ids",[]))[:2] if i in eligible})
+            anchors = [i for i in dict.fromkeys([*city_anchors,*grouped,*sorted(eligible)])
+                       if i and i not in priority and not coordinates(eligible[i].get("map_place"))]
+            pool = [*sorted(priority),*anchors[:ORDINARY_LOCATION_LIMIT]]
+        else:
+            # Locate required places and a few anchors first; actual chosen days locate all their visits later.
+            city_anchors = [next((identity for identity,stop in eligible.items() if stop["city"] == city),None) for city in req.cities]
+            grouped = [identity for group in state.get("guide_brief",{}).get("groups",[]) for identity in group.get("stop_ids",[])[:2]
+                       if identity in eligible]
+            anchors = [identity for identity in dict.fromkeys([*city_anchors,*grouped,*eligible]) if identity and identity not in priority]
+            pool = list(dict.fromkeys([*sorted(priority),*list(dict.fromkeys(anchors))[:24]]))
         located = await self.locate_stops(state,{identity:stops[identity] for identity in pool if not coordinates(stops[identity].get("map_place"))})
         stops = canonicalize_stops({identity:located.get(identity,stop) for identity,stop in stops.items()})
-        if clarification := self.place_clarification(stops,priority):
+        if enabled:
+            resolved_keys = {canonical_key(stops[i]) for i in eligible if coordinates(stops[i].get("map_place"))}
+            clarification_ids = {i for i in clarification_ids if canonical_key(stops[i]) not in resolved_keys}
+        if clarification := self.place_clarification(stops,clarification_ids):
             return {"stops":stops,"selected_route":{},"decision_resume":"discover",**clarification}
         weather = await self.weather_context(state)
         parsed_guides = [{"id":s["id"],"title":s["title"],"likes":s.get("likes",0),"favorites":s.get("favorites",0),
@@ -63,6 +81,12 @@ class CandidateNodes:
         available,place_groups = planning_stop_pool({identity:stop for identity,stop in stops.items()
                                                    if not is_dining(stop) and not represented_ids([stop]) & excluded},
                                                   priority,state.get("locks",[]))
+        plan = build_spatial_plan({**state,"stops":stops},available) if enabled else None
+        if enabled and not ablation.disabled("code_checks"):
+            if plan["status"] == "conflict":
+                raise ToolError("route_constraints","空间分日固定日期或城市约束冲突："+"；".join(plan["issues"]))
+            if plan["status"] == "partial":
+                warnings.append("空间分日初始分配未完整通过校验，已保留建议并交路线模型补齐："+"；".join(plan["issues"]))
         instruction = (
             "根据用户确认的访谈需求和勾选的攻略形成一条最匹配的整趟候选路线。不得使用未选择攻略或自行补景点。"
             "guides提供攻略整体说明、季节、提醒与缺口；景点明细及各攻略证据统一在available_stops和source_references中，不重复附攻略stops。"
@@ -85,6 +109,31 @@ class CandidateNodes:
                    "canonical_place_groups":place_groups,
                    "interview":state.get("interview",{}),"weather":weather,
                    "guide_brief":state.get("guide_brief",{}),"constraints":state.get("stop_constraints",{}),"decision_history":state.get("decision_history",[])}
+        if enabled:
+            payload["spatial_plan"] = plan
+            instruction += ("spatial_plan 是代码按候选游玩时长、固定日期、已解析闭馆信息和坐标形成的初始分日。"
+                + ("status=ready 时城市日期段已由代码确定，不得改变。" if plan["status"] == "ready" else
+                   "status=partial 时可调整各城天数以补齐必去项，但须保持城市顺序与日期全覆盖。")
+                + "status=ready 时以 days 为基准，只做有依据的微调：跨天移动加删除的游玩时长最多占初始已定位时长 25%，新增已定位可选项时长也最多占 25%；初始已定位项不超过 4 个时可例外单移一个或互换两个，但不能同时删点或加点。保留必去、锁定和 assigned_date 项，遵守 day_budgets，不为降低偏离而虚增时长。unlocated_stop_ids 没有空间依据，可在合法日期选择安排，不得虚构其远近。每个跨天移动必须在目标日 adjustment 写：移日：地点名|原日期|新日期|具体原因；每次移动单独一行。删除初始可选项须说明原因，新增备选须仍满足每日容量。status=partial 时补齐 issues，不得把未完成的初始建议冒充可执行方案。时间预算为估计，实际到离与酒店仍以随后查询为准。")
+        def checked(proposal):
+            normalized = merge_candidate_duplicates(proposal,req,stops,state.get("locks",[]))
+            if any(before.stop_ids != after.stop_ids for before,after in zip(proposal.days,normalized.days)):
+                self.emit(state,"candidates","已合并候选中的重复地点引用，保留全部攻略来源并继续校验")
+            if enabled and plan["status"] == "ready":
+                for day in normalized.days:
+                    initial = next((d for d in plan["days"] if d["date"] == day.date.isoformat()),None)
+                    if initial and day.stop_ids == initial["stop_ids"] and not day.adjustment:
+                        day.adjustment = initial["adjustment"]
+            candidate = validate_candidate(normalized,req,stops)
+            if not ablation.disabled("code_checks"):
+                used = represented_ids([stops[i] for day in candidate.days for i in day.stop_ids])
+                if set(state.get("stop_constraints",{}).get("required",[])) - used:
+                    raise ValueError("路线遗漏用户明确必去的景点，应提出取舍问题而不是删除")
+                if used & set(state.get("stop_constraints",{}).get("excluded",[])):
+                    raise ValueError("路线包含用户明确排除的景点")
+                if enabled and (errors := spatial_errors(plan,candidate.model_dump(mode="json"),stops,state["requirements"])):
+                    raise ValueError("；".join(errors))
+            return candidate
         candidates = []
         for attempt in range(2):
             turn = await self.route_agent.plan(state,instruction,payload,lambda request:self.agent_tool({**state,"stops":stops},request))
@@ -98,16 +147,28 @@ class CandidateNodes:
             try:
                 for day in turn.candidate.days:
                     day.stop_ids = [resolve_stop_id(identity,available,day.city) or identity for identity in day.stop_ids]
-                normalized = merge_candidate_duplicates(turn.candidate,req,stops,state.get("locks",[]))
-                if any(before.stop_ids != after.stop_ids for before,after in zip(turn.candidate.days,normalized.days)):
-                    self.emit(state,"candidates","已合并候选中的重复地点引用，保留全部攻略来源并继续校验")
-                candidate = validate_candidate(normalized,req,stops)
-                used = represented_ids([stops[identity] for day in candidate.days for identity in day.stop_ids])
-                if not ablation.disabled("code_checks"):
-                    if set(state.get("stop_constraints",{}).get("required",[])) - used:
-                        raise ValueError("路线遗漏用户明确必去的景点，应提出取舍问题而不是删除")
-                    if used & set(state.get("stop_constraints",{}).get("excluded",[])):
-                        raise ValueError("路线包含用户明确排除的景点")
+                candidate = checked(turn.candidate)
+                if enabled and plan["status"] == "ready" and not ablation.disabled("code_checks"):
+                    deviation = cluster_deviation(plan,candidate.model_dump(mode="json"),stops,state["requirements"])
+                    if deviation["exceeded"] or deviation["missing_reasons"]:
+                        if not attempt:
+                            payload = {**payload,"cluster_deviation":deviation}
+                            raise ValueError("路线微调违反空间分日约定："+str(deviation))
+                        candidate = checked(Candidate(title=f"{len(dates)}天空间分日方案",
+                            reason="路线模型微调超出约定，采用代码初始分配",days=copy.deepcopy(plan["days"]),gaps=copy.deepcopy(plan["issues"])))
+                        warnings.append("路线模型两次微调仍超出空间分日约定，已采用代码初始分配；后续仍将结合实际交通与开放信息检查。")
+                if enabled:
+                    for day in candidate.days:
+                        initial = next((d for d in plan["days"] if d["date"] == day.date.isoformat()),None)
+                        if initial:
+                            initial_note = initial["adjustment"]
+                            if set(day.stop_ids) != set(initial["stop_ids"]):
+                                for sentence in initial_note.split("。")[1:]:
+                                    if sentence:
+                                        day.adjustment = "\n".join(line if line.strip().startswith("移日：") else line.replace(sentence+"。","")
+                                                                   for line in day.adjustment.splitlines())
+                                initial_note = initial_note.split("。",1)[0]+"。"
+                            day.adjustment = "；".join(dict.fromkeys(part for note in (initial_note,day.adjustment) for part in note.split("；") if part)).replace("；移日：","\n移日：")
                 candidate.id = uuid4().hex
                 candidate.feasibility = {}
                 candidates.append(candidate.model_dump(mode="json"))

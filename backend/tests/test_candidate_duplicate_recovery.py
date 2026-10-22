@@ -4,6 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+from app import ablation
 from app.models import Candidate, OrderChoice, Requirements, RouteTurn
 from app.places import canonicalize_stops, represented_ids
 from app.planner import Planner
@@ -125,7 +126,8 @@ class DiscoveryRecovery(unittest.IsolatedAsyncioTestCase):
                  "stops":stops(),"warnings":[],"locks":[],"stop_constraints":{"required":["guide-b:road"],"excluded":[]}}
         state["stops"]["guide-a:street"]["evidence"] = {"kind":"text","quote":"攻略甲的步行街原文"}
         state["stops"]["guide-b:road"]["evidence"] = {"kind":"text","quote":"攻略乙的道路原文"}
-        result = await planner.discover(copy.deepcopy(state))
+        with ablation.use("no_clustering"):
+            result = await planner.discover(copy.deepcopy(state))
         self.assertEqual(len(result["candidates"]),1)
         self.assertEqual(result["candidates"][0]["days"][1]["stop_ids"],["guide-b:museum"])
         planner.route_agent.plan.assert_awaited_once()

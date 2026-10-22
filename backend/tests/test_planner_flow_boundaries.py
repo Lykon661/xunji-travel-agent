@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 from pydantic import ValidationError
 
+from app import ablation
 from app.adapters import ToolError
 from app.agents.guide import GuideAgent
 from app.models import Candidate, GuideBrief, GuideGroup, OrderChoice, Requirements, RouteTurn
@@ -42,7 +43,8 @@ class DiscoveryQueryScope(unittest.IsolatedAsyncioTestCase):
 
     async def test_first_pass_locates_only_anchors_and_required_places_without_shrinking_the_pool(self):
         original = copy.deepcopy(self.state)
-        result = await self.planner.discover(self.state)
+        with ablation.use("no_clustering"):
+            result = await self.planner.discover(self.state)
         selected = self.planner.locate_stops.await_args.args[1]
         self.assertLessEqual(len(selected),25)
         self.assertIn("stop:79",selected)

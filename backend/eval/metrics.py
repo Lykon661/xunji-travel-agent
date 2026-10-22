@@ -5,6 +5,7 @@
 不复用被消融的去重代码，避免“关掉检测就测不出问题”。
 """
 import copy
+import math
 import re
 from collections import Counter
 import unicodedata
@@ -79,6 +80,75 @@ def visit_duplicates(visits, aliases=()):
     return extra_occurrences(with_aliases), extra_occurrences(keys)
 
 
+def _spatial_coordinates(item):
+    try:
+        longitude, latitude = map(float, item["map_place"]["location"].split(","))
+        if math.isfinite(longitude) and math.isfinite(latitude) and -180 <= longitude <= 180 and -90 <= latitude <= 90:
+            return longitude, latitude
+    except (KeyError, TypeError, ValueError, AttributeError):
+        pass
+    return None
+
+
+def _spatial_distance(a, b):
+    lon1, lat1 = map(math.radians, a)
+    lon2, lat2 = map(math.radians, b)
+    value = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
+    return 6371000 * 2 * math.asin(math.sqrt(max(0, min(1, value))))
+
+
+def _known_minutes(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
+
+
+def _spatial_visit_minutes(item):
+    if _known_minutes(item.get("visit_minutes")):
+        return item["visit_minutes"]
+    start, end = minutes(item.get("start")), minutes(item.get("end"))
+    duration = end - start if start is not None and end is not None and end >= start else item.get("duration_minutes")
+    if not _known_minutes(duration):
+        return None
+    meal = item.get("meal_break") or {}
+    meal_start, meal_end = minutes(meal.get("start")), minutes(meal.get("end"))
+    meal_minutes = meal_end - meal_start if meal_start is not None and meal_end is not None and meal_end >= meal_start else meal.get("duration_minutes", 0)
+    return max(0, duration - (meal_minutes if _known_minutes(meal_minutes) else 0))
+
+
+def spatial_metrics(days: list[dict]) -> dict:
+    located = total = 0
+    dispersion = 0
+    paths, durations, complete = [], [], []
+    for day in days:
+        visits = [item for item in day.get("activities", []) if item.get("kind") == "visit"]
+        coordinates = [_spatial_coordinates(item) for item in visits]
+        points = [point for point in coordinates if point is not None]
+        total += len(visits)
+        located += len(points)
+        durations.extend(value for item in visits if (value := _spatial_visit_minutes(item)) is not None)
+        if not points:
+            continue
+        distances = [[_spatial_distance(a, b) for b in points] for a in points]
+        center = min(range(len(points)), key=lambda index: sum(distances[index]))
+        dispersion += sum(distances[center])
+        if len(points) == len(visits):
+            paths.append(sum(distances[index - 1][index] for index in range(1, len(points))))
+            complete.append((day.get("city"), day.get("date"), points, points[center]))
+    outliers = None
+    for city, day_date, points, center in complete:
+        others = [other_center for other_city, other_date, _, other_center in complete
+                  if city and city == other_city and day_date != other_date]
+        if others:
+            outliers = (outliers or 0) + sum(any(_spatial_distance(point, center) - _spatial_distance(point, other) > 1000
+                                               for other in others) for point in points)
+    return {"visit_path_geo_m": sum(paths) if paths else None,
+            "within_day_dispersion_m": dispersion / located if located else None,
+            "cross_day_outlier_count": outliers,
+            "spatial_coordinate_coverage": located / total if total else None,
+            "visit_minutes": sum(durations) if durations else None,
+            "spatial_located_visits": located, "spatial_complete_days": len(complete),
+            "visit_minutes_known_count": len(durations)}
+
+
 def evaluate(requirements: dict, candidate: dict | None, stop_pool: set[str], aliases=(), expected_constraints=None) -> dict:
     candidate = candidate if isinstance(candidate, dict) else {}
     draft = copy.deepcopy(candidate.get("draft") or {}) if isinstance(candidate.get("draft"), dict) else {}
@@ -89,6 +159,7 @@ def evaluate(requirements: dict, candidate: dict | None, stop_pool: set[str], al
     visits = [(day, item) for day in days for item in day.get("activities", []) if item.get("kind") == "visit"]
     meals = [(day, item) for day in days for item in day.get("meal_recommendations", [])]
     result = {"has_plan": bool(visits), "days": len(route_days), "visits": len(visits), "meal_options": len(meals)}
+    result.update(spatial_metrics(days))
 
     result["date_coverage_error"] = int(bool(route_days) and [day["date"] for day in route_days] != expected_dates(requirements))
     cities = [day["city"] for day in route_days]
