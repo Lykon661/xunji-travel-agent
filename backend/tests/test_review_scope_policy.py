@@ -1,4 +1,4 @@
-"""User-run synthetic regressions only; no real model, map or supplier calls."""
+"""Review scope policy with synthetic data and mocked providers."""
 import copy
 import unittest
 from types import SimpleNamespace

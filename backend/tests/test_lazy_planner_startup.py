@@ -1,4 +1,4 @@
-"""User-run startup regressions; constructors and graph compilation are mocked."""
+"""Lazy planner startup with mocked constructors and graph compilation."""
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch, sentinel

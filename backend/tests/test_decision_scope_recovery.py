@@ -1,4 +1,4 @@
-"""User-run synthetic decision regressions. No external model or provider calls."""
+"""Decision scope recovery with synthetic data and mocked providers."""
 import copy
 import unittest
 from types import SimpleNamespace

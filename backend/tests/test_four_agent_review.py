@@ -1,4 +1,4 @@
-"""User-run regressions: temporary data and mocked models only. Not executed by Codex."""
+"""Four-agent review with temporary data and mocked models."""
 import copy
 import tempfile
 import unittest

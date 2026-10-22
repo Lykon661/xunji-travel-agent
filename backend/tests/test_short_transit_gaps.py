@@ -1,4 +1,4 @@
-"""User-run synthetic regressions based on recorded response shapes; no real APIs."""
+"""Short transit gaps with synthetic data matching recorded response shapes."""
 import copy
 import unittest
 from types import SimpleNamespace

@@ -1,4 +1,4 @@
-"""User-run regressions with synthetic trips and mocked processes; no external services."""
+"""Resource audits and process lifecycle with synthetic trips and mocked processes."""
 import asyncio
 import copy
 import json

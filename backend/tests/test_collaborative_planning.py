@@ -1,4 +1,4 @@
-"""Synthetic planning regressions; no external tools, model, browser or build. Not run by Codex."""
+"""Collaborative planning with synthetic data and mocked external services."""
 import copy
 import tempfile
 import unittest

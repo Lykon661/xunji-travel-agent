@@ -1,4 +1,4 @@
-"""User-run profile cases. No platform requests or browser launches; not run by Codex."""
+"""Crawler dependency profiles without platform requests or browser launches."""
 import hashlib
 import json
 import os

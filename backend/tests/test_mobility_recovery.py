@@ -1,4 +1,4 @@
-"""User-run regressions only. Mocked tools and synthetic snapshots; not run by Codex."""
+"""Mobility recovery with mocked tools and synthetic snapshots."""
 import copy
 import unittest
 from contextlib import asynccontextmanager

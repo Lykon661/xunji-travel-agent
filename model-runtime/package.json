@@ -1,5 +1,5 @@
 {
-  "name": "review-agent-model-runtime",
+  "name": "xunji-model-runtime",
   "private": true,
   "type": "module",
   "scripts": {

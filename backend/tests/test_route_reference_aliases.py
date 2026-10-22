@@ -1,4 +1,4 @@
-"""User-run synthetic reference regressions; no real model, maps or browser."""
+"""Route reference aliases with synthetic data."""
 import copy
 import json
 import tempfile

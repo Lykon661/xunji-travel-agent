@@ -1,4 +1,4 @@
-"""User-run synthetic cases for general POI disambiguation; no live providers."""
+"""POI disambiguation with synthetic provider responses."""
 import copy
 import unittest
 from types import SimpleNamespace

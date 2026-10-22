@@ -1,4 +1,4 @@
-"""Synthetic user-run regressions; no model, tool or browser requests. Not run by Codex."""
+"""Guide brief recovery with synthetic data and mocked tools."""
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock

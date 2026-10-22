@@ -1,4 +1,4 @@
-"""User-run regressions; all reviews are synthetic and no external model is called."""
+"""Review reference recovery with synthetic reports."""
 import copy
 import tempfile
 import unittest

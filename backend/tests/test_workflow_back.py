@@ -1,4 +1,4 @@
-"""User-run rollback cases; temporary storage only. Not executed by Codex."""
+"""Workflow rollback with temporary storage."""
 import tempfile
 import unittest
 from pathlib import Path

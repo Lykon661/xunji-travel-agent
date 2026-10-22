@@ -1,4 +1,4 @@
-"""User-run regression cases. Temporary data and mocked CLI; no live services."""
+"""Workflow regressions with temporary data and a mocked CLI."""
 import json
 import tempfile
 import unittest

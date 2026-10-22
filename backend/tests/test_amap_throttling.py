@@ -1,4 +1,4 @@
-"""User-run tests with a fake clock and fake MCP responses. Not run by Codex."""
+"""Rate-limit handling with a fake clock and MCP responses."""
 import asyncio
 import unittest
 from contextvars import ContextVar

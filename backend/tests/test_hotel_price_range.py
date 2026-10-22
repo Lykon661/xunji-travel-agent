@@ -1,4 +1,4 @@
-"""User-run cases with mocked queries; no CLI, network, or real trip data."""
+"""Hotel price filtering with mocked queries."""
 import asyncio
 import unittest
 from types import SimpleNamespace

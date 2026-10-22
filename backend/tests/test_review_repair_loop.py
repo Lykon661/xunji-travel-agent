@@ -1,4 +1,4 @@
-"""User-run regression cases. All reports, queries and repairs are synthetic."""
+"""Review and repair loops with synthetic reports, queries and repairs."""
 import copy
 import unittest
 from types import SimpleNamespace

@@ -1,4 +1,4 @@
-"""User-run cases; synthetic coordinates only, no real model or map calls."""
+"""Dining recommendations with synthetic coordinates and mocked map queries."""
 import copy
 import unittest
 from unittest.mock import patch

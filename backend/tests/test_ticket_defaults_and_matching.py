@@ -1,4 +1,4 @@
-"""Synthetic user-run regressions; no provider calls, builds or service execution."""
+"""Ticket defaults and matching with synthetic provider data."""
 import copy
 import unittest
 from unittest.mock import AsyncMock

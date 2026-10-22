@@ -1,4 +1,4 @@
-"""User-run scope regressions. Synthetic data only; Codex does not run these."""
+"""Selected revision scope with synthetic data."""
 import unittest
 
 from app.models import CandidateRevision

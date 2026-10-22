@@ -1,4 +1,4 @@
-"""User-run Windows regressions. Lock contention and time are mocked; no server is started."""
+"""Windows service lifetime locking with mocked contention and time."""
 import errno
 import sys
 import tempfile

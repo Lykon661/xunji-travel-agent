@@ -1,4 +1,4 @@
-"""Synthetic tool-loop regressions. Authored for user-run tests; no external calls."""
+"""Route tool-loop completion with mocked external calls."""
 import copy
 import tempfile
 import unittest
