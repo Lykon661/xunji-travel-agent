@@ -48,6 +48,8 @@ class TripState(TypedDict, total=False):
     decision_reopened: bool
     decision_history: list[dict]
     place_selection: dict
+    # Code-built options of the pending decision: {question_id, options: {label: action}}.
+    decision_options: dict
     draft_revision: int
     route_confirmed: bool
     factual_refresh_completed: bool

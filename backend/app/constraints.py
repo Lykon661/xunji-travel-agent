@@ -8,13 +8,15 @@ from .models import CONSTRAINT_RECORD_FIELDS, ConstraintDraft, ConstraintExtract
 
 
 MAX_CONSTRAINTS = 60
+UNQUOTED = "quote不是用户原话中的片段"
 
 CONSTRAINT_GUIDE = (
     "constraints只记录用户原话明确提出、可归入以下种类的条件：fewer_walking少走路（用户给出每天步行距离或时长上限时填meters，时长按每分钟80米换算；没给数字留空）；"
     "fixed_order两个地点的先后（before先去、after后去；城市先后由cities顺序表达，不写入）；"
     "time_anchor某地点的日出/日落/预约时刻（anchor=sunrise/sunset/appointment，已知时刻填at）；"
     "visit_duration某地点的游玩时长（minutes）；transfer_buffer城际班次前预留缓冲（mode=train/flight/ferry，minutes）；"
-    "booking_prerequisite某地点必须先完成预约才安排；transit_rule市内交通条件（public_only只用公共交通，auto_by_transit按真实公交查询结果自动取舍）。"
+    "booking_prerequisite某地点必须先完成预约才安排；transit_rule市内交通条件（public_only只用公共交通，auto_by_transit按真实公交查询结果自动取舍）；"
+    "daily_min_stops每天至少安排几个景点（count；用户之后接受某些日期少于这个数时，写同种类、scope.dates为其余日期的新条件）。"
     "scope.dates、scope.stop_ids、scope.cities限定生效范围，用户没有限定就留空表示全程；"
     "time_anchor、visit_duration、booking_prerequisite的scope.stop_ids恰好一个地点；地点ID只能使用available_stops中的完整键。"
     "quote必须逐字摘自用户原话。用户取消此前条件时，以同种类、同对象填写revoke=true。"
@@ -61,7 +63,7 @@ def check(drafts, text, req, stops):
         item = draft.model_dump(mode="json") if isinstance(draft,ConstraintDraft) else draft
         problems = []
         if _compact(item.get("quote")) not in source:
-            problems.append("quote不是用户原话中的片段")
+            problems.append(UNQUOTED)
         unknown = [identity for identity in item["scope"]["stop_ids"] if identity not in stops]
         if unknown:
             problems.append("未知地点ID："+"、".join(unknown[:5]))

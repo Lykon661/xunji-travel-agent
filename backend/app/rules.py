@@ -219,6 +219,12 @@ def constraint_issues(itinerary: dict, req: dict):
             elif kind == "booking_prerequisite":
                 notes.append(activity["name"]+"：按你的要求须先完成预约再前往，请出发前确认预约")
     for day in itinerary.get("days",[]):
+        visits = sum(activity.get("kind") == "visit" for activity in day.get("activities",[]))
+        for item in active(req,"daily_min_stops",date=day["date"]):
+            if (not item["scope"]["cities"] or day.get("city") in item["scope"]["cities"]) and visits < item["count"]:
+                # An accepted (soft) minimum still rules out a day with no stop at all.
+                violated(item,day["date"],day["date"]+("一个景点都没有安排" if not visits else "只安排了"+str(visits)+"个景点")
+                         +"，少于每天至少"+str(item["count"])+"个",blocking=item["strength"] == "hard" or not visits)
         target,limit = walking_target(req,day["date"]),walking_limit(req,day["date"])
         walked = day.get("walking_meters") or 0
         if target is not None and limit is not None and target < limit and walked > target:

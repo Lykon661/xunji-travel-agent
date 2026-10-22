@@ -36,7 +36,7 @@ class RepeatPermission(BaseModel):
 
 
 CONSTRAINT_KINDS = ("fewer_walking", "fixed_order", "time_anchor", "visit_duration",
-                    "transfer_buffer", "booking_prerequisite", "transit_rule")
+                    "transfer_buffer", "booking_prerequisite", "transit_rule", "daily_min_stops")
 # Kinds that apply to exactly one stop, named by scope.stop_ids.
 SINGLE_STOP_KINDS = frozenset({"time_anchor", "visit_duration", "booking_prerequisite"})
 
@@ -50,7 +50,7 @@ class ConstraintScope(BaseModel):
 class ConstraintDraft(BaseModel):
     """Model-facing shape: one user condition, quoted verbatim, with typed parameters per kind."""
     kind: Literal["fewer_walking", "fixed_order", "time_anchor", "visit_duration",
-                  "transfer_buffer", "booking_prerequisite", "transit_rule"]
+                  "transfer_buffer", "booking_prerequisite", "transit_rule", "daily_min_stops"]
     strength: Literal["hard", "soft"] = "hard"
     scope: ConstraintScope = Field(default_factory=ConstraintScope)
     before: str = Field(default="", max_length=200, description="fixed_order先去的地点ID")
@@ -59,6 +59,7 @@ class ConstraintDraft(BaseModel):
     at: str | None = Field(default=None, pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$", description="time_anchor的指定时刻HH:MM")
     minutes: int | None = Field(default=None, ge=5, le=720, description="visit_duration游玩分钟数或transfer_buffer缓冲分钟数")
     meters: int | None = Field(default=None, ge=500, le=50000, description="fewer_walking用户给出的每天步行上限（米）")
+    count: int | None = Field(default=None, ge=1, le=12, description="daily_min_stops每天至少安排的景点个数")
     mode: Literal["", "train", "flight", "ferry"] = ""
     rule: Literal["", "public_only", "auto_by_transit"] = ""
     revoke: bool = Field(default=False, description="true表示取消此前同种类、同对象的条件")
@@ -82,6 +83,8 @@ class ConstraintDraft(BaseModel):
             raise ValueError("transfer_buffer需要mode与minutes")
         if self.kind == "transit_rule" and not self.rule:
             raise ValueError("transit_rule需要rule")
+        if self.kind == "daily_min_stops" and self.count is None:
+            raise ValueError("daily_min_stops需要count")
         return self
 
 

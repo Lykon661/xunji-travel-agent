@@ -12,6 +12,7 @@ from ..routing import coordinates
 from ..agents.route import resolve_stop_id
 from ..dining import is_dining
 from ..places import canonicalize_stops, planning_stop_pool, represented_ids
+from ..conflicts import code_decision, trip_pool_question
 
 
 class CandidateNodes:
@@ -88,7 +89,12 @@ class CandidateNodes:
         for attempt in range(2):
             turn = await self.route_agent.plan(state,instruction,payload,lambda request:self.agent_tool({**state,"stops":stops},request))
             if turn.status == "needs_decision":
-                return {"stops":stops,"weather":weather,"decision":turn.question.model_dump(mode="json"),"decision_resume":"discover"}
+                question,options = turn.question.model_dump(mode="json"),{}
+                # Too few stops for the user's daily minimum is asked with code-built options before any route exists.
+                coded = trip_pool_question({**state,"stops":stops},lambda:self.store.sources(state["trip_id"]))
+                if coded:
+                    question,options = coded[0],{"question_id":coded[0]["id"],"options":coded[1]}
+                return {"stops":stops,"weather":weather,"decision":question,"decision_options":options,"decision_resume":"discover"}
             try:
                 for day in turn.candidate.days:
                     day.stop_ids = [resolve_stop_id(identity,available,day.city) or identity for identity in day.stop_ids]
@@ -164,7 +170,15 @@ class CandidateNodes:
                 for operation in (self.transport,self.hotels,self.activities,self.tickets,self.check):
                     probe.update(await operation(probe))
                     if probe.get("decision"):
-                        question = probe["decision"]
+                        question,options = probe["decision"],{}
+                        # A scheduling question about a day that cannot fit or has run out of stops gets code-built options;
+                        # place and hub choices keep their own selection flow.
+                        if not probe.get("place_selection"):
+                            dates = question.get("affected_dates") or [day["date"] for day in candidate["days"]]
+                            coded = code_decision({**probe,"selected_route":copy.deepcopy(candidate)},probe["itinerary"],
+                                                  [str(day) for day in dates],lambda:self.store.sources(state["trip_id"]))
+                            if coded:
+                                question,options = coded[0],{"question_id":coded[0]["id"],"options":coded[1]}
                         actual = {day["date"]:[item["id"] for item in day["activities"] if item["kind"] == "visit"]
                                   for day in probe["itinerary"].get("days",[])}
                         for day in candidate["days"]:
@@ -176,7 +190,7 @@ class CandidateNodes:
                                 "selected_route":{},"preview_ready":False,"stops":probe["stops"],"weather":probe.get("weather",{}),
                                 "warnings":list(dict.fromkeys([*warnings,*probe.get("warnings",[])])),
                                 "decision":question,"decision_resume":"assess","assessment_base":candidate["id"],
-                                "place_selection":probe.get("place_selection",{}),
+                                "place_selection":probe.get("place_selection",{}),"decision_options":options,
                                 "assessment_dates":question.get("affected_dates",[])}
             itinerary = probe["itinerary"]
             warnings.extend(probe.get("warnings",[]))

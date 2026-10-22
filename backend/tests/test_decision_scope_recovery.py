@@ -93,6 +93,16 @@ class DecisionScopeRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["field"] for item in issues],["constraints"])
         self.assertEqual(result["requirements"]["constraints"],[])
 
+    async def test_condition_still_unquoted_after_correction_is_dropped_instead_of_failing(self):
+        invented = ConstraintDraft(kind="fewer_walking",quote="用户说过少走路")
+        self.planner.models.ask.side_effect = [DecisionResolution(constraints=[invented]),
+                                               DecisionResolution(constraints=[invented],explanation="按回答继续")]
+        with self.assertLogs("app.planner",level="WARNING"):
+            result = await self.resolve()
+        self.assertEqual(self.planner.models.ask.await_count,2)
+        self.assertEqual(result["requirements"]["constraints"],[])
+        self.assertIn("无法对应到你回答的原话",result["decision_history"][-1]["summary"])
+
     async def test_invalid_requirement_value_is_corrected_instead_of_crashing_the_run(self):
         self.answer = "返程最晚下午3点到家"
         self.planner.models.ask.side_effect = [
@@ -127,6 +137,17 @@ class DecisionScopeRecovery(unittest.IsolatedAsyncioTestCase):
             self.assertIn(detail,str(caught.exception))
         self.assertEqual(self.planner.models.ask.await_count,2)
         self.assertEqual(self.state,original)
+
+    async def test_malformed_repeat_permission_is_dropped_instead_of_failing(self):
+        self.answer = "按同一实际地点合并，避免重复"
+        self.planner.models.ask.side_effect = [
+            DecisionResolution(requirements={"repeat_exceptions":"合并"}),
+            DecisionResolution(requirements={"repeat_exceptions":["合并"]},explanation="按同一地点合并")]
+        with self.assertLogs("app.planner",level="WARNING"):
+            result = await self.resolve()
+        self.assertEqual(self.planner.models.ask.await_count,2)
+        self.assertEqual(result["requirements"]["repeat_exceptions"],[])
+        self.assertIn("重复安排授权的格式不合法",result["decision_history"][-1]["summary"])
 
     async def test_network_failure_does_not_trigger_a_scope_retry(self):
         self.planner.models.ask.side_effect = ToolError("model_network","合成网络失败")

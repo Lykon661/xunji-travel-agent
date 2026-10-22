@@ -118,6 +118,7 @@ function constraintText(item: PlanningConstraint) {
     transfer_buffer:`${modeLabels[item.mode]}出发前预留${item.minutes}分钟`,
     booking_prerequisite:`${stop}须先完成预约再安排`,
     transit_rule:item.rule === 'public_only' ? '市内只用公共交通' : '按真实公交查询结果自动取舍',
+    daily_min_stops:`每天至少安排${item.count}个景点`,
   }[item.kind]
   // Without a distance, "less walking" is only ever a target.
   const soft = item.strength === 'soft' || (item.kind === 'fewer_walking' && !item.meters)

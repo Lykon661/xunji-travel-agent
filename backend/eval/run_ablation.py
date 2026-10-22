@@ -39,7 +39,7 @@ VARIANTS = {"full": "全部开启", "no_reviewer": "关掉检验 Agent", "no_ded
             "no_code_checks": "关掉代码硬约束校验"}
 UNAVAILABLE = re.compile(r"额度|重新登录|模型权限")
 TRANSIENT = {"model_network", "model_format", "amap_network", "amap_rate_limit", "flyai_timeout"}
-RUN_LEVEL = {"decisions", "model_calls", "elapsed_seconds"}
+RUN_LEVEL = {"decisions", "code_option_decisions", "model_calls", "elapsed_seconds"}
 OUTCOMES = {"selection": "得到候选", "decision_limit": "追问超过上限", "failed": "运行失败",
             "no_candidate": "未形成候选", "timeout": "超时", "invalid_case": "用例无效"}
 
@@ -76,6 +76,10 @@ async def run_one(case, variant, repeat, out, cassette, args):
     before = dict(cassette.stats)
     planner = None
     undo = None
+    run_ids = []
+    # Warnings from the app (rejected model output, fallbacks) are kept only if the run fails.
+    captured = CapturedLogs()
+    logging.getLogger("app").addHandler(captured)
     with ablation.use(variant):
         try:
             planner = Planner(store, InMemorySaver())
@@ -101,6 +105,7 @@ async def run_one(case, variant, repeat, out, cassette, args):
                 source_ids.append(store.add_source(trip["id"], doc)["id"])
             deadline = perf_counter() + args.timeout
             run_id = await planner.submit(trip["id"], trip["version"], selected_source_ids=source_ids)
+            run_ids.append(run_id)
             while True:
                 if await wait_run(planner, run_id, max(1, deadline - perf_counter())):
                     row["outcome"] = "timeout"
@@ -117,6 +122,7 @@ async def run_one(case, variant, repeat, out, cassette, args):
                         print(f"    … {details.get('code')}，第 {row['resumes']} 次继续本次任务", flush=True)
                         try:
                             run_id = await planner.submit(trip["id"], current["version"], selected_source_ids=source_ids, resume=True)
+                            run_ids.append(run_id)
                             continue
                         except Exception as exc:
                             row["error"] += f"；继续任务失败：{exc}"[:200]
@@ -144,6 +150,7 @@ async def run_one(case, variant, repeat, out, cassette, args):
                     break
                 run_id = await planner.submit(trip["id"], current["version"], selected_source_ids=source_ids,
                                               interview_response=response)
+                run_ids.append(run_id)
             doc = store.trip(trip["id"])["document"]
             candidate = (doc.get("candidates") or [None])[0]
             pool = {stop["id"] for source in store.sources(trip["id"]) for stop in (source.get("extraction") or {}).get("stops", [])}
@@ -153,6 +160,8 @@ async def run_one(case, variant, repeat, out, cassette, args):
             (plans / f"{case['id']}-{variant}-{repeat}.json").write_text(json.dumps(
                 {"requirements": doc["requirements"], "candidate": candidate, "decision_history": doc.get("decision_history", []),
                  "warnings": doc.get("warnings", [])}, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+            # 由代码给出选项、回答后直接执行的追问数（其余追问由模型生成和解析）。
+            row["code_option_decisions"] = sum(bool(entry.get("code_option")) for entry in doc.get("decision_history", []))
             try:
                 row.update(evaluate(doc["requirements"], candidate, pool, case.get("aliases", []), case.get("expected_constraints")))
             except Exception as exc:
@@ -163,6 +172,7 @@ async def run_one(case, variant, repeat, out, cassette, args):
             row.update(outcome="failed", error=f"{type(exc).__name__}: {exc}"[:300])
             logging.getLogger(__name__).error("run %s/%s/%s crashed\n%s", case["id"], variant, repeat, traceback.format_exc())
         finally:
+            logging.getLogger("app").removeHandler(captured)
             if planner is not None:
                 await planner.close()
             if undo:
@@ -170,6 +180,8 @@ async def run_one(case, variant, repeat, out, cassette, args):
             cassette.flush()
     if row["outcome"] in {"failed", "no_candidate"} and UNAVAILABLE.search(row["error"]):
         row["outcome"] = "model_unavailable"
+    if row["outcome"] in FAILED_OUTCOMES:
+        save_failure(out / "failures" / f"{case['id']}-{variant}-{repeat}.json", store, run_ids, row, captured.records)
     row["elapsed_seconds"] = round(perf_counter() - started, 1)
     row["model_seconds"] = round(row["model_seconds"], 1)
     row["replay"] = {key: value - before.get(key, 0) for key, value in cassette.stats.items()}
@@ -178,6 +190,40 @@ async def run_one(case, variant, repeat, out, cassette, args):
         if work.parent.is_dir() and not any(work.parent.iterdir()):
             work.parent.rmdir()
     return row
+
+
+FAILED_OUTCOMES = {"failed", "no_candidate", "timeout", "model_unavailable", "score_error"}
+
+
+class CapturedLogs(logging.Handler):
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.records = []
+
+    def emit(self, record):
+        self.records.append({"time": datetime.fromtimestamp(record.created).isoformat(timespec="seconds"),
+                             "level": record.levelname, "logger": record.name, "message": record.getMessage()[:4000],
+                             "traceback": logging.Formatter().formatException(record.exc_info)[:8000] if record.exc_info else ""})
+
+
+def save_failure(path: Path, store, run_ids, row, logs):
+    """Keep what a failed run leaves before its work folder is deleted: run states, progress events and app warnings."""
+    runs = []
+    for run_id in dict.fromkeys(run_ids):
+        try:
+            run = store.run(run_id)
+        except Exception as exc:
+            runs.append({"run_id": run_id, "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        events, after = [], 0
+        while batch := store.events(run_id, after):
+            events += batch
+            after = batch[-1]["id"]
+        runs.append({"run_id": run_id, "status": run.get("status"), "document": run.get("document"), "events": events})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"case": row["case"], "variant": row["variant"], "repeat": row["repeat"], "outcome": row["outcome"],
+                                "error": row["error"], "runs": runs, "logs": logs}, ensure_ascii=False, indent=1, default=str),
+                    encoding="utf-8")
 
 
 def load_rows(file: Path):
@@ -293,7 +339,7 @@ def report(out: Path):
         return
     variants = list(dict.fromkeys(row["variant"] for row in rows))
     metrics = [*VIOLATIONS, "dup_visit_strict", "total_violations", "escaped_violations", "confirmable", "reviewer_blockers",
-               "oracle_code_blockers", "decisions", "model_calls", "elapsed_seconds",
+               "oracle_code_blockers", "decisions", "code_option_decisions", "model_calls", "elapsed_seconds",
                "constraints_expected", "constraints_extracted", "constraints_matched"]
     summary = {}
     for variant in variants:
@@ -341,7 +387,7 @@ def report(out: Path):
               "opening_violation": "营业/闭馆冲突", "lunch_missing": "未留午餐", "walking_over_limit": "步行超限",
               "over_budget": "超预算", "user_constraint_violation": "违反用户条件", "total_violations": "违反合计", "escaped_violations": "漏检违反",
               "confirmable": "可确认方案", "reviewer_blockers": "检验 Agent 额外阻断", "oracle_code_blockers": "完整代码规则阻断",
-              "decisions": "追问次数", "model_calls": "模型调用", "elapsed_seconds": "用时(秒)",
+              "decisions": "追问次数", "code_option_decisions": "其中代码给出选项", "model_calls": "模型调用", "elapsed_seconds": "用时(秒)",
               "constraints_expected": "应抽取的偏好条件", "constraints_extracted": "实际抽取的偏好条件", "constraints_matched": "其中种类正确"}
     lines += ["", "## 指标合计（只统计得到方案的运行）", "", "| 指标 | " + " | ".join(VARIANTS.get(v, v) for v in variants) + " |",
               "|---|" + "---|" * len(variants)]

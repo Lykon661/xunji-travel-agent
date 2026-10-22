@@ -25,7 +25,8 @@ from .agents import GuideAgent, ResourceAgent, RouteAgent, ReviewerAgent
 from .agents.route import resolve_stop_id
 from .agents.runtime import digest
 from .decisions import apply_walking_decision, confirmation_blockers, walking_question
-from .constraints import CONSTRAINT_GUIDE, check, merge, stop_catalog
+from .constraints import CONSTRAINT_GUIDE, UNQUOTED, check, merge, stop_catalog
+from .conflicts import accepted_shortage, apply_option
 from .dining import is_dining
 from .places import canonicalize_stops, plan_fingerprint
 from .nodes.candidates import CandidateNodes
@@ -147,6 +148,20 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
                 candidate["confirmation_blockers"] = list(dict.fromkeys([*(candidate.get("confirmation_blockers") or []),note]))
             return {"decision":{},"decision_resume":"selection_gate","candidates":candidates,"selected_route":{},
                     "warnings":list(dict.fromkeys([*state.get("warnings",[]),note]))}
+        coded = state.get("decision_options") or {}
+        if coded.get("question_id") != question.get("id") and accepted_shortage(state,question):
+            # The user already accepted fewer stops and the guides have none left: asking again would repeat that answer.
+            dates = sorted({str(day) for day in question.get("affected_dates",[])})
+            summary = "你已接受景点不够的日子少排，"+"、".join(dates)+"按现有景点继续，不再追问"
+            history = [*history,{"questions":[question],"answers":{},"note":"","summary":summary,"auto_settled":"accepted_shortage"}]
+            drafted = bool(state.get("candidates") and state["candidates"][0].get("draft",{}).get("days"))
+            self.emit(state,"assessing",summary)
+            return {"decision_history":history,"decision":{},"decision_options":{},"decision_reopened":False,
+                    "assessment_dates":dates,"assessment_base":state["candidates"][0]["id"] if state.get("candidates") else "",
+                    "keep_current_plan":drafted and state["decision_resume"] in {"assess","review_result"},
+                    "draft_revision":state.get("draft_revision",0)+1,"repair_round":0,"review_feedback":[],"place_selection":{},
+                    "decision_resume":"assess" if state["decision_resume"] == "review_result" else state["decision_resume"],
+                    "interview":{"summary":summary,"questions":[],"history":history,"confirmed":False}}
         token = digest({"question":question,"history":state.get("decision_history",[]),"generation":state["generation"],"revision":state.get("draft_revision",0)})[:40]
         answer = interrupt({"kind":"decision","message":question["question"],"questions":[question],"round_id":token,
                             "round":len(state.get("decision_history",[]))+1,"summary":question["why_needed"],
@@ -205,6 +220,18 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
                     "repair_only":any(candidate.get("draft",{}).get("days") for candidate in candidates),
                     "repair_round":0,"review_feedback":[],"draft_revision":state.get("draft_revision",0)+1,
                     "keep_current_plan":False,"interview":{"summary":summary,"questions":[],"history":history,"confirmed":False}}
+        coded = state.get("decision_options") or {}
+        action = ((coded.get("options") or {}).get(values[question["id"]].strip())
+                  if coded.get("question_id") == question["id"] and not answer.get("note","").strip() else None)
+        if action:
+            # A code-built option is executed as its structured action; no model reads the answer.
+            updates,dates,summary = apply_option(state,action,values[question["id"]].strip())
+            history = [*history,{"questions":[question],"answers":values,"note":"","summary":summary,"code_option":action["type"]}]
+            return {**updates,"decision_history":history,"decision":{},"decision_options":{},"decision_reopened":False,
+                    "assessment_dates":dates,"assessment_base":state["candidates"][0]["id"] if state.get("candidates") else "",
+                    "draft_revision":state.get("draft_revision",0)+1,"repair_round":0,"review_feedback":[],"place_selection":{},
+                    "decision_resume":"assess" if state["decision_resume"] == "review_result" else state["decision_resume"],
+                    "interview":{"summary":summary,"questions":[],"history":history,"confirmed":False}}
         instruction = (
             "将用户当前问题的明确回答转成约束更新。requirements只填用户在这次回答中明确授权改变的字段；"
             "推荐选项不是回答。required_ids与excluded_ids仅包含现有景点ID，代表这次明确设为必去或排除的景点。"
@@ -225,6 +252,7 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
                    "available_stops":available,"constraints":state.get("stop_constraints",{}),
                    "allowed_requirement_fields":sorted(DECISION_REQUIREMENT_FIELDS),"allowed_stop_ids":sorted(available)}
         answer_text = " ".join(values.values())+" "+answer.get("note","")
+        dropped_repeats = dropped_quotes = False
         for attempt in range(2):
             resolution = await self.models.ask(DecisionResolution,instruction,payload)
             resolution.required_ids = [resolve_stop_id(identity,available) or identity for identity in resolution.required_ids]
@@ -257,6 +285,17 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
                            for key,item in issue.items()} for issue in issues]
             logging.getLogger(__name__).warning("Decision scope rejected: run=%s attempt=%s issues=%s",
                                                state.get("run_id"),attempt+1,dump(diagnostic))
+            repeats = [issue for issue in issues if issue["field"] == "requirements" and issue.get("invalid_values")
+                       and all(value.startswith("repeat_exceptions") for value in issue["invalid_values"])]
+            unquoted = [issue for issue in issues if issue["field"] == "constraints"
+                        and all(item["problems"] == [UNQUOTED] for item in rejected)]
+            if attempt and len(repeats)+len(unquoted) == len(issues):
+                # Both only add conditions: a malformed repeat permission keeps the default of no repeats, and a condition
+                # the answer does not say is left out (new_constraints already holds only the valid ones).
+                if repeats:
+                    resolution.requirements.pop("repeat_exceptions",None)
+                dropped_repeats,dropped_quotes = bool(repeats),bool(unquoted)
+                break
             if attempt:
                 detail = "；".join(issue["field"]+"："+"、".join(
                     issue.get("unknown_fields",issue.get("unknown_ids",issue.get("conflicting_ids",issue.get("invalid_values",[]))))) for issue in diagnostic)
@@ -286,6 +325,10 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
         action = "restore" if "max_walk_per_day" in changes else resolution.walking_limit_action
         req,keep = apply_walking_decision(req,question,answer_text,action,resolution.keep_current_plan)
         explanation = resolution.explanation.strip() or "已记录你的回答："+answer_text.strip()[:1000]
+        if dropped_repeats:
+            explanation += "；重复安排授权的格式不合法，未采用，仍按每个地点只安排一次"
+        if dropped_quotes:
+            explanation += "；有条件无法对应到你回答的原话，未采用"
         if req.get("walking_limit_exempt_dates") != state["requirements"].get("walking_limit_exempt_dates",[]):
             explanation = "按你的最新指令更新步行限制；"+("保留当前规划，受影响日期不再因步行上限删点或追问" if keep else "已更新受影响日期的步行限制")
         constraints = state.get("stop_constraints",{})
@@ -319,7 +362,7 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
                     resume = "discover"
         return {"requirements":req,"candidates":candidates,"stop_constraints":{"required":sorted(required),"excluded":sorted(excluded)},"decision_history":history,
                 "decision":{},"decision_reopened":False,"assessment_dates":dates,"assessment_base":base,"draft_revision":state.get("draft_revision",0)+1,
-                "repair_round":0,"review_feedback":[],"place_selection":{},
+                "repair_round":0,"review_feedback":[],"place_selection":{},"decision_options":{},
                 "keep_current_plan":keep,
                 "decision_resume":"assess" if resume == "review_result" else resume,
                 "interview":{"summary":explanation,"questions":[],"history":history,"confirmed":False}}

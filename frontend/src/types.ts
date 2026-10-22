@@ -13,9 +13,9 @@ export interface Requirements {
   constraints?: PlanningConstraint[]; constraints_basis?: string;
 }
 export interface PlanningConstraint {
-  id: string; kind: 'fewer_walking' | 'fixed_order' | 'time_anchor' | 'visit_duration' | 'transfer_buffer' | 'booking_prerequisite' | 'transit_rule';
+  id: string; kind: 'fewer_walking' | 'fixed_order' | 'time_anchor' | 'visit_duration' | 'transfer_buffer' | 'booking_prerequisite' | 'transit_rule' | 'daily_min_stops';
   strength: 'hard' | 'soft'; scope: {dates: string[]; stop_ids: string[]; cities: string[]};
-  before: string; after: string; anchor: '' | 'sunrise' | 'sunset' | 'appointment'; at: string | null; minutes: number | null; meters: number | null;
+  before: string; after: string; anchor: '' | 'sunrise' | 'sunset' | 'appointment'; at: string | null; minutes: number | null; meters: number | null; count: number | null;
   mode: '' | 'train' | 'flight' | 'ferry'; rule: '' | 'public_only' | 'auto_by_transit'; revoke: boolean;
   quote: string; source: 'form' | 'message' | 'interview' | 'decision'; round_id: string; superseded_by: string;
 }

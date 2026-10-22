@@ -128,7 +128,7 @@ class RouteAgent(AgentRuntime):
                             original.pop(field,None)
 
     async def plan_turn(self, state, instruction, payload, tools, daily):
-        result = await self.ask(state,RouteTurn,
+        prompt = (
             "你与攻略 Agent、资源 Agent 协作，只形成一条完整行程。交通、住宿和门票使用资源 Agent 交接的真实结果。"
             "住宿仅在selected_by_user=true时参与行程；未选定酒店不得暂用，不安排酒店起终点、放行李或接驳，也不要求用户先选酒店。"
             "全程同一canonical_place_id默认只游览一次，多个source_references只是同一地点的多个来源；用户明确repeat_exceptions除外。"
@@ -158,9 +158,17 @@ class RouteAgent(AgentRuntime):
             "用户最新明确指令优先于默认规则与旧偏好。walking_limit_exempt_dates中的日期已获用户授权豁免步行上限，"
             "effective_max_walk_per_day为null时只提示真实距离，不能因旧上限删点、换住宿或重复追问。"
             "工具失败是资料缺口，不冒充偏好问题。没有未决决策才status=ready，"
-            +("返回order，candidate为null。" if daily else "返回单个candidate，order为null。")+instruction,
-            payload,tools,completion_schema=DailyRouteCompletion if daily else RouteCompletion)
-        if result.status == "ready" and ((daily and result.order is None) or (not daily and result.candidate is None)):
+            +("返回order，candidate为null。" if daily else "返回单个candidate，order为null。")+instruction)
+        completion = DailyRouteCompletion if daily else RouteCompletion
+        def incomplete(turn):
+            return turn.status == "ready" and ((daily and turn.order is None) or (not daily and turn.candidate is None))
+        result = await self.ask(state,RouteTurn,prompt,payload,tools,completion_schema=completion)
+        if incomplete(result):
+            # One correction, like other format errors: say what was missing instead of failing the whole run.
+            correction = ("上一次返回status=ready却没有"+("order" if daily else "candidate")+"，本步骤无法采用。"
+                          "完成时必须填写"+("order（candidate为null）" if daily else "candidate（order为null）")+"；仍有未决取舍时返回needs_decision和question。")
+            result = await self.ask(state,RouteTurn,prompt+correction,payload,tools,cache=False,completion_schema=completion)
+        if incomplete(result):
             raise ToolError("route_format","路线 Agent 未交接当前步骤需要的结构，未采用")
         return result
 

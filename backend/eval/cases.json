@@ -1009,7 +1009,12 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
-   "expected_constraints": [],
+   "expected_constraints": [
+    {
+     "kind": "daily_min_stops",
+     "count": 3
+    }
+   ],
    "guides": [
     {
      "title": "广州老城区慢游",
@@ -1072,7 +1077,12 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
-   "expected_constraints": [],
+   "expected_constraints": [
+    {
+     "kind": "daily_min_stops",
+     "count": 3
+    }
+   ],
    "guides": [
     {
      "title": "西湖四季",
@@ -1133,7 +1143,12 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
-   "expected_constraints": [],
+   "expected_constraints": [
+    {
+     "kind": "daily_min_stops",
+     "count": 3
+    }
+   ],
    "guides": [
     {
      "title": "成都慢生活",
@@ -1192,7 +1207,12 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
-   "expected_constraints": [],
+   "expected_constraints": [
+    {
+     "kind": "daily_min_stops",
+     "count": 3
+    }
+   ],
    "guides": [
     {
      "title": "西安古都四日",
@@ -1253,7 +1273,12 @@
     "local_transport": "public",
     "self_arranged_round_trip": true
    },
-   "expected_constraints": [],
+   "expected_constraints": [
+    {
+     "kind": "daily_min_stops",
+     "count": 3
+    }
+   ],
    "guides": [
     {
      "title": "北京经典五日",

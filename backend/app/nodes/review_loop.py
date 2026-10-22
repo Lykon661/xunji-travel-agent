@@ -15,6 +15,7 @@ from ..agents.runtime import digest
 from ..decisions import confirmation_blockers, input_hash, route_structure
 from ..dining import is_dining
 from ..constraints import station_buffer
+from ..conflicts import code_decision
 from ..places import canonicalize_itinerary, canonical_key, duplicate_issues, repeat_allowed, plan_fingerprint
 from ..reviewing import bind_report, evidence_ids, require_review, review_basis, review_blockers, review_payload, review_repair_dates
 from ..planning_recovery import previous_round, regression_reason, route_moves
@@ -155,6 +156,11 @@ class ReviewLoopNodes:
         findings = [item for item in report.get("findings",[]) if item.get("severity") == "blocker"]
         issue = (findings or [item for item in itinerary.get("issues",[]) if item.get("blocking")] or [{}])[0]
         dates = review_repair_dates([issue],itinerary)
+        coded = code_decision({**state,"selected_route":candidate},itinerary,dates,lambda:self.store.sources(state["trip_id"]))
+        if coded:
+            self.emit(state,"interviewing","相关部分需要你取舍，已列出可行的调整方式")
+            return {"decision":{**coded[0]},"decision_options":{"question_id":coded[0]["id"],"options":coded[1]},
+                    "decision_resume":"assess","selected_route":{},"preview_ready":False}
         question = None
         try:
             result = await self.route_agent.review({**state,"itinerary":itinerary,"selected_route":candidate},[issue] if issue else [])
@@ -195,6 +201,7 @@ class ReviewLoopNodes:
         no_progress = False
         diagnosed = False
         resolved_decision = None
+        decision_options = {}
         quotes_refreshed = False
         state = {**state,"draft_revision":revision,"selected_route":candidate,"itinerary":itinerary}
         while True:
@@ -259,8 +266,13 @@ class ReviewLoopNodes:
                     and not decision and not state.get("decision") and not report.get("question")):
                 diagnosed = True
                 self.emit(state,"repairing","正在判断剩余冲突能否继续自动修复，只有真实取舍才会询问你")
-                resolution = await self.route_agent.resolve_review(state,unresolved_repairs)
-                if resolution.status == "needs_decision":
+                # A day that cannot hold its mandatory stops, or has run out of stops, is asked with code-built options first.
+                coded = code_decision(state,itinerary,review_repair_dates(unresolved_repairs,itinerary),lambda:self.store.sources(state["trip_id"]))
+                resolution = None if coded else await self.route_agent.resolve_review(state,unresolved_repairs)
+                if coded:
+                    resolved_decision,options = coded
+                    decision_options = {"question_id":resolved_decision["id"],"options":options}
+                elif resolution.status == "needs_decision":
                     resolved_decision = resolution.question.model_dump(mode="json")
                 elif resolution.status == "repair" and repairable and state.get("repair_round",0) < 3:
                     repairable = [{**finding,"suggestion":finding.get("suggestion","")+"；本轮修复指令："+resolution.explanation} for finding in repairable]
@@ -287,6 +299,7 @@ class ReviewLoopNodes:
             state.update(await self.repair(repair_state))
             # Repair dispatch owns targeted ticket queries; do not refresh the whole trip here.
             no_progress = digest([route_structure(state["itinerary"]),sorted(evidence_ids(state["itinerary"]))]) == before
+        intended_route = copy.deepcopy(candidate)
         actual = {day["date"]:day for day in itinerary["days"]}
         has_visits = any(a["kind"] == "visit" for day in itinerary["days"] for a in day["activities"])
         if has_visits:
@@ -299,15 +312,23 @@ class ReviewLoopNodes:
                              *review_blockers(report,self.audit_state(state),itinerary,self.selected_sources(state["trip_id"],state["selected_source_ids"]),
                                  self.store.review_queries(state["trip_id"],list(evidence_ids(itinerary))))])))
         candidate["feasibility"] = self.feasibility(itinerary)
-        decision = decision or state.get("decision") or resolved_decision or report.get("question")
+        decision = decision or state.get("decision") or resolved_decision
         # Facts and tool failures stay visible gaps; only genuine user tradeoffs become questions.
         decision_findings = [finding for finding in report["findings"] if finding["action"] == "decision" and finding["severity"] == "blocker"]
+        if not decision and (report.get("question") or decision_findings):
+            dates = set((report.get("question") or {}).get("affected_dates",[])) | set(review_repair_dates(decision_findings,itinerary))
+            coded = code_decision({**state,"selected_route":intended_route},itinerary,dates,lambda:self.store.sources(state["trip_id"]))
+            if coded:
+                decision,options = coded
+                decision_options = {"question_id":decision["id"],"options":options}
+        decision = decision or report.get("question")
         if not decision and decision_findings:
             decision = (await self.route_agent.review(state,decision_findings)).question.model_dump(mode="json")
         return {"candidates":[candidate],"previews":{candidate["id"]:{"itinerary":copy.deepcopy(itinerary),"queried_at":now()}},
                 "draft_revision":revision,"decision":decision or {},"decision_resume":"assess","selected_route":{},"preview_ready":False,
                 "requirements":state["requirements"],"stop_constraints":constraints,"repair_round":state.get("repair_round",0),
-                "stops":state["stops"],"weather":state.get("weather",{}),"rollback":rollback,"place_selection":state.get("place_selection",{})}
+                "stops":state["stops"],"weather":state.get("weather",{}),"rollback":rollback,"place_selection":state.get("place_selection",{}),
+                "decision_options":decision_options}
 
     @staticmethod
     def feasibility(itinerary):

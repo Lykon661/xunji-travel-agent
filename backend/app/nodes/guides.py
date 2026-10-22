@@ -11,6 +11,7 @@ from ..store import Conflict, dump
 from ..routing import coordinates
 from ..agents.runtime import digest
 from ..decisions import apply_walking_decision, walking_question
+from ..conflicts import trip_pool_question
 from ..constraints import CONSTRAINT_GUIDE, check, merge, preferences_basis, refresh_form_constraints, stop_catalog
 from ..dining import is_dining
 from ..workflow.state import TripState
@@ -18,6 +19,10 @@ from ..workflow.state import TripState
 
 class GuideNodes:
     async def guide_analysis(self,state):
+        # The daily stop count is settled by code once, before any agent can raise its own version of the question.
+        coded = trip_pool_question(state,lambda:self.store.sources(state["trip_id"]))
+        if coded:
+            return {"decision":coded[0],"decision_options":{"question_id":coded[0]["id"],"options":coded[1]},"decision_resume":"guide_analysis"}
         self.emit(state,"parsing","攻略 Agent 正在整理景点与建议分组")
         result = await self.guide_agent.brief(state)
         prior = state.get("stop_constraints",{})
@@ -40,9 +45,14 @@ class GuideNodes:
             decision = {}
             result.status, result.question = "ready", None
             result.summary = "已沿用你对该问题的明确回答，继续按最新需求规划；可查事实由后续工具核实。"
+        options = {}
+        if decision:
+            coded = trip_pool_question({**state,"requirements":req,"stop_constraints":{"required":sorted(required),"excluded":sorted(excluded)}},lambda:self.store.sources(state["trip_id"]))
+            if coded:
+                decision,options = coded[0],{"question_id":coded[0]["id"],"options":coded[1]}
         return {"requirements":req,"guide_brief":result.model_dump(mode="json"),"stop_constraints":{"required":sorted(required),"excluded":sorted(excluded)},
                 "interview":{"summary":result.summary,"questions":[],"history":state.get("decision_history",[]),"confirmed":False},
-                "decision":decision,"decision_resume":"guide_analysis"}
+                "decision":decision,"decision_options":options,"decision_resume":"guide_analysis"}
 
     async def agent_tool(self,state,request):
         if request.tool == "guide_feedback":

@@ -37,6 +37,15 @@ class ConstraintShape(unittest.TestCase):
         softer = Constraint(**{**stored.model_dump(),"strength":"soft"})
         self.assertNotEqual(softer.id,stored.id)
 
+    def test_daily_minimum_needs_a_count_and_flags_short_days(self):
+        with self.assertRaises(ValidationError):
+            ConstraintDraft(kind="daily_min_stops",quote="每天至少三个景点")
+        req = {**REQ,"constraints":merge([],[draft(kind="daily_min_stops",count=2,quote="每天至少两个景点")],"form")}
+        plan = {"days":[{"date":"2026-11-10","city":"杭州","activities":[visit("guide:xh","09:00","12:00")]},
+                        {"date":"2026-11-11","city":"杭州","activities":[visit("guide:xh","09:00","10:00"),visit("guide:ly","11:00","12:00")]}]}
+        [issue] = constraint_issues(plan,req)[0]
+        self.assertEqual((issue["target"],issue["blocking"]),("2026-11-10",True))
+
     def test_old_documents_without_constraints_still_load(self):
         legacy = {key:value for key,value in REQ.items() if key not in {"constraints","constraints_basis"}}
         self.assertEqual(Requirements.model_validate(legacy).constraints,[])

@@ -107,6 +107,30 @@ class Scoring(unittest.TestCase):
         self.assertEqual((result["constraints_expected"],result["constraints_extracted"],result["constraints_matched"]),(2,1,1))
         self.assertNotIn("constraints_expected",evaluate(REQUIREMENTS,candidate,set()))
 
+    def test_failed_run_keeps_its_events_and_app_warnings(self):
+        import json, logging
+        from app.store import Store
+        from eval.run_ablation import CapturedLogs, save_failure
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            store = Store(Path(folder) / "work")
+            trip = store.create_trip("合成失败", REQUIREMENTS)
+            run_id = store.start_run(trip["id"],trip["version"],"thread",{})
+            store.event(run_id,"progress","正在安排每日行程",stage="activities")
+            store.finish_run(run_id,"failed",{"code":"route_format","message":"路线 Agent 未交接当前步骤需要的结构"})
+            captured = CapturedLogs()
+            logging.getLogger("app").addHandler(captured)
+            try:
+                logging.getLogger("app.planner").warning("合成告警")
+            finally:
+                logging.getLogger("app").removeHandler(captured)
+            target = Path(folder) / "failures" / "case.json"
+            save_failure(target,store,[run_id,run_id],{"case":"case","variant":"full","repeat":1,"outcome":"failed","error":"route_format"},captured.records)
+            saved = json.loads(target.read_text(encoding="utf-8"))
+        [run] = saved["runs"]
+        self.assertEqual((run["status"],run["document"]["code"]),("failed","route_format"))
+        self.assertEqual([event["message"] for event in run["events"]],["正在安排每日行程"])
+        self.assertEqual([entry["message"] for entry in saved["logs"]],["合成告警"])
+
     def test_wrong_dates_and_city_order_are_counted(self):
         candidate = {"days":[{"date":"2026-12-12","city":"深圳"}],"draft":{}}
         result = evaluate({**REQUIREMENTS,"cities":["广州"]},candidate,set())
