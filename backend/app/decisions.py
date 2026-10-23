@@ -4,6 +4,7 @@ from .routing import coordinates, daily_route_scope, reference_opening
 from .rules import timestamp
 from .resource_planning import resource_context_issues
 from .places import duplicate_issues, represented_ids
+from .dining import dining_wishes, dining_wish_issues, visit_required_ids
 from datetime import date, timedelta
 import re
 
@@ -72,17 +73,21 @@ def route_structure(itinerary):
             "resources":{group:[resource_signature(entry) for entry in itinerary.get(group,[])] for group in ("transport","hotels")}}
 
 
-def confirmation_blockers(itinerary, constraints=None, requirements=None):
+def confirmation_blockers(itinerary, constraints=None, requirements=None, stops=None):
     if ablation.disabled("code_checks"):
         return []
     blockers = [issue["message"] for issue in itinerary.get("issues",[]) if issue.get("blocking")]
     if requirements:
         blockers.extend(issue["message"] for issue in resource_context_issues(itinerary,requirements))
     visits = represented_ids([activity for day in itinerary.get("days",[]) for activity in day.get("activities",[]) if activity["kind"] == "visit"])
+    meal_stops = {item["id"]:{**item,"city":day["city"]} for day in itinerary.get("days",[]) for item in day.get("meal_recommendations",[]) if item.get("id")}
+    meal_stops.update(stops or {})
+    wishes = dining_wishes(meal_stops,requirements)
+    blockers.extend(issue["message"] for issue in dining_wish_issues(itinerary,meal_stops,requirements))
     blockers.extend(issue["message"] for issue in duplicate_issues(itinerary,requirements))
-    if not visits:
+    if not visits and not wishes:
         blockers.append("路线尚未包含有来源的景点安排")
-    if set((constraints or {}).get("required",[])) - visits:
+    if visit_required_ids((constraints or {}).get("required",[]),meal_stops,requirements) - visits:
         blockers.append("必去景点尚未全部纳入路线")
     if set((constraints or {}).get("excluded",[])) & visits:
         blockers.append("行程包含用户明确排除的地点或其攻略别名")

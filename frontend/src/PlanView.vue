@@ -25,6 +25,7 @@ function movement(move: Movement | undefined) {
   return `${label} ${move.minutes != null ? `约 ${move.minutes} 分钟` : '耗时未取得'}${move.summary ? ' · '+move.summary : ''}${move.note ? ' · '+move.note : ''}`
 }
 function evidenceKind(activity: Itinerary['days'][number]['activities'][number]) {
+  if (activity.source_kind === 'user') return '你指定想去的地点'
   if (activity.source_kind === 'flyai') return '你确认采用的飞猪商品'
   return activity.evidence?.kind === 'image' ? '攻略图片 ' + activity.evidence.image_index : '攻略正文'
 }
@@ -80,6 +81,9 @@ function evidenceKind(activity: Itinerary['days'][number]['activities'][number])
           <div class="activity-heading">
             <h4>
               {{ activity.name }}<span
+                v-if="activity.source_kind === 'user'"
+                class="badge required"
+              >自选</span><span
                 v-if="requiredIds.includes(activity.id) || activity.source_references?.some(reference => requiredIds.includes(reference.stop_id))"
                 class="badge required"
               >必去</span>
@@ -143,7 +147,7 @@ function evidenceKind(activity: Itinerary['days'][number]['activities'][number])
             <summary>参考：{{ activity.source_title }}</summary>
             <blockquote>{{ activity.evidence.quote }}</blockquote>
             <p class="subtle">{{ evidenceKind(activity) }}</p>
-            <button v-if="activity.source_kind !== 'flyai'" class="text-button" @click="emit('source',activity.source_id || '')">查看攻略依据</button>
+            <button v-if="activity.source_kind !== 'flyai' && activity.source_kind !== 'user'" class="text-button" @click="emit('source',activity.source_id || '')">查看攻略依据</button>
             <a v-if="safeLink(activity.source_url)" :href="safeLink(activity.source_url)" target="_blank" rel="noopener noreferrer">打开来源</a>
           </details>
           <details v-if="(activity.source_references?.length || 0) > 1" class="evidence">
@@ -182,19 +186,20 @@ function evidenceKind(activity: Itinerary['days'][number]['activities'][number])
     <p v-if="!day.activities.length" class="pending-note">这一天缺少有来源的活动。</p>
     <section v-if="day.meal_recommendations?.length" class="meal-recommendations">
       <h4>当天区域的餐饮推荐</h4>
-      <p class="subtle">按午晚餐附近活动筛选；全程同一门店默认只推荐一次，不同分店分别显示。</p>
-      <div v-for="meal in (['lunch','dinner'] as const)" :key="meal" class="meal-options">
+      <p class="subtle">按用餐时段附近活动筛选；标“自选”的是你指定想去的店，其余为推荐，全程同一门店默认只推荐一次。</p>
+      <div v-for="meal in (['breakfast','lunch','dinner'] as const)" :key="meal" class="meal-options">
         <template v-if="day.meal_recommendations.some(item => item.meal === meal)">
-          <h5>{{ meal === 'lunch' ? '午餐附近' : '晚餐附近' }}</h5>
+          <h5>{{ meal === 'breakfast' ? '早餐' : meal === 'lunch' ? '午餐附近' : '晚餐附近' }}</h5>
           <article v-for="item in day.meal_recommendations.filter(item => item.meal === meal)" :key="item.id">
-            <strong>{{ item.name }}</strong>
-            <p>靠近 {{ item.nearby_activity }}，直线约 {{ item.distance_meters < 1000 ? item.distance_meters+' 米' : (item.distance_meters/1000).toFixed(1)+' 公里' }}。</p>
-            <p v-if="item.map_place.address" class="subtle">{{ item.map_place.address }}</p>
+            <strong>{{ item.name }}<span v-if="item.wish || item.source_kind === 'user'" class="badge required">自选</span></strong>
+            <p v-if="item.nearby_activity != null && item.distance_meters != null">靠近 {{ item.nearby_activity }}，直线约 {{ item.distance_meters < 1000 ? item.distance_meters+' 米' : (item.distance_meters/1000).toFixed(1)+' 公里' }}。</p>
+            <p v-if="(item.wish || item.source_kind === 'user') && item.note" class="subtle">{{ item.note }}</p>
+            <p v-if="item.map_place?.address" class="subtle">{{ item.map_place.address }}</p>
             <p v-if="item.opening_claim" class="subtle">攻略营业信息：{{ item.opening_claim }}</p>
             <details v-if="item.evidence" class="evidence">
               <summary>参考：{{ item.source_title }}</summary>
               <blockquote>{{ item.evidence.quote }}</blockquote>
-              <button class="text-button" @click="emit('source',item.source_id || '')">查看攻略依据</button>
+              <button v-if="!item.wish && item.source_kind !== 'user'" class="text-button" @click="emit('source',item.source_id || '')">查看攻略依据</button>
             </details>
             <a v-if="safeMapLink(item.map_url)" :href="safeMapLink(item.map_url)" target="_blank" rel="noopener noreferrer">查看餐饮地点</a>
           </article>

@@ -17,6 +17,9 @@ class ReviewerAgent(AgentRuntime):
         instruction = (
             "独立重审整份旅行候选，先对照原始证据和需求，不沿用行程 Agent 的自评。"
             "完整检查places/dining/sources/constraints/timing/lodging/budget/facts/feasibility/scope十项。"
+            "source_kind=user且wish=true的餐饮地点是硬性用餐安排，须在早餐/午餐/晚餐中恰好出现一次，不要求把它列为游览景点。"
+            "用户指定咖啡甜品饮品属于必去visit，默认45分钟，用户填写时长优先；它们不属于正餐wish。正餐尽量顺路2公里内，只有同城所有可行日期均远才保留单独前往说明，指定日期不擅自移动。"
+            "餐饮wish无定位或距离远不代表可以删掉：保留地址待核实和单独前往说明；指定日期与城市不符则报告具体冲突。"
             "必去景点不等于时间锁定；普通旧计划的start不是预约证据。对appointment_time冲突核对用户明确要求，错误继承的预约字段反馈route自动更正，"
             "真实预约则反馈route联动调整当天前序活动、午餐和顺序；仅在必须改变真实用户硬约束时提出取舍，不让用户批准常规排程修复。"
             "重点全程扫描同实际地点不同攻略ID、跨日重复，以及同餐厅门店跨午晚餐和跨日重复；"

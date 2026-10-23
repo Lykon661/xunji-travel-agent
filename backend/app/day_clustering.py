@@ -4,7 +4,7 @@ from itertools import product
 from .conflicts import (DEFAULT_MOVE_MINUTES, FULL_DAY_MINUTES, LUNCH_MINUTES,
                         _full_day as is_full_day, _minimum as daily_minimum, visit_minutes)
 from .constraints import active, trip_dates
-from .dining import is_dining
+from .dining import is_dining, visit_required_ids, plan_meal_wishes
 from .models import Candidate, Requirements
 from .places import canonical_key, repeat_allowed, represented_ids
 from .routing import coordinates, daily_route_scope, distance, reference_opening
@@ -131,6 +131,7 @@ def build_spatial_plan(state: dict, stops: dict[str, dict]) -> dict:
     req, constraints = state["requirements"],state.get("stop_constraints") or {}
     dates,cities = trip_dates(req),req["cities"]
     required = set(constraints.get("required",[])) | set(req.get("required_stop_ids",[]))
+    required = visit_required_ids(required,{**state.get("stops",{}),**stops},req)
     excluded = set(constraints.get("excluded",[])) | set(req.get("excluded_stop_ids",[]))
     locks,old = set(state.get("locks",[])),state.get("old_itinerary") or {}
     required |= {i for i,s in state.get("stops",stops).items() if i in locks and not is_dining(s)}
@@ -337,6 +338,7 @@ def build_spatial_plan(state: dict, stops: dict[str, dict]) -> dict:
         budgets[day["date"]]["load"] = _load(day["stop_ids"],stops,req,day["date"],budgets[day["date"]])
     issues.extend(spatial_errors(plan,{"days":plan["days"]},stops,{**req,"excluded_stop_ids":sorted(excluded)}))
     plan["status"] = "partial" if issues else "ready"
+    plan["meal_wishes"] = plan_meal_wishes(plan["days"],{**state.get("stops",{}),**stops},req)
     issues.extend(f"{day['date']} {day['city']}："+day["adjustment"].removeprefix("空间分日：")
                   for day in plan["days"] if not day["stop_ids"] or "低于已接受不足的参考数量" in day["adjustment"])
     return plan

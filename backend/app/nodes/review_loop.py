@@ -32,7 +32,7 @@ class ReviewLoopNodes:
         if (state["requirements"] != doc["requirements"] or state.get("selected_source_ids",[]) != doc.get("selected_source_ids",[])
                 or state.get("run_id") and current["active_run"] != state["run_id"]):
             raise Conflict("当前需求、攻略选择或规划任务已变化，旧审查不能用于保存")
-        if hard := confirmation_blockers(itinerary,state.get("stop_constraints"),state["requirements"]):
+        if hard := confirmation_blockers(itinerary,state.get("stop_constraints"),state["requirements"],state.get("stops")):
             raise Conflict("路线仍有阻断："+"；".join(hard))
         queries = self.store.review_queries(state["trip_id"],list(evidence_ids(itinerary)))
         require_review(report,state,itinerary,self.selected_sources(state["trip_id"],state.get("selected_source_ids",[])),queries)
@@ -49,7 +49,7 @@ class ReviewLoopNodes:
             itinerary = candidate.get("draft")
             if not itinerary:
                 continue
-            blockers = confirmation_blockers(itinerary,doc.get("stop_constraints"),doc["requirements"])
+            blockers = confirmation_blockers(itinerary,doc.get("stop_constraints"),doc["requirements"],state.get("stops"))
             blockers.extend(review_blockers(candidate.get("review"),state,itinerary,
                 self.selected_sources(trip["id"],doc.get("selected_source_ids",[])),
                 self.store.review_queries(trip["id"],list(evidence_ids(itinerary)))))
@@ -79,7 +79,7 @@ class ReviewLoopNodes:
                 report = (await self.reviewer_agent.review(state,review_payload(state,itinerary,sources,queries))).model_dump(mode="json")
             except ToolError as exc:
                 report = {"status":"review_unavailable","summary":"独立检验未完成："+str(exc),"checks":[],"findings":[],"question":None}
-        hard = confirmation_blockers(itinerary,state.get("stop_constraints"),state["requirements"])
+        hard = confirmation_blockers(itinerary,state.get("stop_constraints"),state["requirements"],state.get("stops"))
         if hard:
             for message in hard:
                 if any(item["message"] == message for item in report["findings"]):
@@ -308,7 +308,7 @@ class ReviewLoopNodes:
         candidate.update(draft=copy.deepcopy(itinerary),draft_revision=revision,plan_hash=plan_fingerprint(itinerary),
                          input_hash=input_hash(state["requirements"],state["selected_source_ids"],state["stops"],self.selected_sources(state["trip_id"],state["selected_source_ids"])),
                          review=report,confirmation_blockers=list(dict.fromkeys([
-                             *confirmation_blockers(itinerary,state.get("stop_constraints"),state["requirements"]),
+                             *confirmation_blockers(itinerary,state.get("stop_constraints"),state["requirements"],state.get("stops")),
                              *review_blockers(report,self.audit_state(state),itinerary,self.selected_sources(state["trip_id"],state["selected_source_ids"]),
                                  self.store.review_queries(state["trip_id"],list(evidence_ids(itinerary))))])))
         candidate["feasibility"] = self.feasibility(itinerary)
@@ -332,7 +332,8 @@ class ReviewLoopNodes:
 
     @staticmethod
     def feasibility(itinerary):
-        return {"queried_at":now(),"budget":itinerary["budget"],"issues":itinerary["issues"],
+        return {**({"meal_wishes":itinerary["meal_wish_plan"]} if itinerary.get("meal_wish_plan") else {}),
+            "queried_at":now(),"budget":itinerary["budget"],"issues":itinerary["issues"],
             "information_unknown":itinerary.get("information_unknown",[]),
             "transport":[{"label":entry["label"],"selected":{key:value for key,value in (entry.get("selected") or {}).items() if key != "raw"},
                           "reason":entry.get("reason","")} for entry in itinerary.get("transport",[])],
@@ -359,7 +360,7 @@ class ReviewLoopNodes:
                 earliest = timestamp(state["requirements"].get("earliest_departure"),entry["context"]["date"])
                 if departure and earliest and before.get("minutes") is not None and departure-timedelta(minutes=entry.get("buffer_minutes",60)+before["minutes"]) < earliest:
                     entry["selected"]["constraint_issues"].append("计入接驳与进站后，需要早于允许时间出门")
-        checked = check_itinerary(itinerary,state["requirements"])
+        checked = check_itinerary(itinerary,state["requirements"],state.get("stops"))
         itinerary.update(checked)
         itinerary["issues"].extend(duplicate_issues(itinerary,state["requirements"]))
         for day in itinerary["days"]:

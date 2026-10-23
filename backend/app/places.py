@@ -205,6 +205,7 @@ def occurrences(itinerary):
                 result.append({"canonical_place_id":canonical_key(item,day.get("city","")),"id":item.get("id"),
                                "name":item.get("name"),"city":day.get("city"),"date":day.get("date"),
                                "role":role,"meal":item.get("meal"),"map_place":item.get("map_place"),
+                               "source_kind":item.get("source_kind"),"wish":item.get("wish",False),
                                "possible_duplicate_ids":item.get("possible_duplicate_ids",[]),
                                "source_id":item.get("source_id"),"source_references":item.get("source_references",[])})
     return result
@@ -229,6 +230,6 @@ def duplicate_issues(itinerary, requirements=None):
             issues.append({"code":"duplicate_place" if role == "visit" else "duplicate_dining",
                            "target":item["id"] or item["date"],"blocking":True,
                            "message":f"{item['name']}在{first['date']}与{item['date']}重复"+
-                                      ("安排" if role == "visit" else "推荐（含午晚餐）")})
+                                      ("安排" if role == "visit" else "推荐（含早午晚餐）")})
         seen.setdefault(key,item)
     return issues

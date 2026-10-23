@@ -153,7 +153,7 @@ class RouteAgent(AgentRuntime):
             "地点坐标与路段起终点只用高德map_place，飞猪仅查询票务；不比较两平台坐标，不因票务坐标差异更换或清空高德定位，也不据此要求用户确认场馆。"
             "需要工具时status=tools；有重要未决取舍时status=needs_decision并返回一道question；"
             "普通可选项目可自行取舍并解释，必去/锁定项不能删除。"
-            "餐厅、咖啡店、小吃和甜品店由系统按当天区域另列午餐或晚餐推荐，不是景点，不加入candidate.days.stop_ids或order.stop_ids。"
+            "普通攻略餐饮另列用餐推荐，不加入stop_ids；source_kind=user的咖啡、甜品、饮品是必去游览，默认45分钟，用户时长优先。meal_wishes是用户必去正餐餐厅，不加入stop_ids，让对应餐次前后景点靠近它，尽量在2公里内。"
             "门票不是每个地点的必备条件；保留攻略中的免费说明和多个票种，不因未提供票价反复追问。"
             "用户最新明确指令优先于默认规则与旧偏好。walking_limit_exempt_dates中的日期已获用户授权豁免步行上限，"
             "effective_max_walk_per_day为null时只提示真实距离，不能因旧上限删点、换住宿或重复追问。"

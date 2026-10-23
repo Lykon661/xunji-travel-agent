@@ -4,7 +4,7 @@ import re
 
 from . import ablation
 from .models import Candidate, Requirements
-from .dining import is_dining
+from .dining import is_dining, dining_wishes, dining_wish_issues
 from .places import canonicalize_stops, canonical_key, repeat_allowed, duplicate_issues
 from .routing import daily_route_scope, daily_movements, transport_access_transfers
 from .constraints import active, walking_target
@@ -179,7 +179,7 @@ def validate_candidate(candidate: Candidate, req: Requirements, stops: dict) -> 
                 raise ValueError("改变原攻略活动顺序时必须说明调整原因")
         if not day.stop_ids:
             candidate.gaps.append(f"{day.date} {day.city} 缺少可追溯的攻略活动")
-    if not seen:
+    if not seen and not dining_wishes(stops,req.model_dump(mode="json")):
         raise ValueError("候选路线没有采用任何可追溯的攻略活动")
     return candidate
 
@@ -250,7 +250,7 @@ def constraint_issues(itinerary: dict, req: dict):
     return issues,notes
 
 
-def check_itinerary(itinerary: dict, req: dict) -> dict:
+def check_itinerary(itinerary: dict, req: dict, stops: dict | None = None) -> dict:
     issues, lines, unknown, information_unknown, constraint_notes = [], [], [], [], []
     mobility = Requirements.model_validate(req).local_transport
     allowed_modes = {"walking","transit"} if mobility == "public" else {mobility}
@@ -416,6 +416,7 @@ def check_itinerary(itinerary: dict, req: dict) -> dict:
         issues.append({"code":"over_budget","message":f"已知费用加各项估算 {total_estimate} 元超过预算 {money(req['budget'])} 元","target":"budget","blocking":True})
     user_issues,user_notes = constraint_issues(itinerary,req)
     issues.extend(user_issues)
+    issues.extend(dining_wish_issues(itinerary,stops,req))
     constraint_notes.extend(user_notes)
     unknown = list(dict.fromkeys(unknown))
     if ablation.disabled("code_checks"):

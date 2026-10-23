@@ -8,6 +8,7 @@ from ..routing import coordinates
 from ..agents.runtime import digest
 from ..dining import is_dining
 from ..places import canonicalize_stops
+from ..stop_types import with_visit_defaults
 
 
 class LocationNodes:
@@ -123,7 +124,7 @@ class LocationNodes:
                         place = None
                     if not place:
                         failures.setdefault(identity,str(self.amap.cache.get(("place_issue",state["trip_id"],*key)) or "高德尚未返回唯一匹配的地点与可用坐标"))
-                    return {k:place.get(k) for k in ("id","name","location","address","cityname","adname","business_area","type","evidence_id","opentime2","open_time","match_basis")} if place and coordinates(place) else None
+                    return {k:place.get(k) for k in ("id","name","location","address","cityname","adname","business_area","type","typecode","evidence_id","opentime2","open_time","match_basis")} if place and coordinates(place) else None
                 except ToolError as exc:
                     fail(identity,exc)
                     return None
@@ -196,7 +197,7 @@ class LocationNodes:
             else:
                 stop["map_issue"] = failures.get(identity,"高德尚未返回唯一匹配的地点与可用坐标")
                 stop["query_status"] = "unresolved"
-        return canonicalize_stops(result)
+        return canonicalize_stops({identity:with_visit_defaults(stop) for identity,stop in result.items()})
 
     async def weather_context(self,state):
         result = {}

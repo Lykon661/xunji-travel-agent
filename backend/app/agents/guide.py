@@ -19,7 +19,7 @@ class GuideAgent(AgentRuntime):
         instruction = (
             "从所选攻略景点池整理建议区域分组，不把原攻略第几天固定为旅行日期。"
             "required_ids仅包含用户明确必去的地点，excluded_ids仅包含明确不去的地点，不能把推荐当成用户决定。"
-            "餐厅、咖啡店、小吃和甜品店仅作餐饮推荐，不加入景点分组或required_ids，不因分店未定位让用户反复回答。"
+            "普通攻略餐饮仅作推荐，不加入景点分组或required_ids；source_kind=user的咖啡甜品饮品属于必去游览，默认45分钟，须参与分组与required_ids；用户正餐餐厅另按必去用餐处理，不因分店未定位让用户反复回答。"
             "同名分店不直接合并，groups只能引用现有景点stop_ids，说明来源冲突与时长缺口。"
             "groups按城市内的建议区域整理资料，不是每天的游览安排，每组可以超过12个景点；实际每日取舍由行程 Agent 负责。"
             "每组stop_ids必须是available_stops完整ID组成的字符串数组，不能用名称、序号、对象或逗号分隔的字符串。"

@@ -10,7 +10,8 @@ from ..rules import merge_candidate_duplicates, validate_candidate
 from ..store import now
 from ..routing import coordinates
 from ..agents.route import resolve_stop_id
-from ..dining import is_dining
+from ..dining import is_dining, dining_wishes, visit_required_ids, plan_meal_wishes
+from ..stop_types import with_visit_defaults
 from ..places import canonical_key, canonicalize_stops, planning_stop_pool, represented_ids
 from ..conflicts import code_decision, trip_pool_question
 from ..day_clustering import ORDINARY_LOCATION_LIMIT, build_spatial_plan, cluster_deviation, spatial_errors
@@ -39,13 +40,13 @@ class CandidateNodes:
             return {"candidates":[],"stops":stops,"selected_route":{},"warnings":warnings}
         self.emit(state,"candidates","正在比较攻略路线，整理候选方案")
         sights = {identity:stop for identity,stop in stops.items() if not is_dining(stop)}
-        if not sights:
+        if not sights and not dining_wishes(stops,state["requirements"]):
             return {"candidates":[],"stops":stops,"selected_route":{},"warnings":list(dict.fromkeys([
                 *warnings,"所选攻略只有餐饮推荐，尚无可安排的游览景点；请补充包含景点的攻略"]))}
         priority = set(state.get("stop_constraints",{}).get("required",[])) & set(sights)
         excluded = set(state.get("stop_constraints",{}).get("excluded",[]))
         eligible = {identity:stop for identity,stop in sights.items() if not represented_ids([stop]) & excluded}
-        if not eligible:
+        if not eligible and not dining_wishes(stops,state["requirements"]):
             return {"candidates":[],"stops":stops,"selected_route":{},"warnings":list(dict.fromkeys([
                 *warnings,"所选攻略的游览景点已全部排除，请补充攻略或调整排除项"]))}
         priority &= set(eligible)
@@ -66,11 +67,13 @@ class CandidateNodes:
                        if identity in eligible]
             anchors = [identity for identity in dict.fromkeys([*city_anchors,*grouped,*eligible]) if identity and identity not in priority]
             pool = list(dict.fromkeys([*sorted(priority),*list(dict.fromkeys(anchors))[:24]]))
+        pool = list(dict.fromkeys([*pool,*(identity for identity,stop in stops.items() if stop.get("source_kind") == "user")]))
         located = await self.locate_stops(state,{identity:stops[identity] for identity in pool if not coordinates(stops[identity].get("map_place"))})
-        stops = canonicalize_stops({identity:located.get(identity,stop) for identity,stop in stops.items()})
+        stops = canonicalize_stops({identity:with_visit_defaults(located.get(identity,stop)) for identity,stop in stops.items()})
         if enabled:
             resolved_keys = {canonical_key(stops[i]) for i in eligible if coordinates(stops[i].get("map_place"))}
-            clarification_ids = {i for i in clarification_ids if canonical_key(stops[i]) not in resolved_keys}
+            clarification_ids = {i for i in clarification_ids if not is_dining(stops[i]) and canonical_key(stops[i]) not in resolved_keys}
+        clarification_ids = {i for i in clarification_ids if not is_dining(stops[i])}
         if clarification := self.place_clarification(stops,clarification_ids):
             return {"stops":stops,"selected_route":{},"decision_resume":"discover",**clarification}
         weather = await self.weather_context(state)
@@ -82,6 +85,10 @@ class CandidateNodes:
                                                    if not is_dining(stop) and not represented_ids([stop]) & excluded},
                                                   priority,state.get("locks",[]))
         plan = build_spatial_plan({**state,"stops":stops},available) if enabled else None
+        if not available and dining_wishes(stops,state["requirements"]):
+            plan = plan or build_spatial_plan({**state,"stops":stops},available)
+            candidate = Candidate(id=uuid4().hex,title=f"{len(dates)}天用餐行程",reason="按城市日期段安排指定餐饮地点，游览时段留白",days=plan["days"],feasibility={"meal_wishes":plan.get("meal_wishes",{})})
+            return {"candidates":[candidate.model_dump(mode="json")],"stops":stops,"weather":weather,"selected_route":{},"warnings":warnings}
         if enabled and not ablation.disabled("code_checks"):
             if plan["status"] == "conflict":
                 raise ToolError("route_constraints","空间分日固定日期或城市约束冲突："+"；".join(plan["issues"]))
@@ -93,7 +100,7 @@ class CandidateNodes:
             "每条路线的days必须与required_dates逐项完全一致，每个日期恰好一天，不得添加、缺少、重复或改变日期。"
             "trip_days是用户旅行天数，参考攻略原有天数不是旅行天数。例如用户3天、攻略5天时，必须删减或合并为3天，绝不能生成5天。"
             "路线标题和说明也必须与用户天数一致，城市按用户顺序连续停留。"
-            "活动只引用available_stops中的景点ID，一项不可重复。餐厅和咖啡店只作区域餐饮推荐，不加入stop_ids。用户确认的flyai来源体验只可放在assigned_date。结合map_place实际坐标把相近地点安排在同一天，减少跨区域往返折返；"
+            "活动只引用available_stops中的景点ID，一项不可重复。普通攻略餐饮不加入stop_ids；source_kind=user的咖啡甜品饮品是必去游览，默认45分钟。正餐wish不占游览时长，按meal_wishes选日，让当天午晚餐前后的景点靠近指定餐厅。用户确认的flyai来源体验只可放在assigned_date。结合map_place实际坐标把相近地点安排在同一天，减少跨区域往返折返；"
             "canonical_place_groups中多个ID是同一实际地点的攻略引用，代表项的source_references保留全部来源，不必逐个安排。"
             "除用户明确再访授权外，全程每个实际地点只安排一次；合并后某天缺少景点时可从现有攻略池补充，不得虚构地点。"
             "按用户节奏统筹每天上午和下午的游览量；完整游览日不能只分配一两个短活动，而把其他日期塞满。"
@@ -109,6 +116,8 @@ class CandidateNodes:
                    "canonical_place_groups":place_groups,
                    "interview":state.get("interview",{}),"weather":weather,
                    "guide_brief":state.get("guide_brief",{}),"constraints":state.get("stop_constraints",{}),"decision_history":state.get("decision_history",[])}
+        meal_plan = plan.get("meal_wishes",{}) if plan else {}
+        payload["meal_wishes"] = meal_plan
         if enabled:
             payload["spatial_plan"] = plan
             instruction += ("spatial_plan 是代码按候选游玩时长、固定日期、已解析闭馆信息和坐标形成的初始分日。"
@@ -127,7 +136,7 @@ class CandidateNodes:
             candidate = validate_candidate(normalized,req,stops)
             if not ablation.disabled("code_checks"):
                 used = represented_ids([stops[i] for day in candidate.days for i in day.stop_ids])
-                if set(state.get("stop_constraints",{}).get("required",[])) - used:
+                if visit_required_ids(state.get("stop_constraints",{}).get("required",[]),stops,state["requirements"]) - used:
                     raise ValueError("路线遗漏用户明确必去的景点，应提出取舍问题而不是删除")
                 if used & set(state.get("stop_constraints",{}).get("excluded",[])):
                     raise ValueError("路线包含用户明确排除的景点")
@@ -170,7 +179,8 @@ class CandidateNodes:
                                 initial_note = initial_note.split("。",1)[0]+"。"
                             day.adjustment = "；".join(dict.fromkeys(part for note in (initial_note,day.adjustment) for part in note.split("；") if part)).replace("；移日：","\n移日：")
                 candidate.id = uuid4().hex
-                candidate.feasibility = {}
+                meal_plan = meal_plan or plan_meal_wishes([day.model_dump(mode="json") for day in candidate.days],stops,state["requirements"])
+                candidate.feasibility = {"meal_wishes":meal_plan} if meal_plan else {}
                 candidates.append(candidate.model_dump(mode="json"))
                 break
             except ValueError as exc:
@@ -263,7 +273,7 @@ class CandidateNodes:
                     if adopted[day["date"]] != day["stop_ids"]:
                         day["stop_ids"] = adopted[day["date"]]
                         day["adjustment"] = (day.get("adjustment","")+"；根据实际交通与地图耗时调整活动").strip("；")
-            candidate["feasibility"] = {"queried_at":now(),"budget":itinerary["budget"],
+            candidate["feasibility"] = {**({"meal_wishes":itinerary["meal_wish_plan"]} if itinerary.get("meal_wish_plan") else {}),"queried_at":now(),"budget":itinerary["budget"],
                 "issues":itinerary["issues"],"information_unknown":itinerary.get("information_unknown",[]),
                 "transport":[{"label":entry["label"],"selected":{k:v for k,v in (entry.get("selected") or {}).items() if k != "raw"},"reason":entry["reason"]} for entry in itinerary["transport"]],
                  "hotels":[{"city":entry["city"],"selected_by_user":bool(entry.get("selected_by_user")),"name":(entry.get("selected") or {}).get("name"),"area":entry.get("search_areas",[]),"commute_minutes":(entry.get("selected") or {}).get("commute_minutes"),
@@ -353,7 +363,8 @@ class CandidateNodes:
                         raise ValueError("未选中的行程项不能删除或改变相对顺序")
                 revised["days"][index] = replacement
         revised["reason"] = patch.explanation
-        revised["feasibility"] = {}
+        meal_plan = plan_meal_wishes(revised["days"],stops,requirements)
+        revised["feasibility"] = {"meal_wishes":meal_plan} if meal_plan else {}
         # Empty-day gaps belong to the current route; regenerate them after a patch.
         revised["gaps"] = [gap for gap in revised.get("gaps",[]) if not any(gap.startswith(day+" ") for day in targets)]
         candidate = validate_candidate(Candidate.model_validate(revised),Requirements.model_validate(requirements),stops)

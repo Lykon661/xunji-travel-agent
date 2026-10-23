@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from .models import WISH_PREFIX
+
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -211,14 +213,16 @@ class Store:
                 allowed = {stop["id"] for source in db.execute("SELECT id,document FROM sources WHERE trip_id=?",(trip_id,))
                            if source["id"] in source_ids for stop in (json.loads(source["document"]).get("extraction") or {}).get("stops",[])}
                 for field in ("required_stop_ids","excluded_stop_ids"):
-                    doc["requirements"][field] = [identity for identity in doc["requirements"].get(field,[]) if identity in allowed]
+                    doc["requirements"][field] = [identity for identity in doc["requirements"].get(field,[])
+                                                  if identity in allowed or field == "required_stop_ids" and identity.startswith(WISH_PREFIX)]
                 doc["stop_constraints"] = {"required":doc["requirements"]["required_stop_ids"],"excluded":doc["requirements"]["excluded_stop_ids"]}
                 db.execute("DELETE FROM queries WHERE trip_id=?",(trip_id,))
             else:
                 doc["selected_route"] = {} if index == 3 else doc.get("selected_route",{})
             if index < 2:
-                doc.update(interview=None,decision_history=[],stop_constraints={"required":[],"excluded":[]})
-                doc["requirements"].update(required_stop_ids=[],excluded_stop_ids=[],walking_limit_exempt_dates=[])
+                required = [identity for identity in doc["requirements"].get("required_stop_ids",[]) if identity.startswith(WISH_PREFIX)]
+                doc.update(interview=None,decision_history=[],stop_constraints={"required":required,"excluded":[]})
+                doc["requirements"].update(required_stop_ids=required,excluded_stop_ids=[],walking_limit_exempt_dates=[])
             elif index == 2 and doc.get("interview"):
                 doc["interview"]["confirmed"] = False
             if index == 0:

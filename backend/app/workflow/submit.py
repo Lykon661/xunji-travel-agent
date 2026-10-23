@@ -82,7 +82,7 @@ class SubmitWorkflow:
                         self.amap.cache.pop(key,None)
             merged = {**doc["requirements"],**(requirements or {})}
             req = Requirements.model_validate(merged).model_dump(mode="json")
-            available_ids = set(self.source_stops(trip_id,source_ids))
+            available_ids = set(self.source_stops(trip_id,source_ids,req))
             if not set(req.get("required_stop_ids",[])+req.get("excluded_stop_ids",[])) <= available_ids:
                 raise Conflict("景点约束必须来自当前勾选的攻略，请先调整必去或排除项")
             config = {"configurable":{"thread_id":trip["active_thread"]},"recursion_limit":60}
@@ -125,7 +125,7 @@ class SubmitWorkflow:
             if refresh_resources:
                 if resume or retry or message or pending or not doc.get("itinerary") or not doc.get("selected_route") or selection_changed or req != doc["requirements"]:
                     raise Conflict("更新报价需要使用当前已保存的行程和原需求，请先保存修改或完成当前任务")
-                validate_candidate(Candidate.model_validate(doc["selected_route"]),Requirements.model_validate(req),self.source_stops(trip_id,source_ids))
+                validate_candidate(Candidate.model_validate(doc["selected_route"]),Requirements.model_validate(req),self.source_stops(trip_id,source_ids,req))
                 valid_ids = {entry["id"] for group in ("transport","hotels") for entry in doc["itinerary"].get(group,[])}
                 valid_ids.update("ticket:"+activity["id"] for day in doc["itinerary"].get("days",[]) for activity in day["activities"] if activity["kind"] == "visit")
                 if resource_ids and (not set(resource_ids) <= valid_ids or {identity.removeprefix("ticket:") for identity in resource_ids} & set(doc.get("locks",[]))):
@@ -191,11 +191,11 @@ class SubmitWorkflow:
                     raise Conflict("这份路线的关键依据尚未齐全，请继续查询或局部修改")
                 if candidate_revision != candidate.draft_revision or candidate_hash != candidate.plan_hash:
                     raise Conflict("完整路线草稿已变化，请刷新后再确认")
-                if candidate.input_hash != input_hash(req,source_ids,self.source_stops(trip_id,source_ids),self.selected_sources(trip_id,source_ids)):
+                if candidate.input_hash != input_hash(req,source_ids,self.source_stops(trip_id,source_ids,req),self.selected_sources(trip_id,source_ids)):
                     raise Conflict("需求或攻略内容已变化，请重新规划")
                 self.assert_review({**doc,"trip_id":trip_id,"requirements":req},candidate.review,candidate.draft)
                 try:
-                    validate_candidate(candidate, Requirements.model_validate(req), self.source_stops(trip_id, source_ids))
+                    validate_candidate(candidate, Requirements.model_validate(req), self.source_stops(trip_id, source_ids, req))
                 except ValueError as exc:
                     raise Conflict("候选路线与当前日期或所选攻略不一致，请重新生成：" + str(exc)) from exc
                 thread, invocation = trip["active_thread"], Command(resume={"candidate_id":candidate_id,"draft_revision":candidate_revision,"plan_hash":candidate_hash})
@@ -218,7 +218,7 @@ class SubmitWorkflow:
                 invocation = {"trip_id":trip_id,"generation":thread,"base_version":base,"requirements":req,"message":message,
                     "mode":"modify" if old and not retry else "new", "warnings":[], "candidates":[],
                     "selected_route":doc.get("selected_route") or {}, "selected_source_ids":source_ids,"old_itinerary":old,"itinerary":copy.deepcopy(old),
-                    "stops":self.source_stops(trip_id, source_ids),"change":{},"source_selection_changed":selection_changed,"repair_round":0,"locks":doc.get("locks",[]),
+                    "stops":self.source_stops(trip_id, source_ids, req),"change":{},"source_selection_changed":selection_changed,"repair_round":0,"locks":doc.get("locks",[]),
                     "interview":{},"route_edit":{},
                     "stop_constraints":{"required":req.get("required_stop_ids",[]),"excluded":req.get("excluded_stop_ids",[])},
                     "decision_history":doc.get("decision_history",[]) if not selection_changed else [],

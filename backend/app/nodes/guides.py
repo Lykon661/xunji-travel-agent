@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from ..adapters import ToolError, image_data, remote_image
 from ..config import settings
-from ..models import Candidate, ChangeRequest, InterviewRound, Requirements, RequirementUpdate
+from ..models import WISH_PREFIX, Candidate, ChangeRequest, InterviewRound, Requirements, RequirementUpdate, wish_stop_id, wish_stops
 from ..rules import validate_candidate
 from ..store import Conflict, dump
 from ..routing import coordinates
@@ -13,7 +13,7 @@ from ..agents.runtime import digest
 from ..decisions import apply_walking_decision, walking_question
 from ..conflicts import trip_pool_question
 from ..constraints import CONSTRAINT_GUIDE, check, merge, preferences_basis, refresh_form_constraints, stop_catalog, trip_dates
-from ..dining import is_dining
+from ..dining import is_dining, dining_wishes
 from ..workflow.state import TripState
 
 
@@ -30,6 +30,7 @@ class GuideNodes:
         required = {identity for identity in required if identity not in state["stops"] or not is_dining(state["stops"][identity])}
         excluded = set(prior.get("excluded",[])) | (set(result.excluded_ids)-required) | set(state["requirements"].get("excluded_stop_ids",[]))
         excluded -= required
+        excluded -= dining_wishes(state["stops"],state["requirements"]).keys()
         if not (required | excluded) <= set(state["stops"]):
             raise Conflict("必去或排除标记的攻略依据已变化，请在旅行需求中移除失效标记并重新规划")
         req = {**state["requirements"],"required_stop_ids":sorted(required),"excluded_stop_ids":sorted(excluded)}
@@ -132,10 +133,13 @@ class GuideNodes:
             raise Conflict("所选参考攻略不属于当前旅行或已经不存在，请重新选择")
         return [available[identity] for identity in source_ids]
 
-    def source_stops(self, trip_id: str, source_ids: list[str]) -> dict:
+    def source_stops(self, trip_id: str, source_ids: list[str], requirements: dict | None = None) -> dict:
+        """Guide stops, adopted products and the user's wish places; requirements default to the saved ones."""
         stops = {stop["id"]:{**stop,"source_id":source["id"],"source_title":source["title"],"source_url":source.get("url")}
                  for source in self.selected_sources(trip_id, source_ids) for stop in (source.get("extraction") or {}).get("stops",[])}
-        stops.update({stop["id"]:stop for stop in self.store.trip(trip_id)["document"].get("supplements",[])})
+        doc = self.store.trip(trip_id)["document"]
+        stops.update({stop["id"]:stop for stop in doc.get("supplements",[])})
+        stops.update(wish_stops(doc.get("requirements") or {} if requirements is None else requirements))
         return stops
 
     @staticmethod
@@ -168,7 +172,7 @@ class GuideNodes:
                 req,_ = apply_walking_decision(req,question," ".join(last.get("answers",{}).values())+" "+last.get("note",""))
         # Stops are only needed to resolve constraint targets: a new message or edited preferences text.
         reextract = preferences_basis(req.get("preferences","")) != req.get("constraints_basis","")
-        available = self.source_stops(state["trip_id"], state.get("selected_source_ids", [])) if reextract or state.get("message") and not change else {}
+        available = self.source_stops(state["trip_id"], state.get("selected_source_ids", []), req) if reextract or state.get("message") and not change else {}
         drafts = []
         if state.get("message") and not change:
             if state["mode"] == "modify":
@@ -222,7 +226,8 @@ class GuideNodes:
             if not removed <= set(state.get("stops",{})):
                 raise Conflict("要删除的景点不在当前所选攻略中")
             req["required_stop_ids"] = [identity for identity in req.get("required_stop_ids",[]) if identity not in removed]
-            req["excluded_stop_ids"] = sorted(set(req.get("excluded_stop_ids",[])) | removed)
+            req["wish_places"] = [place for place in req.get("wish_places",[]) if wish_stop_id(place["city"],place["name"]) not in removed]
+            req["excluded_stop_ids"] = sorted(set(req.get("excluded_stop_ids",[])) | {identity for identity in removed if not identity.startswith(WISH_PREFIX)})
         if state["mode"] == "modify" and not change.get("scopes"):
             before = Requirements.model_validate(state.get("old_requirements") or req).model_dump(mode="json")
             changed = any(before.get(k) != req.get(k) for k in ("cities","origin","start_date","end_date","people","rooms","return_to_origin","self_arranged_round_trip","children","earliest_departure","latest_arrival","latest_return","direct_only","max_transport_hours"))
@@ -233,6 +238,10 @@ class GuideNodes:
             change = {**change,"scopes":scopes,"cities":[],"dates":[]}
         if state["mode"] == "modify" and state.get("source_selection_changed"):
             change = {**change,"scopes":["full"]}
+        if (state["mode"] == "modify"
+                and req.get("wish_places",[]) != state.get("old_requirements",state["requirements"]).get("wish_places",[])):
+            # Changed wishes need a fresh distribution; removed IDs must leave the old route too.
+            change = {**change,"scopes":["full"]}
         dates = Requirements.model_validate(req)
         for old_day in state.get("old_itinerary", {}).get("days", []):
             for activity in old_day.get("activities", []):
@@ -240,15 +249,20 @@ class GuideNodes:
                     continue
                 if dates.start_date and dates.end_date and not (dates.start_date.isoformat() <= old_day["date"] <= dates.end_date.isoformat()):
                     raise ValueError("新旅行日期与已锁定活动冲突，请先解锁超出日期范围的活动；不会扩展旅行天数")
-                if activity.get("kind") == "visit" and activity.get("source_kind") != "flyai" and state.get("selected_source_ids") and activity.get("source_id", activity["id"].split(":")[0]) not in state["selected_source_ids"]:
+                if activity.get("kind") == "visit" and activity.get("source_kind") not in {"flyai","user"} and state.get("selected_source_ids") and activity.get("source_id", activity["id"].split(":")[0]) not in state["selected_source_ids"]:
                     raise ValueError("已锁定活动来自未选择的攻略，请先解锁该活动或重新选择对应参考攻略")
-        return {"requirements":req,"change":change,"message":"","decision_history":history,"stop_constraints":{"required":req.get("required_stop_ids",[]),"excluded":req.get("excluded_stop_ids",[])}}
+        # A message may add or drop wish places; the stop pool follows the updated requirements.
+        stops = {identity:stop for identity,stop in state.get("stops",{}).items() if not identity.startswith(WISH_PREFIX)}
+        for identity,stop in wish_stops(req).items():
+            previous = state.get("stops",{}).get(identity,{})
+            stops[identity] = {**{key:value for key,value in previous.items() if key not in {"assigned_date","duration_minutes","duration_is_default"}},**stop}
+        return {"requirements":req,"stops":stops,"change":change,"message":"","decision_history":history,"stop_constraints":{"required":req.get("required_stop_ids",[]),"excluded":req.get("excluded_stop_ids",[])}}
 
     def after_coordinate(self,state):
         if Requirements.model_validate(state["requirements"]).missing():
             return "requirements"
         if state["mode"] == "modify" and "full" not in state.get("change",{}).get("scopes",[]) and state.get("selected_route") and state.get("selected_source_ids"):
-            validate_candidate(Candidate.model_validate(state["selected_route"]), Requirements.model_validate(state["requirements"]), self.source_stops(state["trip_id"], state["selected_source_ids"]))
+            validate_candidate(Candidate.model_validate(state["selected_route"]), Requirements.model_validate(state["requirements"]), self.source_stops(state["trip_id"], state["selected_source_ids"], state["requirements"]))
             return "resources"
         return "guides"
 
@@ -335,9 +349,9 @@ class GuideNodes:
             except ToolError as exc:
                 source["error"] = str(exc); warnings.append(source["title"]+"："+str(exc))
             self.store.add_source(state["trip_id"],source)
-        stops = self.source_stops(state["trip_id"], state["selected_source_ids"])
+        stops = self.source_stops(state["trip_id"], state["selected_source_ids"], state["requirements"])
         allowed_source_ids = set(chosen)
-        stops = {k:v for k,v in stops.items() if (v["source_id"] in allowed_source_ids or v.get("source_kind") == "flyai") and v["city"] in req.cities
+        stops = {k:v for k,v in stops.items() if (v["source_id"] in allowed_source_ids or v.get("source_kind") in {"flyai","user"}) and v["city"] in req.cities
                  and (not v.get("assigned_date") or req.start_date.isoformat() <= v["assigned_date"] <= req.end_date.isoformat())}
         stops = {identity:{**stop,"category":"dining" if is_dining(stop) else "sight"} for identity,stop in stops.items()}
         dining_ids = {identity for identity,stop in stops.items() if is_dining(stop)}

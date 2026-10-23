@@ -55,13 +55,48 @@ let reconciliation: Promise<void> | null = null
 let inputBaseline = ''
 const automaticRepairs = new Set<string>()
 const extraRequirements = {origin_address:'',children:0,children_ages:[] as number[],earliest_departure:null,latest_arrival:null,latest_return:null,
-  max_transport_hours:null,direct_only:true,flight_cabin:'',train_seat:'',hotel_type:'',hotel_stars:'',hotel_areas:{} as Record<string,string>,max_walk_per_day:8000,walking_limit_exempt_dates:[] as string[],allow_taxi:false,required_stop_ids:[] as string[],excluded_stop_ids:[] as string[]}
+  max_transport_hours:null,direct_only:true,flight_cabin:'',train_seat:'',hotel_type:'',hotel_stars:'',hotel_areas:{} as Record<string,string>,max_walk_per_day:8000,walking_limit_exempt_dates:[] as string[],allow_taxi:false,wish_places:[] as NonNullable<Requirements['wish_places']>,required_stop_ids:[] as string[],excluded_stop_ids:[] as string[]}
 const requirements = reactive<Requirements>({origin:null,cities:[],start_date:null,end_date:null,people:null,rooms:null,budget:null,preferences:'',transport:'any',local_transport:'public',bed_type:'双床房',return_to_origin:true,self_arranged_round_trip:false,...extraRequirements})
 const childAgeText = ref('')
 const hotelAreas = reactive<Record<string,string>>({})
-const destinationCities = computed(() => cityText.value.split(/[、,，\n]/).map(value => value.trim()).filter(Boolean))
-const taxiResult = ref<MapResult | null>(null)
 const cityText = ref('')
+
+const destinationCities = computed(() => cityText.value.split(/[、,，\n]/).map(value => value.trim()).filter(Boolean))
+const wishCity = ref(''), wishName = ref(''), wishDate = ref(''), wishDuration = ref<number | null>(null), wishError = ref('')
+const requiredGuideStopIds = computed(() => (requirements.required_stop_ids || []).filter(id => !id.startsWith('wish:')))
+watch(destinationCities, cities => {
+  if (!cities.includes(wishCity.value)) wishCity.value = cities[0] || ''
+})
+function isWishDateValid(date: string | null) {
+  return !!date && (!requirements.start_date || date >= requirements.start_date) && (!requirements.end_date || date <= requirements.end_date)
+}
+watch(() => [requirements.start_date, requirements.end_date], () => {
+  if (wishDate.value && !isWishDateValid(wishDate.value)) wishDate.value = ''
+})
+function addWishPlace() {
+  wishError.value = ''
+  const city = wishCity.value.trim(), name = wishName.value.trim(), cleanName = name.replace(/\s+/g, '')
+  if (!destinationCities.value.includes(city)) { wishError.value = '请先填写并选择当前目的地城市'; return }
+  if (!cleanName) { wishError.value = '请输入想去的地点名称'; return }
+  const list = requirements.wish_places || []
+  if (list.length >= 20) { wishError.value = '最多添加 20 个想去的地点'; return }
+  if (list.some(item => item.city === city && item.name.replace(/\s+/g, '') === cleanName)) { wishError.value = '同一城市不能重复添加相同名称的地点'; return }
+  const date = wishDate.value || null
+  if (date && !isWishDateValid(date)) {
+    wishError.value = '指定日期必须在出发与结束日期之间'; return
+  }
+  const rawDuration = wishDuration.value
+  const duration = rawDuration === null || rawDuration === undefined || String(rawDuration) === '' || Number.isNaN(Number(rawDuration)) ? null : Math.round(Number(rawDuration))
+  if (duration !== null && (duration < 10 || duration > 720)) { wishError.value = '游玩时长需在 10 到 720 分钟之间'; return }
+  requirements.wish_places = [...list, {city, name, date, duration_minutes: duration}]
+  wishName.value = ''; wishDate.value = ''; wishDuration.value = null
+}
+function removeWishPlace(index: number) {
+  wishError.value = ''
+  requirements.wish_places = (requirements.wish_places || []).filter((_, i) => i !== index)
+}
+const taxiResult = ref<MapResult | null>(null)
+
 const doc = computed(() => selectedVersion.value ? versionDocuments.value[selectedVersion.value] : current.value?.document)
 const isRunning = computed(() => current.value?.run?.status === 'running' || busy.value)
 const isHistory = computed(() => selectedVersion.value > 0)
@@ -135,7 +170,12 @@ const candidateInputsChanged = computed(() => {
   const saved = current.value.document
   const form = formData()
   const normalized = {...extraRequirements,...saved.requirements,local_transport:saved.requirements.local_transport || 'public',
-    hotel_areas:Object.fromEntries(Object.entries(saved.requirements.hotel_areas || {}).sort(([left],[right]) => left.localeCompare(right)))}
+    hotel_areas:Object.fromEntries(Object.entries(saved.requirements.hotel_areas || {}).sort(([left],[right]) => left.localeCompare(right))),
+    wish_places:(saved.requirements.wish_places || []).filter(item => (saved.requirements.cities || []).includes(item.city) && item.name?.trim()).map(item => ({
+      city:item.city,name:item.name.trim(),
+      date:item.date && (!saved.requirements.start_date || item.date >= saved.requirements.start_date) && (!saved.requirements.end_date || item.date <= saved.requirements.end_date) ? item.date : null,
+      duration_minutes:item.duration_minutes ?? null,
+    }))}
   return JSON.stringify([...selectedGuideIds.value].sort()) !== JSON.stringify([...(saved.selected_source_ids || [])].sort()) ||
     (Object.keys(form) as (keyof Requirements)[]).some(key => JSON.stringify(form[key]) !== JSON.stringify(normalized[key]))
 })
@@ -205,6 +245,7 @@ async function reopenRoute() {
   await backToStep('routes')
 }
 function toggleRequired(id: string) {
+  if (id.startsWith('wish:')) return
   const ids = requirements.required_stop_ids || []
   requirements.required_stop_ids = ids.includes(id) ? ids.filter(value => value !== id) : [...ids,id]
   requirements.excluded_stop_ids = (requirements.excluded_stop_ids || []).filter(value => value !== id)
@@ -262,9 +303,12 @@ function productChanged() {void refreshCurrent().catch(cause => {error.value = S
 function amapConfigSaved() {amapConfigRevision.value++;void refreshCapabilities()}
 async function loadList() {trips.value = await api<TripSummary[]>('/trips')}
 function loadForm(value: Requirements) {
-  Object.assign(requirements,{...extraRequirements,...value,local_transport:value.local_transport ?? 'public'})
+  Object.assign(requirements,{...extraRequirements,...value,local_transport:value.local_transport ?? 'public',
+    wish_places:(value.wish_places || []).map(item => ({city:item.city,name:item.name,date:item.date || null,duration_minutes:item.duration_minutes ?? null}))})
   childAgeText.value = (value.children_ages || []).join('、')
   cityText.value = value.cities.join('、')
+  wishCity.value = value.cities[0] || ''
+  wishName.value = ''; wishDate.value = ''; wishDuration.value = null; wishError.value = ''
   Object.keys(hotelAreas).forEach(city => delete hotelAreas[city])
   Object.assign(hotelAreas,value.hotel_areas || {})
 }
@@ -275,7 +319,12 @@ function formData(): Requirements {
     children:Number(requirements.children || 0),children_ages:requirements.children ? childAgeText.value.split(/[、,，\s]/).filter(Boolean).map(Number) : [],
     earliest_departure:requirements.earliest_departure || null,latest_arrival:requirements.latest_arrival || null,latest_return:requirements.latest_return || null,
     max_transport_hours:requirements.max_transport_hours || null,max_walk_per_day:requirements.max_walk_per_day ?? 8000,
-    hotel_areas:Object.fromEntries(destinationCities.value.filter(city => hotelAreas[city]?.trim()).sort((left,right) => left.localeCompare(right)).map(city => [city,hotelAreas[city].trim()]))}
+    hotel_areas:Object.fromEntries(destinationCities.value.filter(city => hotelAreas[city]?.trim()).sort((left,right) => left.localeCompare(right)).map(city => [city,hotelAreas[city].trim()])),
+    wish_places:(requirements.wish_places || []).filter(item => destinationCities.value.includes(item.city) && item.name.trim()).slice(0,20).map(item => ({
+      city:item.city,name:item.name.trim(),
+      date:item.date && (!requirements.start_date || item.date >= requirements.start_date) && (!requirements.end_date || item.date <= requirements.end_date) ? item.date : null,
+      duration_minutes:item.duration_minutes ?? null,
+    }))}
 }
 function inputSignature() {
   return JSON.stringify([formData(),[...selectedGuideIds.value].sort()])
@@ -845,9 +894,39 @@ onUnmounted(() => {events?.close();window.clearInterval(runPoll);window.removeEv
                     <small v-else-if="constraintsEdited" class="subtle">条件的改动在保存需求后生效。</small>
                   </div>
 
-                  <div v-if="requirements.required_stop_ids?.length" class="wide-label stop-marks">
+                  <details class="travel-limits" open>
+                    <summary>想去的地点<span>可选，最多 20 项</span></summary>
+                    <p class="subtle">不在攻略里也可以填写，规划时一定会安排；餐厅、小吃等会安排进合适的一餐；高德匹配到多个同名地点时会请你选择。</p>
+                    <div class="form-grid">
+                      <label>所属城市
+                        <select v-model="wishCity" :disabled="!destinationCities.length">
+                          <option v-if="!destinationCities.length" value="">请先填写目的地城市</option>
+                          <option v-for="city in destinationCities" :key="city" :value="city">{{ city }}</option>
+                        </select>
+                      </label>
+                      <label>地点名称<input v-model="wishName" maxlength="100" placeholder="例如：灵隐寺" @keydown.enter.prevent="addWishPlace"></label>
+                      <label>指定日期（可选）<input v-model="wishDate" type="date" :min="requirements.start_date || undefined" :max="requirements.end_date || undefined"></label>
+                      <label>游玩时长（分钟，可选）<input v-model.number="wishDuration" type="number" min="10" max="720" placeholder="10–720" @keydown.enter.prevent="addWishPlace"></label>
+                    </div>
+                    <p v-if="wishError" class="pending-note" role="alert">{{ wishError }}</p>
+                    <div class="check-row">
+                      <button class="secondary small" type="button" :disabled="!destinationCities.length || (requirements.wish_places?.length || 0) >= 20" @click="addWishPlace">添加</button>
+                    </div>
+                    <div v-if="requirements.wish_places?.length" class="wide-label stop-marks">
+                      <p v-for="(item, index) in requirements.wish_places" :key="item.city + ':' + item.name">
+                        <strong>{{ item.city }}</strong> · {{ item.name }}
+                        <small v-if="item.date" class="subtle"> · {{ item.date }}</small>
+                        <small v-if="item.duration_minutes" class="subtle"> · {{ item.duration_minutes }} 分钟</small>
+                        <small v-if="!destinationCities.includes(item.city)" class="subtle"> · 不在当前目的地，不会保存</small>
+                        <small v-else-if="item.date && !isWishDateValid(item.date)" class="subtle"> · 日期超出旅行范围，将不指定日期</small>
+                        <button class="text-button" type="button" @click="removeWishPlace(index)">删除</button>
+                      </p>
+                    </div>
+                  </details>
+
+                  <div v-if="requiredGuideStopIds.length" class="wide-label stop-marks">
                     <strong>必去景点标记</strong>
-                    <p v-for="id in requirements.required_stop_ids" :key="id">
+                    <p v-for="id in requiredGuideStopIds" :key="id">
                       {{ sourceStops.get(id)?.name || '攻略依据已变化的景点' }}
                       <button class="text-button" type="button" @click="toggleRequired(id)">移除必去标记</button>
                     </p>

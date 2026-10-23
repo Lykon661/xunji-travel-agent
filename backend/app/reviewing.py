@@ -11,7 +11,7 @@ from .routing import coordinates, daily_route_scope, reference_opening
 from .constraints import active
 
 
-POLICY_VERSION = 14
+POLICY_VERSION = 16
 
 
 def evidence_ids(value):

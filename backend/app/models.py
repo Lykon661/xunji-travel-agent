@@ -6,6 +6,7 @@ from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, Field, SecretStr, model_validator
 from pydantic_core import PydanticCustomError
+from .stop_types import with_visit_defaults
 
 
 class AmapKeyInput(BaseModel):
@@ -31,7 +32,7 @@ class RepeatPermission(BaseModel):
     place_id: str = Field(min_length=1, max_length=200)
     role: Literal["visit", "dining"]
     dates: list[Date] = Field(min_length=1, max_length=30)
-    meals: list[Literal["lunch", "dinner"]] = Field(default_factory=list, max_length=2)
+    meals: list[Literal["breakfast", "lunch", "dinner"]] = Field(default_factory=list, max_length=3)
     authorization: str = Field(min_length=1, max_length=2000)
 
 
@@ -109,6 +110,38 @@ class Constraint(ConstraintDraft):
         return self
 
 
+class WishPlace(BaseModel):
+    """A place the user wants to visit before any guide is read; always planned as a required stop."""
+    city: str = Field(min_length=1, max_length=80)
+    name: str = Field(min_length=1, max_length=150)
+    date: Date | None = None
+    duration_minutes: int | None = Field(default=None, ge=10, le=720)
+
+
+WISH_PREFIX = "wish:"
+
+
+def wish_stop_id(city: str, name: str) -> str:
+    """Identity from city and name only, so editing the date or duration keeps the same stop."""
+    key = json.dumps([city.strip(), re.sub(r"\s+", "", name)], ensure_ascii=False)
+    return WISH_PREFIX+hashlib.sha256(key.encode()).hexdigest()[:12]
+
+
+def wish_stops(requirements: dict) -> dict[str, dict]:
+    stops = {}
+    for item in requirements.get("wish_places") or []:
+        identity = wish_stop_id(item["city"], item["name"])
+        stop = {"id":identity,"city":item["city"],"name":item["name"].strip(),"day":1,"category":"sight",
+                "source_id":identity,"source_kind":"user","source_title":"你指定想去的地点","source_url":None,
+                "evidence":{"kind":"text","quote":"你在旅行需求中指定想去："+item["name"].strip()}}
+        if item.get("duration_minutes"):
+            stop["duration_minutes"] = item["duration_minutes"]
+        if item.get("date"):
+            stop["assigned_date"] = str(item["date"])
+        stops[identity] = with_visit_defaults(stop)
+    return stops
+
+
 class Requirements(BaseModel):
     origin: str | None = None
     cities: list[str] = Field(default_factory=list, max_length=8)
@@ -142,6 +175,8 @@ class Requirements(BaseModel):
     allow_taxi: bool = False
     required_stop_ids: list[str] = Field(default_factory=list, max_length=80)
     excluded_stop_ids: list[str] = Field(default_factory=list, max_length=80)
+    # Places the user named before planning; each one is kept in required_stop_ids under its wish: ID.
+    wish_places: list[WishPlace] = Field(default_factory=list, max_length=20)
     repeat_exceptions: list[RepeatPermission] = Field(default_factory=list, max_length=20)
     constraints: list[Constraint] = Field(default_factory=list, max_length=60)
     # Digest of the preferences text the form-sourced constraints were extracted from.
@@ -149,6 +184,16 @@ class Requirements(BaseModel):
 
     @model_validator(mode="after")
     def dates_valid(self):
+        self.wish_places = [place.model_copy(update={"city":place.city.strip(),"name":place.name.strip()}) for place in self.wish_places]
+        if any(not place.name for place in self.wish_places):
+            raise ValueError("想去的地点名称不能为空")
+        if any(place.city not in self.cities for place in self.wish_places):
+            raise ValueError("想去的地点须属于目的地城市")
+        wish_ids = [wish_stop_id(place.city, place.name) for place in self.wish_places]
+        if len(set(wish_ids)) != len(wish_ids):
+            raise ValueError("想去的地点不能重复填写")
+        self.required_stop_ids = list(dict.fromkeys(
+            [identity for identity in self.required_stop_ids if not identity.startswith(WISH_PREFIX)]+wish_ids))
         if set(self.required_stop_ids) & set(self.excluded_stop_ids):
             raise ValueError("必去景点不能同时设为排除")
         if any(city not in self.cities or len(area.strip()) > 150 for city,area in self.hotel_areas.items()):
@@ -166,6 +211,8 @@ class Requirements(BaseModel):
                 raise ValueError("旅行天数不能少于目的地城市数")
             if any(day < self.start_date or day > self.end_date for permission in self.repeat_exceptions for day in permission.dates):
                 raise ValueError("重复安排的授权日期必须在旅行日期内")
+            if any(place.date and not self.start_date <= place.date <= self.end_date for place in self.wish_places):
+                raise ValueError("想去地点的指定日期必须在旅行日期内")
         if len(set(self.cities)) != len(self.cities):
             raise ValueError("第一版城市列表不能重复")
         return self

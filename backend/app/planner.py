@@ -17,7 +17,7 @@ from weakref import WeakValueDictionary
 from .adapters import Amap, Crawler, FlyAI, Models, ToolError
 from pydantic import ValidationError
 
-from .models import Candidate, Requirements, RequirementUpdate, DECISION_REQUIREMENT_FIELDS, DecisionResolution
+from .models import WISH_PREFIX, Candidate, Requirements, RequirementUpdate, DECISION_REQUIREMENT_FIELDS, DecisionResolution, wish_stop_id
 from .rules import validate_candidate
 from .store import Conflict, now, dump
 from .routing import coordinates
@@ -25,6 +25,7 @@ from .agents import GuideAgent, ResourceAgent, RouteAgent, ReviewerAgent
 from .agents.route import resolve_stop_id
 from .agents.runtime import digest
 from .decisions import apply_walking_decision, confirmation_blockers, walking_question
+from .decision_intent import has_delete_intent, unauthorized_stop_changes
 from .constraints import CONSTRAINT_GUIDE, UNQUOTED, check, merge, stop_catalog, trip_dates
 from .conflicts import accepted_shortage, apply_option
 from .dining import is_dining
@@ -235,6 +236,7 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
         instruction = (
             "将用户当前问题的明确回答转成约束更新。requirements只填用户在这次回答中明确授权改变的字段；"
             "推荐选项不是回答。required_ids与excluded_ids仅包含现有景点ID，代表这次明确设为必去或排除的景点。"
+            "用户选择保留时excluded_ids必须为[]；明确移除的地点不能写入required_ids。"
             "最新明确指令优先于默认规则与历史偏好，合并preferences时删除被本次指令推翻的旧限制；推翻此前constraints时用revoke=true或填写新条件，由系统覆盖旧条件。"
             "在步行超限取舍问题中，用户说保持规划、不要删点或接受超限，就是授权对受影响日期豁免步行上限："
             "walking_limit_action=relax，keep_current_plan=true，不要求用户再给一个数字，不重复要求削减。"
@@ -247,12 +249,13 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
             "用户允许依据真实公共交通结果自动取舍时，写成constraints中的transit_rule=auto_by_transit，scope限定到回答提及的日期与地点，不新增判断策略等自定义字段；"
             "尚未查询成立的条件不能提前变成无条件必去或排除，此时required_ids与excluded_ids返回[]。"
             "不要返回字段定义、JSON Schema、问题对象或properties包装，不要把完整原需求复制到requirements。"+CONSTRAINT_GUIDE)
-        available = {identity:stop for identity,stop in state["stops"].items() if not is_dining(stop)}
+        available = {identity:stop for identity,stop in state["stops"].items() if not is_dining(stop) or stop.get("source_kind") == "user"}
         payload = {"requirements":state["requirements"],"question":question,"answer":values,"note":answer.get("note",""),
                    "available_stops":available,"constraints":state.get("stop_constraints",{}),
                    "allowed_requirement_fields":sorted(DECISION_REQUIREMENT_FIELDS),"allowed_stop_ids":sorted(available)}
         answer_text = " ".join(values.values())+" "+answer.get("note","")
         dropped_repeats = dropped_quotes = False
+        dropped_intents = {"required_ids":[],"excluded_ids":[]}
         for attempt in range(2):
             resolution = await self.models.ask(DecisionResolution,instruction,payload)
             resolution.required_ids = [resolve_stop_id(identity,available) or identity for identity in resolution.required_ids]
@@ -265,6 +268,8 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
                 unknown = sorted(set(getattr(resolution,field))-set(available))
                 if unknown:
                     issues.append({"field":field,"unknown_ids":unknown})
+            intent_issues = unauthorized_stop_changes(answer_text,resolution.required_ids,resolution.excluded_ids,available)
+            issues.extend(intent_issues)
             overlap = sorted(set(resolution.required_ids) & set(resolution.excluded_ids))
             if overlap:
                 issues.append({"field":"required_ids/excluded_ids","conflicting_ids":overlap})
@@ -289,16 +294,23 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
                        and all(value.startswith("repeat_exceptions") for value in issue["invalid_values"])]
             unquoted = [issue for issue in issues if issue["field"] == "constraints"
                         and all(item["problems"] == [UNQUOTED] for item in rejected)]
-            if attempt and len(repeats)+len(unquoted) == len(issues):
-                # Both only add conditions: a malformed repeat permission keeps the default of no repeats, and a condition
-                # the answer does not say is left out (new_constraints already holds only the valid ones).
+            rejected_ids = {identity for issue in intent_issues for identity in issue["unauthorized_ids"]}
+            resolved_overlaps = [issue for issue in issues if issue["field"] == "required_ids/excluded_ids"
+                                 and set(issue["conflicting_ids"]) <= rejected_ids]
+            if attempt and len(repeats)+len(unquoted)+len(intent_issues)+len(resolved_overlaps) == len(issues):
+                # Omit only recoverable additions and unauthorized marks; dropping a mark can also resolve its overlap.
+                # Other scope errors retain their full diagnostics and still reject the answer.
                 if repeats:
                     resolution.requirements.pop("repeat_exceptions",None)
                 dropped_repeats,dropped_quotes = bool(repeats),bool(unquoted)
+                for issue in intent_issues:
+                    field = issue["field"]
+                    dropped_intents[field] = issue["unauthorized_ids"]
+                    setattr(resolution,field,[identity for identity in getattr(resolution,field) if identity not in issue["unauthorized_ids"]])
                 break
             if attempt:
                 detail = "；".join(issue["field"]+"："+"、".join(
-                    issue.get("unknown_fields",issue.get("unknown_ids",issue.get("conflicting_ids",issue.get("invalid_values",[]))))) for issue in diagnostic)
+                    issue.get("unknown_fields",issue.get("unknown_ids",issue.get("conflicting_ids",issue.get("unauthorized_ids",issue.get("invalid_values",[])))))) for issue in diagnostic)
                 raise ToolError("decision_resolution","回答解析自动纠正一次后仍不符合允许范围（"+detail+"），原草稿已保留")
             self.emit(state,"decision","回答解析中出现越界字段或景点，正在按允许范围自动纠正一次")
             payload = {**payload,"previous_resolution":resolution.model_dump(mode="json"),"validation_errors":issues}
@@ -331,10 +343,21 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
             explanation += "；有条件无法对应到你回答的原话，未采用"
         if req.get("walking_limit_exempt_dates") != state["requirements"].get("walking_limit_exempt_dates",[]):
             explanation = "按你的最新指令更新步行限制；"+("保留当前规划，受影响日期不再因步行上限删点或追问" if keep else "已更新受影响日期的步行限制")
+        if dropped_intents["excluded_ids"]:
+            names = "、".join(available[identity]["name"] for identity in dropped_intents["excluded_ids"])
+            explanation += "；"+("回答中没有删除意图，未将" if not has_delete_intent(answer_text) else "回答中明确要求保留，未将")+names+"设为排除"
+        if dropped_intents["required_ids"]:
+            names = "、".join(available[identity]["name"] for identity in dropped_intents["required_ids"])
+            explanation += "；回答中明确要求移除"+names+"，未将其设为必去"
         constraints = state.get("stop_constraints",{})
         required = (set(constraints.get("required",[]))-set(resolution.excluded_ids)) | set(resolution.required_ids)
         required = {identity for identity in required if not is_dining(state["stops"][identity])}
         excluded = (set(constraints.get("excluded",[]))-set(resolution.required_ids)) | set(resolution.excluded_ids)
+        removed_wishes = {identity for identity in resolution.excluded_ids if identity.startswith(WISH_PREFIX)}
+        if removed_wishes:
+            req["wish_places"] = [place for place in req.get("wish_places",[]) if wish_stop_id(place["city"],place["name"]) not in removed_wishes]
+            excluded -= removed_wishes
+            keep = False
         req.update(required_stop_ids=sorted(required),excluded_stop_ids=sorted(excluded),
                    constraints=merge(req["constraints"],new_constraints,"decision",question.get("id",""),trip_dates=trip_dates(req)))
         history = [*history,{"questions":[question],"answers":values,"note":answer.get("note",""),"summary":explanation,
@@ -351,6 +374,12 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
             cities = {city for city in state["requirements"]["cities"] if req.get("hotel_areas",{}).get(city) != state["requirements"].get("hotel_areas",{}).get(city)}
             dates = sorted(set(dates) | {day["date"] for day in state["candidates"][0]["days"] if day["city"] in cities})
         candidates = copy.deepcopy(state.get("candidates",[]))
+        if removed_wishes:
+            for candidate in candidates:
+                for day in candidate["days"]:
+                    if removed_wishes & set(day["stop_ids"]):
+                        dates = sorted(set(dates) | {day["date"]})
+                        day["stop_ids"] = [identity for identity in day["stop_ids"] if identity not in removed_wishes]
         if candidates:
             used = {identity for day in candidates[0]["days"] for identity in day["stop_ids"]}
             for identity in required-used:
@@ -361,6 +390,8 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
                 else:
                     resume = "discover"
         return {"requirements":req,"candidates":candidates,"stop_constraints":{"required":sorted(required),"excluded":sorted(excluded)},"decision_history":history,
+                **({"stops":{identity:stop for identity,stop in state["stops"].items() if identity not in removed_wishes},
+                    "repair_only":False,"assessment_refresh":False} if removed_wishes else {}),
                 "decision":{},"decision_reopened":False,"assessment_dates":dates,"assessment_base":base,"draft_revision":state.get("draft_revision",0)+1,
                 "repair_round":0,"review_feedback":[],"place_selection":{},"decision_options":{},
                 "keep_current_plan":keep,
@@ -369,7 +400,7 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
 
     async def confirm_route(self,state):
         itinerary = copy.deepcopy(state["selected_route"]["draft"])
-        blockers = confirmation_blockers(itinerary,state.get("stop_constraints"),state["requirements"])
+        blockers = confirmation_blockers(itinerary,state.get("stop_constraints"),state["requirements"],state.get("stops"))
         if blockers:
             raise Conflict("路线暂不能确认："+"；".join(blockers))
         if plan_fingerprint(itinerary) != state["selected_route"]["plan_hash"]:

@@ -13,7 +13,9 @@ from ..routing import coordinates, daily_route_scope, daily_movements, transport
 from ..resource_planning import chosen_hotel, comparison
 from ..agents.runtime import digest
 from ..agents.route import resolve_stop_id
-from ..dining import is_dining, meal_recommendations, refresh_meals
+from ..dining import is_dining, refresh_meals, plan_meal_wishes
+from ..conflicts import visit_minutes
+from ..stop_types import is_light_wish, with_visit_defaults
 from ..places import canonicalize_stops, canonical_key, planning_stop_pool, repeat_allowed, represented_ids
 from ..reviewing import review_repair_dates
 from ..planning_recovery import route_moves
@@ -90,10 +92,15 @@ class SchedulingNodes:
                      repeat_allowed(stop,route_day,"visit",state["requirements"])}
         if state.get("repair_only"):
             available = {identity:stop for identity,stop in available.items() if identity in set(ids) | set(locked_ids)}
+        available = {identity:with_visit_defaults(stop) for identity,stop in available.items()}
         available,place_groups = planning_stop_pool(available,ids,locked_ids)
+        meal_plan = state["selected_route"].get("feasibility",{}).get("meal_wishes") or plan_meal_wishes(state["selected_route"]["days"],state["stops"],state.get("requirements",{}))
+        meal_wishes = [{"id":identity,**item} for identity,item in meal_plan.items() if item["date"] == route_day["date"]]
         instruction = (
             "只安排当前一天。stop_ids、durations和start_times的键只能使用available_stops中的完整ID，不能用名称、POI ID或序号，不能重复。"
             "可从当天原方案及尚未安排的已选攻略活动中补充或替换，required和locked_ids必须保留。"
+            "meal_wishes是当天用户指定的必去正餐餐厅，含名称、坐标与倾向餐次；它们不加入stop_ids、不占游览时长。尽量把午餐或晚餐前后的景点安排在相应餐厅2公里内，让用餐顺路。"
+            "source_kind=user的咖啡、甜品和饮品属于必去游览，加入stop_ids，未填时长默认45分钟，用户填写的duration_minutes优先。"
             "工具也只能查询当前available_stops中的地点，其他日期的条件留给对应日期处理；已有坐标或route_evidence的真实耗时无需重复查询。"
             "requirements.constraints中的条件只在其scope内生效（scope为空表示全程），superseded_by非空的已失效；transit_rule等带日期或地点的条件不能扩大到其他天或全部景点间。"
             "fixed_order按before、after的先后安排，time_anchor按日出、日落或预约时刻安排，visit_duration的minutes写入durations；"
@@ -131,6 +138,7 @@ class SchedulingNodes:
                               **{field:[identity for identity in source_requirements.get(field,[]) if identity in available]
                                  for field in ("required_stop_ids","excluded_stop_ids")}}
         payload = {**payload,"available_stops":available,"current_stop_ids":ids,"locked_ids":sorted(locked_ids),
+                   "meal_wishes":meal_wishes,
                    "allowed_stop_ids":sorted(available),
                    "canonical_place_groups":place_groups,"review_feedback":feedback,"decisions":history,
                    "constraints":local_constraints,"requirements":local_requirements,
@@ -390,7 +398,7 @@ class SchedulingNodes:
                 move, place = {},stop.get("map_place")
             travel = move.get("minutes") if move.get("minutes") is not None else move.get("estimate_minutes",0)
             fixed_duration = next((item["minutes"] for item in active(req,"visit_duration",date=day_date,stop_id=stop_id)),None)
-            duration = fixed_duration or ordering.durations.get(stop_id) or stop.get("duration_minutes") or 90
+            duration = visit_minutes(stop,req,day_date,ordering.durations.get(stop_id))
             requested_duration = duration
             opening = reference_opening({**stop,"map_place":place or stop.get("map_place")},day_date)
             if opening and opening.get("closed") and stop_id not in locked_ids and stop_id not in change.get("user_selected_ids",[]):
@@ -460,7 +468,7 @@ class SchedulingNodes:
             current = visit_start
             activities.append({"id":stop_id,"kind":"visit","name":stop["name"],"start":self.clock(current),
                 "end":self.clock(current+duration),"duration_minutes":duration,
-                "duration_basis":("路线 Agent 根据偏好分配的参考游玩时长，需复核" if stop_id in ordering.durations else "攻略参考耗时（模型提取，需核对）" if stop.get("duration_minutes") else "系统估算 90 分钟")+("；"+duration_adjustment if duration_adjustment else ""),
+                "duration_basis":("用户指定游玩时长" if is_light_wish(stop) and stop.get("duration_minutes") and not stop.get("duration_is_default") else "路线 Agent 根据偏好分配的参考游玩时长，需复核" if stop_id in ordering.durations else "轻食饮品默认45分钟" if is_light_wish(stop) else "攻略参考耗时（模型提取，需核对）" if stop.get("duration_minutes") else "系统估算 90 分钟")+("；"+duration_adjustment if duration_adjustment else ""),
                 "requested_visit_minutes":requested_duration if duration_adjustment else None,"duration_adjustment":duration_adjustment,
                 "opening_window":list(hours) if hours else None,
                 "opening_reference":opening,
@@ -579,7 +587,7 @@ class SchedulingNodes:
         stops = canonicalize_stops({identity:located.get(identity,stop) for identity,stop in state["stops"].items()})
         weather = state.get("weather",{}) if repair_dates is not None else await self.weather_context(state)
         state = {**state,"stops":stops,"weather":weather}
-        if clarification := self.place_clarification(stops,active_ids,state["selected_route"]["days"]):
+        if clarification := self.place_clarification(stops,{identity for identity in active_ids if not is_dining(stops.get(identity,{}))},state["selected_route"]["days"]):
             return {"itinerary":copy.deepcopy(state["itinerary"]),"stops":stops,"weather":weather,"decision_resume":"assess",**clarification}
         if clarification := await self.resolve_hubs(state,state["itinerary"]):
             return {"itinerary":copy.deepcopy(state["itinerary"]),"stops":stops,"weather":weather,"decision_resume":"assess",**clarification}
@@ -737,13 +745,20 @@ class SchedulingNodes:
                 activity["map_url"] = map_link(activity["name"],day["city"],place["location"])
                 activity["navigation_url"] = navigation_link(None,place)
         if refresh_dining:
-            day["meal_recommendations"] = meal_recommendations(day,stops,state.get("stop_constraints",{}).get("excluded",[]),requirements=state.get("requirements",{}))
+            itinerary = state.get("itinerary") or {}
+            days = [day if item["date"] == day["date"] else item for item in itinerary.get("days",[])]
+            if not any(item["date"] == day["date"] for item in days):
+                days.append(day)
+            refresh_meals({"days":days},stops,state.get("stop_constraints",{}).get("excluded",[]),
+                          dates={day["date"]},requirements=state.get("requirements",{}),
+                          meal_plan=state.get("selected_route",{}).get("feasibility",{}).get("meal_wishes"))
             self.meal_links(day)
 
     @staticmethod
     def meal_links(day):
         for recommendation in day.get("meal_recommendations",[]):
-            recommendation["map_url"] = map_link(recommendation["name"],day["city"],recommendation["map_place"]["location"])
+            place = recommendation.get("map_place") or {}
+            recommendation["map_url"] = map_link(recommendation["name"],day["city"],place["location"]) if coordinates(place) else None
 
     async def refresh_day_routes(self,state,itinerary,dates=None,refresh_routes=True,missing_only=False):
         # Locks and repairs can change predecessors. Re-query those legs without changing locked timestamps.
@@ -853,7 +868,8 @@ class SchedulingNodes:
             self.update_day_places(state,day,refresh_dining=False)
         if not missing_only:
             refresh_meals(itinerary,state.get("stops",{}),state.get("stop_constraints",{}).get("excluded",[]),
-                          dates=meal_dates,requirements=state.get("requirements",{}))
+                          dates=meal_dates,requirements=state.get("requirements",{}),
+                          meal_plan=state.get("selected_route",{}).get("feasibility",{}).get("meal_wishes"))
         for day in itinerary["days"]:
             if dates is None or day["date"] in dates:
                 self.meal_links(day)

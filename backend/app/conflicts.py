@@ -6,8 +6,9 @@ from datetime import date as Date
 import re
 
 from .constraints import active, merge, trip_dates
-from .models import ConstraintDraft
+from .models import WISH_PREFIX, ConstraintDraft, wish_stop_id
 from .dining import is_dining
+from .stop_types import is_light_wish
 from .places import canonical_key, canonicalize_stops, local_name, strip_suffix
 from .routing import coordinates, early_finish
 from .rules import timestamp
@@ -77,6 +78,9 @@ def visit_minutes(stop: dict, req: dict, day: str | None = None,
                   scheduled_minutes: int | None = None) -> int:
     fixed = next((item["minutes"] for item in active(req,"visit_duration",date=day,stop_id=stop.get("id"))
                   if item.get("minutes")),None)
+    if is_light_wish(stop):
+        explicit = stop.get("duration_minutes") if not stop.get("duration_is_default") else None
+        return fixed or explicit or scheduled_minutes or stop.get("duration_minutes") or 45
     return fixed or scheduled_minutes or stop.get("duration_minutes") or DEFAULT_VISIT_MINUTES
 
 
@@ -417,7 +421,12 @@ def apply_option(state, action, label):
     name = stops.get(identity,{}).get("name",identity)
     if kind == "exclude":
         constraints["required"] = [item for item in constraints.get("required",[]) if item != identity]
-        constraints["excluded"] = sorted({*constraints.get("excluded",[]),identity})
+        if identity.startswith(WISH_PREFIX):
+            req["wish_places"] = [place for place in req.get("wish_places",[]) if wish_stop_id(place["city"],place["name"]) != identity]
+            constraints["excluded"] = [item for item in constraints.get("excluded",[]) if item != identity]
+            stops.pop(identity,None)
+        else:
+            constraints["excluded"] = sorted({*constraints.get("excluded",[]),identity})
         if action["date"] in days:
             days[action["date"]]["stop_ids"] = [item for item in days[action["date"]]["stop_ids"] if item != identity]
         summary = "按你的选择，这次不安排"+name
@@ -429,6 +438,9 @@ def apply_option(state, action, label):
             days[action["to"]]["adjustment"] = "按你的选择把"+name+"改到这一天"
         if stops.get(identity,{}).get("assigned_date"):
             stops[identity] = {**stops[identity],"assigned_date":action["to"]}
+            if identity.startswith(WISH_PREFIX):
+                req["wish_places"] = [{**place,"date":action["to"]} if wish_stop_id(place["city"],place["name"]) == identity else place
+                                      for place in req.get("wish_places",[])]
         dates.append(action["to"])
         summary = "按你的选择把"+name+"改到"+_label_date(action["to"])
     elif kind == "shorten":

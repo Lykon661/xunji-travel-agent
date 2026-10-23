@@ -7,6 +7,7 @@ export interface Requirements {
   earliest_departure?: string | null; latest_arrival?: string | null; latest_return?: string | null;
   max_transport_hours?: number | null; direct_only?: boolean; flight_cabin?: string; train_seat?: string;
   hotel_type?: string; hotel_stars?: string; hotel_areas?: Record<string,string>; max_walk_per_day?: number; allow_taxi?: boolean;
+  wish_places?: { city: string; name: string; date: string | null; duration_minutes: number | null }[];
   required_stop_ids?: string[]; excluded_stop_ids?: string[];
   walking_limit_exempt_dates?: string[];
   repeat_exceptions?: {place_id: string; role: 'visit' | 'dining'; dates: string[]; meals: ('lunch' | 'dinner')[]; authorization: string}[];
@@ -107,9 +108,10 @@ export interface Activity {
   ticket_quote?: {price: number | null; assumed_free?: boolean; reported_free?: boolean; price_date?: string | null; visit_date?: string; ticket_name?: string | null; note?: string; booking_url?: string | null; queried_at?: string; status?: string; candidates?: Resource[]; options?: Resource[]};
 }
 export interface MealRecommendation {
-  id: string; name: string; meal: 'lunch' | 'dinner'; nearby_activity: string; distance_meters: number;
-  note: string; map_place: MapPlace; map_url?: string; opening_claim?: string | null;
+  id: string; name: string; meal: 'breakfast' | 'lunch' | 'dinner'; nearby_activity: string | null; distance_meters: number | null;
+  note: string; map_place: MapPlace | null; map_url?: string; opening_claim?: string | null;
   source_id?: string; source_title?: string; source_url?: string | null; evidence?: Evidence;
+  source_kind?: 'user'; wish?: boolean;
   canonical_place_id?: string;
   source_references?: {stop_id: string; source_id?: string; source_title?: string; evidence?: Evidence}[];
 }
