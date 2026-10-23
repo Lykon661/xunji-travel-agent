@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -30,6 +31,9 @@ from .store import Conflict, Store, compact_sqlite, dump, now
 from .web import mount_frontend
 from .routing import coordinates
 from .resource_planning import recommended_hotel_areas
+
+
+HOTEL_PRICE_PAGES = 5
 
 
 @asynccontextmanager
@@ -362,7 +366,7 @@ async def search_products(trip_id: str,body: ProductSearchInput):
                     raise HTTPException(422,"住宿推荐区域已变化，请重新选择，或切换为自己指定区域")
                 areas = [body.hotel_area] if body.hotel_area else recommended or [None]
             flags = {"dest-name":city,"key-words":query or None,"hotel-bed-types":body.bed_type or None,"hotel-stars":body.hotel_stars or None,
-                     "sort":"price_asc","check-in-date":check_in,"check-out-date":check_out,"max-price":body.max_price}
+                     "sort":"price_desc" if body.min_price is not None else "price_asc","check-in-date":check_in,"check-out-date":check_out,"max-price":body.max_price}
         elif body.mode == "poi":
             if not city:
                 raise HTTPException(422,"景点门票查询需要城市")
@@ -371,16 +375,39 @@ async def search_products(trip_id: str,body: ProductSearchInput):
         try:
             if hotel_search:
                 responses, failures, found = [],[],{}
+                price_limited = False
                 for area in areas:
-                    try:
-                        response = await planner.flyai.search(trip_id,body.mode,{**context,"search_area":area or ""},{**flags,"poi-name":area},fresh=True)
+                    max_price = body.max_price
+                    for page in range(HOTEL_PRICE_PAGES if body.min_price is not None else 1):
+                        try:
+                            response = await planner.flyai.search(trip_id,body.mode,{**context,"search_area":area or ""},
+                                                                 {**flags,"poi-name":area,"max-price":max_price},fresh=True)
+                        except ToolError as exc:
+                            failures.append(exc)
+                            break
                         responses.append(response)
+                        count = len(found)
                         for option in response["options"]:
                             found.setdefault(str(option.get("supplier_id") or option["id"]),{**option,"search_area":area})
-                    except ToolError as exc:
-                        failures.append(exc)
+                        if body.min_price is None:
+                            break
+                        prices = [option["price"] for option in response["options"] if option.get("price") is not None]
+                        if not prices or len(found) == count:
+                            break
+                        low = min(prices)
+                        if low < body.min_price:
+                            break
+                        next_max = int(math.floor(low))
+                        if max_price is not None and next_max >= max_price:
+                            next_max = max_price - 1
+                        if next_max < body.min_price:
+                            break
+                        if page == HOTEL_PRICE_PAGES - 1:
+                            price_limited = True
+                        max_price = next_max
+                    if failures:
                         break
-                if not responses:
+                if failures and not found:
                     raise failures[0]
                 result = {**responses[-1],"options":list(found.values()),
                           "status":"ok" if found else next((response.get("status") for response in responses if response.get("status") not in {"ok","empty"}),"empty"),
@@ -400,6 +427,8 @@ async def search_products(trip_id: str,body: ProductSearchInput):
             if len(options) != len(result["options"]):
                 result = {**result,"options":options,"status":"ok" if options else "empty",
                           "message":(result.get("message") or "")+"价格筛选已排除区间外、未报价及币种或每晚价格口径不明的候选。"}
+        if hotel_search and price_limited:
+            result["message"] = (result.get("message") or "")+"已连续查询5次，价格区间内可能还有更多酒店，可缩小区间后再查。"
         products = []
         for option in result["options"]:
             # Search results remain references; itinerary resources use their own explicit selection flow.

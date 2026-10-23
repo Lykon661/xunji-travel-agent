@@ -84,6 +84,24 @@ class FlyAIConfiguration(unittest.TestCase):
 
 
 class FlyAIQueryCredentials(unittest.IsolatedAsyncioTestCase):
+    async def test_hotel_bed_types_are_normalized_for_cli(self):
+        with tempfile.TemporaryDirectory() as folder:
+            settings = SimpleNamespace(data=Path(folder),flyai_key="environment-key",flyai_enabled=True)
+            for value, expected in (("大床房","king"),("双床房","twin"),("多床房","multi"),
+                                    ("大床房,双床房","king,twin"),("king","king"),("twin","twin"),("multi","multi"),
+                                    ("king,twin,multi","king,twin,multi"),(" 大床房, 双床房 ","king,twin"),
+                                    ("未知,双床房","twin"),("未知",None),("",None),(None,None)):
+                with self.subTest(value=value):
+                    process = AsyncMock(return_value=(0,"[]",""))
+                    with patch("app.adapters.settings",settings),patch.object(FlyAI,"command",return_value=["flyai"]),patch("app.adapters.process",process):
+                        await FlyAI(Mock()).search("trip","hotel",{},{"dest-name":"广州","hotel-bed-types":value})
+                    process.assert_awaited_once()
+                    args = process.call_args.args[0]
+                    if expected is None:
+                        self.assertNotIn("--hotel-bed-types",args)
+                    else:
+                        self.assertEqual(args[args.index("--hotel-bed-types")+1],expected)
+
     async def test_runtime_crash_is_not_classified_from_quote_stdout(self):
         with tempfile.TemporaryDirectory() as folder:
             settings = SimpleNamespace(data=Path(folder),flyai_key="environment-key",flyai_enabled=True)

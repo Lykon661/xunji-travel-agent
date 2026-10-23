@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from pydantic import ValidationError
 from fastapi import HTTPException
 
+from app.adapters import ToolError
 from app.main import app, search_products, select_product
 from app.models import ProductSearchInput, ProductSelectionInput
 from app.store import Conflict
@@ -36,6 +37,10 @@ class HotelPriceRange(unittest.IsolatedAsyncioTestCase):
     async def query(self, **fields):
         return await search_products("trip",ProductSearchInput(mode="hotel",base_version=0,**fields))
 
+    def batches(self, *options):
+        self.planner.flyai.search.side_effect = [
+            {"options":batch,"status":"ok" if batch else "empty","queried_at":"now","message":""} for batch in options]
+
     async def test_range_is_inclusive_and_requires_comparable_nightly_prices(self):
         result = await self.query(min_price=200,max_price=400)
         self.assertEqual([item["id"] for item in result["products"]],["minimum","maximum","reference"])
@@ -44,6 +49,7 @@ class HotelPriceRange(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context["min_price"],"200")
         self.assertEqual(context["max_price"],"400")
         self.assertEqual(flags["max-price"],400)
+        self.assertEqual(flags["sort"],"price_desc")
         self.assertNotIn("min-price",flags)
         self.assertEqual(self.doc["product_search"]["min_price"],200)
         self.assertEqual(self.doc["product_search"]["max_price"],400)
@@ -51,18 +57,141 @@ class HotelPriceRange(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_bounds_preserves_unpriced_and_unknown_candidates(self):
         result = await self.query()
+        self.planner.flyai.search.assert_awaited_once()
         self.assertEqual(len(result["products"]),len(self.options))
         self.assertIsNone(self.planner.flyai.search.call_args.args[3]["max-price"])
+        self.assertEqual(self.planner.flyai.search.call_args.args[3]["sort"],"price_asc")
 
     async def test_one_sided_ranges_and_empty_filtered_results(self):
         lower = await self.query(min_price=400)
         self.assertEqual([item["id"] for item in lower["products"]],["maximum","above"])
+        self.assertEqual(self.planner.flyai.search.call_args.args[3]["sort"],"price_desc")
         upper = await self.query(max_price=200)
         self.assertEqual([item["id"] for item in upper["products"]],["below","minimum"])
+        self.assertEqual(self.planner.flyai.search.call_args.args[3]["sort"],"price_asc")
         empty = await self.query(min_price=500,max_price=600)
         self.assertEqual(empty["status"],"empty")
         self.assertEqual(empty["products"],[])
         self.assertEqual(self.doc["product_search"]["result_ids"],[])
+
+    async def test_price_staircase_merges_three_batches_with_inclusive_bounds(self):
+        first = [hotel(str(price),price) for price in (200,195,190,185,180,175,170,168,165)]
+        second = [hotel(str(price),price) for price in (164,160,155,150,145,140,135,130)]
+        third = [hotel(str(price),price) for price in (129,120,110,100,99,90)]
+        self.batches(first,[{**hotel("duplicate-165",165),"supplier_id":"165"},*second],
+                     [hotel("130",130),*third])
+        result = await self.query(min_price=100,max_price=200)
+        calls = self.planner.flyai.search.await_args_list
+        self.assertEqual(len(calls),3)
+        self.assertEqual([call.args[3]["max-price"] for call in calls],[200,165,130])
+        self.assertTrue(all(call.args[3]["sort"] == "price_desc" for call in calls))
+        self.assertEqual([item["id"] for item in result["products"]],
+                         [item["id"] for item in first+second+third if 100 <= item["price"] <= 200])
+        self.assertNotIn("已连续查询5次",result["message"])
+
+    async def test_full_page_at_same_price_decreases_maximum(self):
+        self.batches([hotel(str(index),150) for index in range(10)],[])
+        result = await self.query(min_price=100,max_price=150)
+        self.assertEqual([call.args[3]["max-price"] for call in self.planner.flyai.search.await_args_list],[150,149])
+        self.assertEqual(len(result["products"]),10)
+
+    async def test_staircase_stops_after_five_queries_and_appends_hint(self):
+        self.batches(*[[hotel(str(price),price)] for price in (200,180,160,140,120)])
+        result = await self.query(min_price=100,max_price=220)
+        self.assertEqual(self.planner.flyai.search.await_count,5)
+        self.assertEqual(len(result["products"]),5)
+        self.assertTrue(result["message"].endswith("已连续查询5次，价格区间内可能还有更多酒店，可缩小区间后再查。"))
+        self.assertEqual(self.doc["product_search"]["message"],result["message"])
+
+    async def test_each_area_has_its_own_staircase_and_hint_is_added_once(self):
+        areas = ["西湖","武林广场"]
+        self.doc["itinerary"] = {"hotels":[{"city":"杭州","search_areas":areas,"context":{}}]}
+        self.batches(*[[hotel(f"{area}-{price}",price)] for area in areas for price in (200,180,160,140,120)])
+        result = await self.query(min_price=100,max_price=220)
+        calls = self.planner.flyai.search.await_args_list
+        self.assertEqual(len(calls),10)
+        self.assertEqual([call.args[3]["max-price"] for call in calls],[220,200,180,160,140]*2)
+        self.assertEqual([call.args[3]["poi-name"] for call in calls],[areas[0]]*5+[areas[1]]*5)
+        self.assertEqual([item["search_area"] for item in result["products"]],[areas[0]]*5+[areas[1]]*5)
+        self.assertEqual(result["message"].count("已连续查询5次"),1)
+
+    async def test_staircase_stops_without_new_candidates_and_preserves_first(self):
+        first = {**hotel("first",180),"supplier_id":"same-hotel"}
+        duplicate = {**hotel("duplicate",150),"supplier_id":"same-hotel"}
+        self.batches([first],[duplicate])
+        result = await self.query(min_price=100,max_price=200)
+        self.assertEqual(self.planner.flyai.search.await_count,2)
+        self.assertEqual([(item["id"],item["price"]) for item in result["products"]],[("first",180)])
+
+    async def test_minimum_only_starts_without_maximum(self):
+        self.batches([hotel("high",180)],[hotel("low",90)])
+        result = await self.query(min_price=100)
+        calls = self.planner.flyai.search.await_args_list
+        self.assertEqual([call.args[3]["max-price"] for call in calls],[None,180])
+        self.assertTrue(all(call.args[3]["sort"] == "price_desc" for call in calls))
+        self.assertEqual([item["id"] for item in result["products"]],["high"])
+
+    async def test_maximum_only_keeps_single_ascending_query(self):
+        await self.query(max_price=200)
+        self.planner.flyai.search.assert_awaited_once()
+        flags = self.planner.flyai.search.await_args.args[3]
+        self.assertEqual(flags["max-price"],200)
+        self.assertEqual(flags["sort"],"price_asc")
+
+    async def test_empty_or_unpriced_batch_stops_staircase(self):
+        for options in ([],[hotel("unpriced",None)]):
+            with self.subTest(options=options):
+                self.planner.flyai.search.reset_mock()
+                self.batches(options)
+                result = await self.query(min_price=100,max_price=200)
+                self.planner.flyai.search.assert_awaited_once()
+                self.assertEqual(result["products"],[])
+                self.assertEqual(result["status"],"empty")
+
+    async def test_next_maximum_below_minimum_stops_staircase(self):
+        self.batches([hotel("free",0)])
+        result = await self.query(min_price=0,max_price=0)
+        self.planner.flyai.search.assert_awaited_once()
+        self.assertEqual([item["id"] for item in result["products"]],["free"])
+
+    async def test_fractional_low_price_is_floored(self):
+        self.batches([hotel("fractional",150.75)],[])
+        await self.query(min_price=100,max_price=200)
+        self.assertEqual([call.args[3]["max-price"] for call in self.planner.flyai.search.await_args_list],[200,150])
+
+    async def test_fifth_batch_below_minimum_does_not_append_limit_hint(self):
+        self.batches(*[[hotel(str(price),price)] for price in (200,180,160,140,90)])
+        result = await self.query(min_price=100,max_price=220)
+        self.assertEqual(self.planner.flyai.search.await_count,5)
+        self.assertNotIn("已连续查询5次",result["message"])
+
+    async def test_tool_error_keeps_previous_batches_and_stops_other_areas(self):
+        self.doc["itinerary"] = {"hotels":[{"city":"杭州","search_areas":["西湖","武林广场"],"context":{}}]}
+        failure = ToolError("query_failed","模拟查询失败")
+        self.planner.flyai.search.side_effect = [
+            {"options":[hotel("saved",180)],"status":"ok","queried_at":"now","message":"首批结果"},failure]
+        result = await self.query(min_price=100,max_price=200)
+        self.assertEqual(self.planner.flyai.search.await_count,2)
+        self.assertTrue(all(call.args[3]["poi-name"] == "西湖" for call in self.planner.flyai.search.await_args_list))
+        self.assertEqual([item["id"] for item in result["products"]],["saved"])
+        self.assertEqual(result["status"],"ok")
+        self.assertIn(str(failure),result["message"])
+        self.assertIn("saved",{item["id"] for item in self.doc["products"]})
+
+    async def test_tool_error_without_any_candidates_is_raised_and_recorded(self):
+        for empty_first in (False,True):
+            with self.subTest(empty_first=empty_first):
+                self.doc["itinerary"] = {"hotels":[{"city":"杭州","search_areas":["西湖","武林广场"],"context":{}}]}
+                self.planner.flyai.search.reset_mock()
+                failure = ToolError("query_failed","模拟查询失败")
+                self.planner.flyai.search.side_effect = ([
+                    {"options":[],"status":"empty","queried_at":"now","message":""}] if empty_first else [])+[failure]
+                with self.assertRaises(ToolError) as raised:
+                    await self.query(min_price=100,max_price=200)
+                self.assertIs(raised.exception,failure)
+                self.assertEqual(self.planner.flyai.search.await_count,2 if empty_first else 1)
+                self.assertEqual(self.doc["product_search"]["code"],failure.code)
+                self.assertEqual(self.doc["product_search"]["result_ids"],[])
 
     def test_queries_only_accept_hotels_and_tickets(self):
         self.assertEqual(ProductSearchInput(base_version=0).mode,"hotel")

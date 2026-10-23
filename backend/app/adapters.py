@@ -682,6 +682,11 @@ class FlyAI:
             raise
         for key, value in flags.items():
             if value is not None:
+                if key == "hotel-bed-types":
+                    bed_types = {"大床房":"king","双床房":"twin","多床房":"multi","king":"king","twin":"twin","multi":"multi"}
+                    value = ",".join(bed_types[bed] for bed in (item.strip() for item in str(value).split(",")) if bed in bed_types)
+                    if not value:
+                        continue
                 args += ["--" + key,str(value)]
         env = dict(os.environ)
         env["FLYAI_API_KEY"] = self.api_key
