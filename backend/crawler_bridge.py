@@ -25,6 +25,8 @@ def is_travel_guide_item(item: dict, city: str = "") -> bool:
     title = card.get("display_title")
     if not isinstance(title, str) or not title.strip():
         return False
+    if re.search(r"找工作|租房|求职|面试|上班|通勤|搬家|落户", title):
+        return False
     return bool(re.search(
         r"攻略|路线|行程|city\s*walk|(?<![a-z])day(?![a-z])|自由行|一日游|"
         r"[0-9零一二两三四五六七八九十百几]+\s*(?:天|日)|几天几晚|"
@@ -57,7 +59,7 @@ async def main():
     config.MAX_CONCURRENCY_NUM = 1
     config.SAVE_DATA_OPTION = "jsonl"
     config.SAVE_DATA_PATH = request["output"]
-    config.CRAWLER_MAX_NOTES_COUNT = 6
+    config.CRAWLER_MAX_NOTES_COUNT = 20
     config.PLATFORM = "xhs"
     config.LOGIN_TYPE = "qrcode"
     config.KEYWORDS = next(iter(request["keywords"]), "")
@@ -66,7 +68,8 @@ async def main():
         config.XHS_SPECIFIED_NOTE_URL_LIST = [request["url"]]
     from media_platform.xhs import XiaoHongShuCrawler
     from media_platform.xhs.client import XiaoHongShuClient
-    from media_platform.xhs.field import SearchSortType
+    from media_platform.xhs.field import SearchNoteType, SearchSortType
+    from media_platform.xhs.help import get_search_id
     from store import xhs as xhs_store
     from var import source_keyword_var
     import httpx
@@ -82,7 +85,7 @@ async def main():
         async with request_lock:
             if protection_file.exists():
                 raise CollectionProtected("访问异常后已停止后续请求")
-            if requests_sent >= 8:
+            if requests_sent >= 24:
                 raise RuntimeError("本轮接口请求上限已到，停止采集")
             if last_finished is not None:
                 await asyncio.sleep(max(0, 1.5 - (time.monotonic() - last_finished)))
@@ -125,20 +128,33 @@ async def main():
         if not keyword:
             return
         source_keyword_var.set(keyword)
-        response = await crawler.xhs_client.get_note_by_keyword(keyword=keyword, page=1, sort=SearchSortType.MOST_POPULAR)
-        seen = set()
-        for item in response.get("items", []):
-            note_id = item.get("id")
-            if not note_id or note_id in seen or not is_travel_guide_item(item, request.get("city", "")):
-                continue
-            if len(seen) >= 6:
+        search_id = get_search_id()
+        seen, collected = set(), 0
+        for page in range(1, 4):
+            if len(seen) >= 20 or collected >= 20:
                 break
-            seen.add(note_id)
-            # Fetch details once, sequentially, without the upstream retry or HTML fallback.
-            note = await crawler.xhs_client.get_note_by_id(note_id, item.get("xsec_source", ""), item.get("xsec_token", ""))
-            if note and has_guide_content(note):
-                note.update(xsec_source=item.get("xsec_source", ""), xsec_token=item.get("xsec_token", ""))
-                await xhs_store.update_xhs_note(note)
+            response = await crawler.xhs_client.get_note_by_keyword(
+                keyword=keyword, page=page, search_id=search_id,
+                sort=SearchSortType.MOST_POPULAR, note_type=SearchNoteType.IMAGE)
+            items = response.get("items") or []
+            if not items:
+                break
+            for item in items:
+                if len(seen) >= 20 or collected >= 20:
+                    break
+                note_id = item.get("id")
+                if not note_id or note_id in seen or not is_travel_guide_item(item, request.get("city", "")):
+                    continue
+                # Rejected or missing details still consume the round's detail budget.
+                seen.add(note_id)
+                # Fetch details once, sequentially, without the upstream retry or HTML fallback.
+                note = await crawler.xhs_client.get_note_by_id(note_id, item.get("xsec_source", ""), item.get("xsec_token", ""))
+                if note and has_guide_content(note):
+                    note.update(xsec_source=item.get("xsec_source", ""), xsec_token=item.get("xsec_token", ""))
+                    await xhs_store.update_xhs_note(note)
+                    collected += 1
+            if not response.get("has_more", False):
+                break
 
     crawler.search = search_small_batch
     if request["url"]:

@@ -387,7 +387,7 @@ class Crawler:
                        "collected_at":now(), "likes":count(row.get("liked_count")), "favorites":count(row.get("collected_count")),
                        "extraction":None, "error":None}
                 docs.append(self.store.add_source(trip_id,doc))
-                if len(docs) >= 6:
+                if len(docs) >= 20:
                     break
             self.store.query(trip_id,"xiaohongshu",{"city":city,"keywords":keywords,"url":url}, {"count":len(docs),"status":"ok"})
             if not url:

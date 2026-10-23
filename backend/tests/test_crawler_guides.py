@@ -51,6 +51,13 @@ class GuideFilters(unittest.TestCase):
         self.assertTrue(crawler_bridge.is_travel_guide_item(search_item(), ""))
         self.assertFalse(crawler_bridge.is_travel_guide_item(search_item(title="普通日记"), ""))
 
+    def test_employment_and_housing_terms_override_guide_terms(self):
+        for word in ("找工作", "租房", "求职", "面试", "上班", "通勤", "搬家", "落户"):
+            with self.subTest(word=word):
+                self.assertFalse(crawler_bridge.is_travel_guide_item(search_item(title=f"广州{word}攻略"), "广州"))
+        self.assertFalse(crawler_bridge.is_travel_guide_item(
+            search_item(title="五天时间在广州，找工作和租房全搞定的思路"), "广州"))
+
     def test_short_text_and_few_images_are_rejected_after_removing_topics(self):
         for desc in ("短正文", "字" * 79, "短正文" + "#广州旅行攻略[话题]#" * 20, " \n" * 80, None):
             with self.subTest(desc=desc):
@@ -63,7 +70,15 @@ class GuideFilters(unittest.TestCase):
 
 
 class BridgeCollection(unittest.IsolatedAsyncioTestCase):
-    async def run_bridge(self, items, notes, *, city="广州", extra_request=False, restriction=None, url=None):
+    def three_guide_pages(self):
+        pages = [{"items":[search_item(str(i)) for i in ids], "has_more":True}
+                 for ids in (range(5), range(5, 12), range(12, 21))]
+        # Repeated IDs across pages must not spend any additional detail requests.
+        pages[1]["items"].insert(0, search_item("0"))
+        pages[2]["items"].insert(0, search_item("5"))
+        return pages
+
+    async def run_bridge(self, items, notes, *, city="广州", extra_request=False, restriction=None, url=None, pages=None):
         """Run the real bridge against module stubs and a mocked HTTP boundary."""
         with tempfile.TemporaryDirectory() as folder, ExitStack() as stack:
             output = Path(folder)
@@ -75,14 +90,15 @@ class BridgeCollection(unittest.IsolatedAsyncioTestCase):
             config = ModuleType("config")
             stored = AsyncMock()
             details = AsyncMock(side_effect=lambda note_id, *args: notes.get(note_id))
-            keyword_search = AsyncMock(return_value={"items":items})
+            keyword_search = AsyncMock(side_effect=pages if pages is not None else [{"items":items, "has_more":False}])
+            search_id_factory = Mock(return_value="round-search-id")
 
             async def send(client, http_request, **kwargs):
                 return httpx.Response(200, json=restriction or {}, request=http_request)
 
             async def local_get(path):
                 # AsyncClient.send is mocked before main installs its real guard around it.
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(trust_env=False) as client:
                     await client.get("https://testserver/" + path)
 
             class FakeClient:
@@ -124,6 +140,8 @@ class BridgeCollection(unittest.IsolatedAsyncioTestCase):
             modules["media_platform.xhs"].XiaoHongShuCrawler = FakeCrawler
             modules["media_platform.xhs.client"].XiaoHongShuClient = FakeClient
             modules["media_platform.xhs.field"].SearchSortType = SimpleNamespace(MOST_POPULAR="popular")
+            modules["media_platform.xhs.field"].SearchNoteType = SimpleNamespace(IMAGE=2)
+            modules["media_platform.xhs.help"].get_search_id = search_id_factory
             modules["media_platform.xhs.help"].parse_note_info_from_note_url = Mock(
                 return_value=SimpleNamespace(note_id="note", xsec_source="pc_share", xsec_token="import-token"))
             modules["store"].xhs = SimpleNamespace(update_xhs_note=stored)
@@ -140,37 +158,84 @@ class BridgeCollection(unittest.IsolatedAsyncioTestCase):
             except RuntimeError as exc:
                 error = exc
             return SimpleNamespace(config=config, stored=stored, details=details, search=keyword_search,
-                                   network=network, sleep=sleep, error=error,
+                                   network=network, sleep=sleep, error=error, search_id_factory=search_id_factory,
                                    protected=(output / "account-protection.json").exists())
 
-    async def test_six_guides_and_eight_requests_with_local_prefilter_and_deduplication(self):
+    async def test_twenty_guides_stop_before_another_page_with_local_prefilter_and_deduplication(self):
         items = [search_item("video", note_type="video"), search_item("wifi", title="WiFi密码"),
                  search_item("herbal-tea", title="来广州必须要喝凉茶非常好喝"),
+                 search_item("career", title="广州找工作攻略"),
                  search_item("query", model_type="rec_query")]
-        items += [search_item(str(i), title="广州景点合集") for i in range(7)]
+        items += [search_item(str(i), title="广州景点合集") for i in range(20)]
         items.insert(5, search_item("0"))
-        notes = {str(i):{"note_id":str(i), "desc":"字" * 80} for i in range(7)}
-        result = await self.run_bridge(items, notes)
+        notes = {str(i):{"note_id":str(i), "desc":"字" * 80} for i in range(21)}
+        result = await self.run_bridge(items, notes, pages=[
+            {"items":items, "has_more":True}, {"items":[search_item("20")], "has_more":True}])
         self.assertIsNone(result.error)
-        self.assertEqual(result.config.CRAWLER_MAX_NOTES_COUNT, 6)
-        self.assertEqual([call.args[0] for call in result.details.await_args_list], list(map(str, range(6))))
-        self.assertEqual(result.stored.await_count, 6)
-        self.assertEqual(result.network.await_count, 8)
-        self.assertEqual(result.sleep.await_count, 7)
+        self.assertEqual(result.config.CRAWLER_MAX_NOTES_COUNT, 20)
+        self.assertEqual([call.args[0] for call in result.details.await_args_list], list(map(str, range(20))))
+        self.assertEqual(result.stored.await_count, 20)
+        self.assertEqual(result.network.await_count, 22)
+        self.assertEqual(result.sleep.await_count, 21)
         self.assertTrue(all(call.args == (1.5,) for call in result.sleep.await_args_list))
-        result.search.assert_awaited_once_with(keyword="广州 旅行攻略", page=1, sort="popular")
+        result.search.assert_awaited_once_with(keyword="广州 旅行攻略", page=1, search_id="round-search-id",
+                                              sort="popular", note_type=2)
+        result.search_id_factory.assert_called_once_with()
         self.assertEqual(result.stored.await_args.args[0]["xsec_token"], "token")
 
-    async def test_discarded_and_missing_details_still_consume_the_six_request_budget(self):
-        items = [search_item(str(i)) for i in range(7)]
-        notes = {str(i):{"note_id":str(i), "desc":"正文#旅行攻略[话题]#" * 5,
-                        "image_list":[{}, {}, {}] if i else []} for i in range(7)}
-        notes["1"] = None
-        result = await self.run_bridge(items, notes)
+    async def test_three_pages_share_one_search_id_and_fit_twenty_four_request_budget(self):
+        notes = {str(i):{"note_id":str(i), "desc":"字" * 80} for i in range(21)}
+        result = await self.run_bridge([], notes, pages=self.three_guide_pages())
         self.assertIsNone(result.error)
-        self.assertEqual(result.details.await_count, 6)
-        self.assertEqual(result.stored.await_count, 4)
-        self.assertEqual(result.network.await_count, 8)
+        result.search_id_factory.assert_called_once_with()
+        self.assertEqual([call.kwargs for call in result.search.await_args_list], [
+            {"keyword":"广州 旅行攻略", "page":page, "search_id":"round-search-id", "sort":"popular", "note_type":2}
+            for page in (1, 2, 3)])
+        self.assertEqual([call.args[0] for call in result.details.await_args_list], list(map(str, range(20))))
+        self.assertEqual(result.stored.await_count, 20)
+        self.assertEqual(result.network.await_count, 24)
+        self.assertEqual(result.sleep.await_count, 23)
+        self.assertTrue(all(call.args == (1.5,) for call in result.sleep.await_args_list))
+
+    async def test_no_more_or_empty_items_stop_pagination(self):
+        for response in ({"items":[search_item()], "has_more":False}, {"items":[search_item()]},
+                         {"items":[], "has_more":True}, {"has_more":True}):
+            with self.subTest(response=response):
+                result = await self.run_bridge([], {"note":{"desc":"字" * 80}}, pages=[
+                    response, {"items":[search_item("unexpected")], "has_more":True}])
+                self.assertIsNone(result.error)
+                self.assertEqual(result.search.await_count, 1)
+                expected_details = 1 if response.get("items") else 0
+                self.assertEqual(result.details.await_count, expected_details)
+                self.assertEqual(result.network.await_count, 2 + expected_details)
+
+    async def test_at_most_three_pages_even_when_all_items_are_filtered(self):
+        pages = [{"items":[search_item(str(i), note_type="video")], "has_more":True} for i in range(4)]
+        result = await self.run_bridge([], {}, pages=pages)
+        self.assertIsNone(result.error)
+        self.assertEqual([call.kwargs["page"] for call in result.search.await_args_list], [1, 2, 3])
+        result.details.assert_not_awaited()
+        self.assertEqual(result.network.await_count, 4)
+
+    async def test_discarded_and_missing_details_still_consume_the_twenty_request_budget(self):
+        notes = {str(i):{"note_id":str(i), "desc":"正文#旅行攻略[话题]#" * 5,
+                        "image_list":[{}, {}, {}] if i else []} for i in range(21)}
+        notes["1"] = None
+        result = await self.run_bridge([], notes, pages=self.three_guide_pages())
+        self.assertIsNone(result.error)
+        self.assertEqual([call.args[0] for call in result.details.await_args_list], list(map(str, range(20))))
+        self.assertEqual(result.stored.await_count, 18)
+        self.assertEqual(result.network.await_count, 24)
+
+    async def test_discarded_details_exhaust_budget_before_next_page(self):
+        pages = [{"items":[search_item(str(i)) for i in range(20)], "has_more":True},
+                 {"items":[search_item("20")], "has_more":True}]
+        result = await self.run_bridge([], {str(i):{"desc":"短正文"} for i in range(21)}, pages=pages)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.search.await_count, 1)
+        self.assertEqual(result.details.await_count, 20)
+        result.stored.assert_not_awaited()
+        self.assertEqual(result.network.await_count, 22)
 
     async def test_city_field_is_optional(self):
         result = await self.run_bridge([search_item()], {"note":{"desc":"字" * 80}}, city=None)
@@ -190,12 +255,12 @@ class BridgeCollection(unittest.IsolatedAsyncioTestCase):
         result.stored.assert_awaited_once_with({**note, "xsec_source":"pc_share", "xsec_token":"import-token"})
         self.assertEqual(result.network.await_count, 2)
 
-    async def test_http_guard_rejects_ninth_request(self):
-        result = await self.run_bridge([search_item(str(i)) for i in range(6)],
-                                      {str(i):{"desc":"字" * 80} for i in range(6)}, extra_request=True)
+    async def test_http_guard_rejects_twenty_fifth_request(self):
+        result = await self.run_bridge([], {str(i):{"desc":"字" * 80} for i in range(21)},
+                                      pages=self.three_guide_pages(), extra_request=True)
         self.assertIsInstance(result.error, RuntimeError)
         self.assertIn("接口请求上限", str(result.error))
-        self.assertEqual(result.network.await_count, 8)
+        self.assertEqual(result.network.await_count, 24)
 
     async def test_restriction_stops_requests_and_writes_protection_file(self):
         for restriction in ({"code":300011}, {"code":"300012"}, {"msg":"需要验证码"}):
@@ -208,7 +273,7 @@ class BridgeCollection(unittest.IsolatedAsyncioTestCase):
 
 
 class AdapterCollection(unittest.IsolatedAsyncioTestCase):
-    async def test_city_is_passed_and_only_six_unique_records_are_imported(self):
+    async def test_city_is_passed_and_only_twenty_unique_records_are_imported(self):
         with tempfile.TemporaryDirectory() as folder:
             settings = SimpleNamespace(data=Path(folder), crawler_enabled=True, cache_hours=24,
                                        crawler_dir=Path(folder), crawler_python=Path(folder) / "python.exe",
@@ -223,7 +288,7 @@ class AdapterCollection(unittest.IsolatedAsyncioTestCase):
                     return 0, CRAWLER_REVISION, ""
                 request = json.loads(Path(args[-1]).read_text(encoding="utf-8"))
                 requests.append(request)
-                rows = [{"note_id":str(i), "desc":"字" * 80, "image_list":""} for i in range(7)]
+                rows = [{"note_id":str(i), "desc":"字" * 80, "image_list":""} for i in range(21)]
                 rows.insert(1, rows[0])
                 (Path(request["output"]) / "notes.jsonl").write_text(
                     "\n".join(json.dumps(row) for row in rows), encoding="utf-8")
@@ -234,9 +299,9 @@ class AdapterCollection(unittest.IsolatedAsyncioTestCase):
                 docs = await Crawler(store).collect("trip", "广州", ["广州 5天 攻略"])
             self.assertEqual(requests[0]["city"], "广州")
             self.assertEqual(requests[0]["keywords"], ["广州 5天 攻略"])
-            self.assertEqual([doc["note_id"] for doc in docs], list(map(str, range(6))))
+            self.assertEqual([doc["note_id"] for doc in docs], list(map(str, range(20))))
             store.cache.assert_called_once()
-            self.assertEqual(len(store.cache.call_args.args[1]), 6)
+            self.assertEqual(len(store.cache.call_args.args[1]), 20)
 
 
 class GuideQueries(unittest.IsolatedAsyncioTestCase):
