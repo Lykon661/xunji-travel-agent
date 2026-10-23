@@ -364,7 +364,7 @@ async def search_products(trip_id: str,body: ProductSearchInput):
                 recommended = recommended_hotel_areas(doc,city)
                 if body.hotel_area and body.hotel_area not in recommended:
                     raise HTTPException(422,"住宿推荐区域已变化，请重新选择，或切换为自己指定区域")
-                areas = [body.hotel_area] if body.hotel_area else recommended or [None]
+                areas = [body.hotel_area] if body.hotel_area else recommended[:3] or [None]
             flags = {"dest-name":city,"key-words":query or None,"hotel-bed-types":body.bed_type or None,"hotel-stars":body.hotel_stars or None,
                      "sort":"price_desc" if body.min_price is not None else "price_asc","check-in-date":check_in,"check-out-date":check_out,"max-price":body.max_price}
         elif body.mode == "poi":

@@ -67,7 +67,7 @@ export interface Resource {
   departure_transfer?: Movement; arrival_transfer?: Movement;
 }
 export interface MapPlace {id?: string | null; name: string; location?: string | null; address?: string | null; map_url?: string}
-export interface Product extends Resource {city: string; search_mode: string; reference_only: boolean; match_basis?: string}
+export interface Product extends Resource {city: string; search_mode: string; reference_only: boolean; match_basis?: string; decoration_year?: string | null; nearby?: string | null}
 export interface MapResult {links: string[]; app_uri?: string | null; web_url?: string | null; status?: string; skipped?: string[]; note?: string; queried_at?: string}
 export interface ResourceGroup {
   id: string; label: string; city?: string; context: Record<string,string>;
@@ -121,6 +121,11 @@ export interface ReviewState {
     dates: string[]; field_path: string; message: string; evidence_ids: string[]; suggestion: string}[];
 }
 export interface RouteChatMessage {role: 'user' | 'assistant'; content: string; time: string; dates?: string[];selected_names?:string[]}
+export interface HotelAreaSegment {
+  city: string; day_range: {start: number; end: number}; dates: string[];
+  check_in: string; check_out: string; nights: number; center: string | null; reason: string;
+  areas: {name: string; source: 'business_area' | 'poi_fallback'; reason: string; avg_km: number | null; max_km: number | null}[];
+}
 export interface Itinerary {
   recovery_note?: string;
   days: {date: string; city: string; activities: Activity[]; gaps: string[]; adjustment: string; return_move: Movement;
@@ -130,6 +135,7 @@ export interface Itinerary {
     transfers?: {label: string; move: Movement}[]; transport_transfers?: {label: string; move: Movement}[];
     meal_estimate: number; meal_basis: string}[];
   transport: ResourceGroup[]; hotels: ResourceGroup[];
+  hotel_area_segments?: HotelAreaSegment[];
   personal_map?: MapResult; change_summary?: string[];
   information_unknown?: string[];
   constraint_notes?: string[];

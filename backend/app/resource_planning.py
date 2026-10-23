@@ -69,15 +69,22 @@ def chosen_hotel(itinerary, city, day_date=None):
 
 
 def recommended_hotel_areas(document, city):
+    areas,segments = [],[]
     if not document.get("itinerary_outdated"):
-        for entry in (document.get("itinerary") or {}).get("hotels", []):
+        itinerary = document.get("itinerary") or {}
+        for entry in itinerary.get("hotels", []):
             if entry.get("city") == city and entry.get("search_areas"):
-                return list(dict.fromkeys(entry["search_areas"]))[:3]
-    for candidate in document.get("candidates", [])[:1]:
-        for entry in (candidate.get("feasibility") or {}).get("hotels", []):
-            if entry.get("city") == city and entry.get("area"):
-                return list(dict.fromkeys(entry["area"]))[:3]
-    return []
+                areas = list(dict.fromkeys(entry["search_areas"]))[:3]
+                break
+        segments = [area["name"] for segment in itinerary.get("hotel_area_segments",[]) if segment.get("city") == city
+                    for area in segment.get("areas",[]) if area.get("name")]
+    if not areas:
+        for candidate in document.get("candidates", [])[:1]:
+            for entry in (candidate.get("feasibility") or {}).get("hotels", []):
+                if entry.get("city") == city and entry.get("area"):
+                    areas = list(dict.fromkeys(entry["area"]))[:3]
+                    break
+    return list(dict.fromkeys([*areas,*segments]))
 
 
 def minute(value):

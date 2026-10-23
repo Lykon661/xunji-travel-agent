@@ -492,8 +492,9 @@ def normalize_resources(payload, kind: str, context: dict) -> list[dict]:
                   "location":f"{row['longitude']},{row['latitude']}" if row.get("longitude") and row.get("latitude") else None,
                   "supplier_id":supplier_id,"seat_class":first(row,"seatClassName","seatClass"),
                   "legs":row.get("legs",[]),"departure_terminal":row.get("departureTerminal"),"arrival_terminal":row.get("arrivalTerminal"),
-                  "image_url":web_url(first(row,"mainPic","picUrl","imageUrl")),"rating":first(row,"score","rating"),
+                  "image_url":web_url(first(row,"mainPic","picUrl","imageUrl")),"rating":first(row,"score","rating","rate") if kind == "hotel" else first(row,"score","rating"),
                   "brand":first(row,"brandName","brand"),"star":row.get("star"),"bed_type":first(row,"bedType","bedTypeName"),
+                  "decoration_year":first(row,"decorationTime","decoration_time"),"nearby":first(row,"interestsPoi","interests_poi"),
                   "cancellation":first(row,"cancelPolicy","refundPolicy"),"breakfast":row.get("breakfast"),
                   "platform_hint":str(payload.get("systemMessage") or "")[:2000] if isinstance(payload,dict) else "",
                   "confirmed":False}
@@ -1136,6 +1137,32 @@ class Amap:
                 if resolved_city and resolved_city.rstrip("市") == city.rstrip("市"):
                     return {"name":resource["name"],"location":points[0]["location"],"address":resource["address"],"cityname":resolved_city,"match_basis":"地址地理编码与行政区核对，POI待确认"}
         return None
+
+    async def business_areas(self, trip_id, location):
+        from .hotel_planning import area_values
+        point = coordinates({"location":location})
+        if point is None:
+            return []
+        key = ("business_areas",trip_id,location)
+        cached = self.cache.get(key)
+        if cached is not None:
+            return copy.deepcopy(cached)
+        try:
+            payload = await self.call(trip_id,"maps_regeocode",{"location":location,"longitude":str(point[0]),"latitude":str(point[1])})
+            areas = {}
+            for row in walk_records(payload):
+                for field in ("businessAreas","business_area","business_areas","businessArea"):
+                    for area in area_values(row.get(field),point):
+                        item = {"name":area["name"]}
+                        if not area["estimated"]:
+                            item["location"] = f"{area['point'][0]},{area['point'][1]}"
+                        if item["name"] not in areas or "location" in item:
+                            areas[item["name"]] = item
+            result = list(areas.values())
+            self.cache[key] = copy.deepcopy(result)
+            return result
+        except Exception:
+            return []
 
     async def export_map(self, trip_id, title, lines):
         payload = await self.call(trip_id,"maps_schema_personal_map",{"orgName":title,"lineList":lines,"sceneType":1})

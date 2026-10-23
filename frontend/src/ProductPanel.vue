@@ -15,9 +15,30 @@ const latest = ref<{products: Product[]; status?: string; message: string; queri
 watch(() => props.updatedAt,value => {queryTimestamp.value = value},{immediate:true})
 const isHotel = computed(() => form.mode === 'hotel')
 const resolvedCity = computed(() => form.city.trim() || props.document.requirements.cities[0] || '')
+const hotelAreaSegments = computed(() => !props.document.itinerary_outdated ?
+  props.document.itinerary?.hotel_area_segments?.filter(segment => segment.city === resolvedCity.value) || [] : [])
 const recommendedAreas = computed(() => {
   const planned = !props.document.itinerary_outdated ? props.document.itinerary?.hotels.find(entry => entry.city === resolvedCity.value)?.search_areas : undefined
-  return [...new Set(planned?.length ? planned : props.document.candidates[0]?.feasibility?.hotels.find(entry => entry.city === resolvedCity.value)?.area || [])]
+  const previous = planned?.length ? planned : props.document.candidates[0]?.feasibility?.hotels.find(entry => entry.city === resolvedCity.value)?.area || []
+  return [...new Set([...previous,...hotelAreaSegments.value.flatMap(segment => segment.areas.map(area => area.name))])]
+})
+const routeAreaChoice = computed({
+  get() {
+    const segments = hotelAreaSegments.value
+    let index = segments.findIndex(segment => segment.check_in === form.check_in && segment.check_out === form.check_out && segment.areas.some(area => area.name === form.hotel_area))
+    if (index < 0) index = segments.findIndex(segment => segment.areas.some(area => area.name === form.hotel_area))
+    return index < 0 ? '' : `${index}:${form.hotel_area}`
+  },
+  set(value: string) {
+    if (!value) {
+      form.hotel_area = ''
+      const segments = hotelAreaSegments.value
+      if (segments.length) {form.check_in = segments[0].check_in;form.check_out = segments[segments.length-1].check_out}
+      return
+    }
+    const separator = value.indexOf(':'), segment = hotelAreaSegments.value[Number(value.slice(0,separator))]
+    if (segment) {form.hotel_area = value.slice(separator+1);form.check_in = segment.check_in;form.check_out = segment.check_out}
+  },
 })
 watch(resolvedCity,city => {
   const requirements = props.document.requirements
@@ -36,6 +57,30 @@ watch(resolvedCity,city => {
 const supportedProducts = computed(() => (props.document.products || []).filter(item => ['hotel','poi','marriott_hotel'].includes(item.search_mode)))
 const results = computed(() => showPrevious.value ? supportedProducts.value : latest.value?.products ||
   supportedProducts.value.filter(item => !props.document.product_search?.result_ids || props.document.product_search.result_ids.includes(item.id)))
+const sortOrder = ref('default')
+const sortedResults = computed(() => {
+  if (sortOrder.value === 'default') return results.value
+  const field = sortOrder.value === 'rating_desc' ? 'rating' : 'price', direction = sortOrder.value === 'price_asc' ? 1 : -1
+  return results.value.map((product,index) => ({product,index,value:field === 'rating' ? ratingValue(product.rating) : numericValue(product.price)})).sort((a,b) => {
+    if (a.value == null) return b.value == null ? a.index - b.index : 1
+    if (b.value == null) return -1
+    return direction * (a.value - b.value) || a.index - b.index
+  }).map(item => item.product)
+})
+function numericValue(value: string | number | null | undefined) {
+  if (value == null || typeof value === 'string' && !value.trim()) return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+function ratingValue(value: Product['rating']) {
+  const rating = numericValue(value)
+  return rating != null && rating > 0 ? rating : null
+}
+function hotelInfo(product: Product) {
+  const rating = ratingValue(product.rating)
+  return [rating == null ? '暂无评分' : `评分 ${rating.toFixed(1)}`,product.star,
+    product.decoration_year ? `${product.decoration_year}年装修` : '',product.nearby].filter(Boolean).join(' · ')
+}
 const searchRecord = computed(() => ['hotel','poi','marriott_hotel'].includes(props.document.product_search?.mode || '') ? props.document.product_search : undefined)
 const statusNames: Record<string,string> = {ok:'查询完成',empty:'没有返回候选',not_configured:'尚未配置',unrecognized:'返回字段待适配',error:'查询失败'}
 watch(() => props.document.requirements,req => {
@@ -119,7 +164,8 @@ function requery(product: Product) {
       <label v-if="isHotel">床型<select v-model="form.bed_type"><option value="">不限</option><option>大床房</option><option>双床房</option><option>多床房</option></select></label>
       <label v-if="form.mode === 'hotel'">酒店星级<input v-model="form.hotel_stars" placeholder="不限，或填写 4,5" pattern="[1-5](,[1-5])*"></label>
       <label v-if="isHotel">住宿位置<select v-model="form.hotel_location" @change="form.hotel_area = form.hotel_location === 'custom' ? document.requirements.hotel_areas?.[resolvedCity] || '' : ''"><option value="route">根据每日行程推荐区域</option><option value="custom">我指定区域或路段</option><option value="city">全市查询</option></select></label>
-      <label v-if="isHotel && form.hotel_location === 'route' && recommendedAreas.length">推荐住宿区域<select v-model="form.hotel_area"><option value="">查询全部推荐区域</option><option v-for="area in recommendedAreas" :key="area" :value="area">{{ area }}附近</option></select></label>
+      <label v-if="isHotel && form.hotel_location === 'route' && hotelAreaSegments.length">推荐住宿区域<select v-model="routeAreaChoice"><option value="">查询全部推荐区域</option><optgroup v-for="(segment,index) in hotelAreaSegments" :key="segment.check_in" :label="`第${segment.day_range.start}–${segment.day_range.end}天（${segment.check_in.slice(5).replace('-','/')}–${segment.check_out.slice(5).replace('-','/')}）`"><option v-for="area in segment.areas" :key="area.name" :value="`${index}:${area.name}`">{{ area.name }}{{ area.source === 'poi_fallback' ? '附近' : '' }}</option></optgroup></select></label>
+      <label v-else-if="isHotel && form.hotel_location === 'route' && recommendedAreas.length">推荐住宿区域<select v-model="form.hotel_area"><option value="">查询全部推荐区域</option><option v-for="area in recommendedAreas" :key="area" :value="area">{{ area }}附近</option></select></label>
       <label v-if="isHotel && form.hotel_location === 'custom'">区域、路段或地标<input v-model="form.hotel_area" maxlength="150" placeholder="例如：湖滨路、武林广场附近" required></label>
       <label v-if="isHotel">最低价（元/间/晚）<input v-model.number="form.min_price" type="number" min="0" max="10000000" step="1" placeholder="不限"></label>
       <label v-if="isHotel">最高价（元/间/晚）<input v-model.number="form.max_price" type="number" min="0" max="10000000" step="1" placeholder="不限"></label>
@@ -136,9 +182,11 @@ function requery(product: Product) {
     <p v-if="!error && !feedback && searchRecord" class="pending-note" role="status">{{ statusNames[searchRecord.status || 'ok'] || '查询记录' }}：{{ searchRecord.message || '已保留上次查询结果' }}<span v-if="searchRecord.code">（{{ searchRecord.code }}）</span><span v-if="searchRecord.queried_at"> · {{ new Date(searchRecord.queried_at).toLocaleString() }}</span></p>
     <label v-if="supportedProducts.length" class="checkbox-label"><input v-model="showPrevious" type="checkbox">查看此前酒店、门票查询与收藏</label>
     <p v-if="latest && !results.length && !busy && !error" class="pending-note">本次没有可显示的候选，请调整城市、名称或筛选条件后重新查询。</p>
-    <div class="product-list"><article v-for="product in results" :key="product.id" class="product-card">
+    <label v-if="results.length > 1" class="subtle">排序<select v-model="sortOrder"><option value="default">默认顺序</option><option value="price_asc">价格从低到高</option><option value="price_desc">价格从高到低</option><option value="rating_desc">评分从高到低</option></select></label>
+    <div class="product-list"><article v-for="product in sortedResults" :key="product.id" class="product-card">
       <img v-if="safeLink(product.image_url)" :src="safeLink(product.image_url)" :alt="product.name" loading="lazy" referrerpolicy="no-referrer">
       <div><h4>{{ product.name }}</h4><p>{{ product.city }} · {{ product.price != null ? `${product.currency} ${product.price}${product.price_basis === 'room_night' || product.price_basis === 'unknown' && product.reference_unit === 'room_night' ? ' / 每间每晚（参考）' : '（参考展示价）'}` : '接口未提供价格，查看飞猪实时价' }}</p>
+        <p v-if="['hotel','marriott_hotel'].includes(product.search_mode) || product.kind === 'hotel'" class="subtle">{{ hotelInfo(product) }}</p>
         <p v-if="product.context?.check_in" class="subtle">{{ product.context.check_in }} 至 {{ product.context.check_out }}</p>
         <p v-if="product.context?.search_area" class="subtle">住宿搜索区域：{{ product.context.search_area }}附近</p>
         <p v-if="product.ticket_name || product.price_date" class="subtle">{{ product.ticket_name || '票种待确认' }} · 报价日期 {{ product.price_date || '未提供' }}</p>

@@ -40,6 +40,31 @@ class PoiCoordinates(unittest.IsolatedAsyncioTestCase):
 
 
 class ProviderPrices(unittest.TestCase):
+    def test_hotel_rate_decoration_and_nearby_are_mapped(self):
+        row = {"shId":"76547024","name":"莱卡租房(广州化龙考场店)","price":"¥133","rate":"4.00",
+               "star":"经济型","decorationTime":"2023","interestsPoi":"近草堂南社"}
+        option = normalize_resources({"data":{"itemList":[row]}},"hotel",{})[0]
+        self.assertEqual(option["rating"],"4.00")
+        self.assertEqual(option["decoration_year"],"2023")
+        self.assertEqual(option["nearby"],"近草堂南社")
+
+    def test_hotel_score_and_rating_take_priority_over_rate(self):
+        for fields,expected in (({"score":"4.80","rating":"4.50"},"4.80"),({"rating":"4.50"},"4.50")):
+            with self.subTest(fields=fields):
+                option = normalize_resources({"name":"合成酒店","rate":"4.00",**fields},"hotel",{})[0]
+                self.assertEqual(option["rating"],expected)
+
+    def test_non_hotel_rate_is_not_used_as_rating(self):
+        for kind in ("product","flight","train"):
+            with self.subTest(kind=kind):
+                row = {"name":"合成景点","flightNo":"MU2542","trainNo":"G11","rate":"4.00"}
+                option = normalize_resources(row,kind,{})[0]
+                self.assertIsNone(option["rating"])
+                self.assertIsNone(option["decoration_year"])
+                self.assertIsNone(option["nearby"])
+                self.assertEqual(normalize_resources({**row,"rating":"4.50"},kind,{})[0]["rating"],"4.50")
+                self.assertEqual(normalize_resources({**row,"score":"4.80","rating":"4.50"},kind,{})[0]["rating"],"4.80")
+
     def test_official_train_wrapper_keeps_price_times_and_station_names_together(self):
         payload = {"status":0,"data":{"itemList":[{"adultPrice":"¥553","jumpUrl":"https://www.fliggy.com/booking",
             "journeys":[{"segments":[{"marketingTransportNo":"G11","depDateTime":"2026-10-13 08:00:00",

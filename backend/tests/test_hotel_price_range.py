@@ -232,6 +232,24 @@ class HotelPriceRange(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.planner.flyai.search.call_args.args[3]["poi-name"],"湖滨路")
         self.assertEqual(self.doc["product_search"]["hotel_area"],"湖滨路")
 
+    async def test_segment_areas_keep_all_area_queries_bounded_and_allow_explicit_selection(self):
+        original = ["西湖","武林广场","湖滨路"]
+        segments = [f"段地段{index}" for index in range(6)]
+        self.doc["itinerary"] = {"hotels":[{"city":"杭州","search_areas":original,"context":{}}],
+            "hotel_area_segments":[{"city":"杭州","areas":[{"name":name} for name in segments]}]}
+        for selected in ("",segments[-1]):
+            for minimum in (None,100):
+                with self.subTest(selected=selected,minimum=minimum):
+                    areas = [selected] if selected else original
+                    prices = (200,) if minimum is None else (200,180,160,140,120)
+                    self.planner.flyai.search.reset_mock()
+                    self.batches(*[[hotel(f"{area}-{price}",price)] for area in areas for price in prices])
+                    await self.query(hotel_location="route",hotel_area=selected,min_price=minimum,max_price=220)
+                    calls = self.planner.flyai.search.await_args_list
+                    self.assertEqual(len(calls),len(areas)*len(prices))
+                    self.assertEqual([call.args[3]["poi-name"] for call in calls],
+                                     [area for area in areas for _ in prices])
+
     async def test_unknown_recommended_area_does_not_query(self):
         with self.assertRaises(HTTPException):
             await self.query(hotel_location="route",hotel_area="过期区域")

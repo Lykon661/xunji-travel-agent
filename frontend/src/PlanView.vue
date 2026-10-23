@@ -1,11 +1,13 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { safeLink, safeMapLink } from './api'
 import type { Itinerary, Movement } from './types'
 
-withDefaults(defineProps<{itinerary: Itinerary; interactive?: boolean; disabled?: boolean; editableDates?: boolean;
+const props = withDefaults(defineProps<{itinerary: Itinerary; interactive?: boolean; disabled?: boolean; editableDates?: boolean;
   locks?: string[]; requiredIds?: string[]; selectable?: boolean; selectedIds?: string[]; allowTaxi?: boolean}>(),
   {interactive:false,disabled:false,editableDates:false,locks:() => [],requiredIds:() => [],selectable:false,selectedIds:() => [],allowTaxi:false})
 const emit = defineEmits<{lock:[id:string]; source:[id:string]; ticket:[id:string]; editDate:[date:string]; select:[id:string]; taxi:[date:string,id:string]}>()
+const hotelAreaCities = computed(() => [...new Set((props.itinerary.hotel_area_segments || []).map(segment => segment.city))])
 function money(value: number | null | undefined) {return value == null ? '未提供价格' : new Intl.NumberFormat('zh-CN',{style:'currency',currency:'CNY'}).format(value)}
 function previousVisit(day: Itinerary['days'][number], id: string) {
   const visits = day.activities.filter(activity => activity.kind === 'visit')
@@ -31,6 +33,16 @@ function evidenceKind(activity: Itinerary['days'][number]['activities'][number])
 <template>
   <p v-if="itinerary.recovery_note" class="pending-note">{{ itinerary.recovery_note }}</p>
   <p v-for="note in itinerary.constraint_notes || []" :key="note" class="subtle">{{ note }}</p>
+  <section v-if="itinerary.hotel_area_segments?.length" class="resource-block">
+    <h3>住宿地段推荐</h3>
+    <div v-for="city in hotelAreaCities" :key="city">
+      <h4>{{ city }}</h4>
+      <div v-for="segment in itinerary.hotel_area_segments.filter(item => item.city === city)" :key="segment.check_in">
+        <p>第 {{ segment.day_range.start }}–{{ segment.day_range.end }} 天 · {{ segment.nights }} 晚 · 推荐住在：{{ segment.areas.map(area => area.name + (area.source === 'poi_fallback' ? '附近' : '')).join(' / ') || '地段待确认' }}</p>
+        <p class="subtle">{{ segment.reason }}<span v-for="area in segment.areas" :key="area.name"> · {{ area.name }}{{ area.source === 'poi_fallback' ? '附近' : '' }}：{{ area.reason }}</span></p>
+      </div>
+    </div>
+  </section>
   <section v-for="(day,index) in itinerary.days" :key="day.date" class="day-section">
     <header class="day-heading">
       <div class="day-number"><small>DAY</small>{{ index + 1 }}</div>

@@ -9,6 +9,7 @@ from ..routing import coordinates, distance
 from ..resource_planning import chosen_hotel, comparison, same_resource, transport_issues
 from ..reviewing import quote_expiry
 from ..constraints import station_buffer
+from ..hotel_planning import build_hotel_area_segments
 
 
 class ResourceNodes:
@@ -331,6 +332,11 @@ class ResourceNodes:
                                "comparison":[comparison(option,req) for option in options],"budget_basis":"扣除已知城际费用与餐饮估算后分配；未知门票及儿童价尚未扣除"})
             warnings.extend(city+"："+error for error in errors)
         itinerary = copy.deepcopy(state["itinerary"]); itinerary["hotels"] = result
+        try:
+            itinerary["hotel_area_segments"] = await build_hotel_area_segments(state,getattr(self,"amap",None))
+        except Exception as exc:
+            itinerary.pop("hotel_area_segments",None)
+            warnings.append("住宿地段推荐暂未生成："+str(exc))
         return {"itinerary":itinerary,"warnings":list(dict.fromkeys(warnings))}
 
     async def tickets(self,state):
