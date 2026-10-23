@@ -340,7 +340,7 @@ class Crawler:
             folder = settings.data / "crawler" / uuid4().hex
             folder.mkdir(parents=True)
             request = folder / "request.json"
-            request.write_text(dump({"keywords":keywords or [], "url":url, "output":str(folder)}), encoding="utf-8")
+            request.write_text(dump({"city":city, "keywords":keywords or [], "url":url, "output":str(folder)}), encoding="utf-8")
             try:
                 self.collection_task = asyncio.create_task(process([str(settings.crawler_python), str(ROOT / "crawler_bridge.py"),
                         str(settings.crawler_dir), str(request)], cwd=settings.crawler_dir, timeout=settings.crawler_timeout))
@@ -387,7 +387,7 @@ class Crawler:
                        "collected_at":now(), "likes":count(row.get("liked_count")), "favorites":count(row.get("collected_count")),
                        "extraction":None, "error":None}
                 docs.append(self.store.add_source(trip_id,doc))
-                if len(docs) >= 3:
+                if len(docs) >= 6:
                     break
             self.store.query(trip_id,"xiaohongshu",{"city":city,"keywords":keywords,"url":url}, {"count":len(docs),"status":"ok"})
             if not url:

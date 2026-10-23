@@ -229,6 +229,8 @@ async def search_guides(trip_id: str, body: GuideSearchInput):
         if not city and not keywords:
             raise HTTPException(422, "请填写目的地城市或搜索关键词")
         query = " ".join(item for item in (city, keywords or "旅行攻略") if item)
+        if "攻略" not in query:
+            query += " 攻略"
         try:
             sources = await app.state.planner.crawler.collect(trip_id, city, [query])
         except ToolError as exc:

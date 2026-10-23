@@ -1,6 +1,7 @@
 """Run inside MediaCrawler's isolated environment with the installer-managed lite profile."""
 import asyncio
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -12,6 +13,30 @@ class CollectionProtected(RuntimeError):
 
 class LoginRequired(RuntimeError):
     pass
+
+
+def is_travel_guide_item(item: dict, city: str = "") -> bool:
+    """Require guide terms before a detail request; city alone is insufficient."""
+    if item.get("model_type") in {"rec_query", "hot_query"}:
+        return False
+    card = item.get("note_card")
+    if not isinstance(card, dict) or card.get("type") == "video":
+        return False
+    title = card.get("display_title")
+    if not isinstance(title, str) or not title.strip():
+        return False
+    return bool(re.search(
+        r"攻略|路线|行程|city\s*walk|(?<![a-z])day(?![a-z])|自由行|一日游|"
+        r"[0-9零一二两三四五六七八九十百几]+\s*(?:天|日)|几天几晚|"
+        r"景点|必去|必打卡|打卡|好去处|游玩|旅游|旅行|玩法|逛吃",
+        title, re.IGNORECASE))
+
+
+def has_guide_content(note: dict) -> bool:
+    """Keep substantial text or image guides; topic tags do not count as text."""
+    text = re.sub(r"#[^#]*#", "", note.get("desc") or "")
+    text = re.sub(r"\s+", "", text)
+    return len(text) >= 80 or len(note.get("image_list") or []) >= 3
 
 
 async def main():
@@ -32,7 +57,7 @@ async def main():
     config.MAX_CONCURRENCY_NUM = 1
     config.SAVE_DATA_OPTION = "jsonl"
     config.SAVE_DATA_PATH = request["output"]
-    config.CRAWLER_MAX_NOTES_COUNT = 3
+    config.CRAWLER_MAX_NOTES_COUNT = 6
     config.PLATFORM = "xhs"
     config.LOGIN_TYPE = "qrcode"
     config.KEYWORDS = next(iter(request["keywords"]), "")
@@ -57,10 +82,10 @@ async def main():
         async with request_lock:
             if protection_file.exists():
                 raise CollectionProtected("访问异常后已停止后续请求")
-            if requests_sent >= 5:
+            if requests_sent >= 8:
                 raise RuntimeError("本轮接口请求上限已到，停止采集")
             if last_finished is not None:
-                await asyncio.sleep(max(0, 6 - (time.monotonic() - last_finished)))
+                await asyncio.sleep(max(0, 1.5 - (time.monotonic() - last_finished)))
             requests_sent += 1
             try:
                 response = await original_send(client, http_request, **kwargs)
@@ -104,14 +129,14 @@ async def main():
         seen = set()
         for item in response.get("items", []):
             note_id = item.get("id")
-            if not note_id or note_id in seen or item.get("model_type") in {"rec_query", "hot_query"}:
+            if not note_id or note_id in seen or not is_travel_guide_item(item, request.get("city", "")):
                 continue
-            if len(seen) >= 3:
+            if len(seen) >= 6:
                 break
             seen.add(note_id)
             # Fetch details once, sequentially, without the upstream retry or HTML fallback.
             note = await crawler.xhs_client.get_note_by_id(note_id, item.get("xsec_source", ""), item.get("xsec_token", ""))
-            if note:
+            if note and has_guide_content(note):
                 note.update(xsec_source=item.get("xsec_source", ""), xsec_token=item.get("xsec_token", ""))
                 await xhs_store.update_xhs_note(note)
 
