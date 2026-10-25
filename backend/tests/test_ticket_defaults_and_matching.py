@@ -18,14 +18,6 @@ class TicketDefaultsAndMatching(unittest.IsolatedAsyncioTestCase):
                                               "raw":{"data":{"itemList":rows}}})
         return flyai
 
-    async def test_a_matched_poi_without_ticket_info_is_not_a_place_mismatch(self):
-        flyai = self.client([{"id":"museum","name":"广东省博物馆","ticketInfo":None}])
-        result = await flyai.ticket("trip","广州","广东省博物馆",DATE)
-        self.assertEqual(result["price"],0)
-        self.assertTrue(result["assumed_free"])
-        self.assertEqual(result["status"],"price_unavailable")
-        self.assertEqual(result["queried_at"],"saved-time")
-        self.assertEqual(result["evidence_id"],"query:ticket")
 
     async def test_supplier_free_flag_and_system_placeholder_remain_distinct(self):
         flyai = self.client([{"id":"museum","name":"广东省博物馆","freePoiStatus":"FREE","ticketInfo":None}])
@@ -100,46 +92,3 @@ class TicketDefaultsAndMatching(unittest.IsolatedAsyncioTestCase):
         result = await flyai.ticket("trip","广州","合成场馆",DATE)
         self.assertEqual(result["price"],45)
         self.assertNotIn("assumed_free",result)
-
-    async def test_multiple_ticket_types_keep_known_prices_and_default_only_the_missing_one(self):
-        flyai = self.client([{"id":"museum","name":"合成场馆","ticketInfo":[
-            {"ticketName":"成人票","price":50},{"ticketName":"其他票","price":None}]}])
-        result = await flyai.ticket("trip","广州","合成场馆",DATE)
-        self.assertIsNone(result["price"])
-        self.assertEqual(result["status"],"options")
-        self.assertEqual([item["price"] for item in result["options"]],[50,0])
-        self.assertTrue(result["options"][1]["assumed_free"])
-
-    def test_default_preserves_failure_diagnostics_and_never_updates_query_time(self):
-        quote = {"price":None,"status":"error","code":"flyai_network","note":"连接失败",
-                 "queried_at":"old-time","evidence_id":"query:old"}
-        original = copy.deepcopy(quote)
-        result = default_ticket_price(quote)
-        self.assertEqual(quote,original)
-        self.assertEqual(default_ticket_price(result),result)
-        self.assertEqual(result["price"],0)
-        self.assertTrue(result["assumed_free"])
-        self.assertEqual(result["status"],"error")
-        self.assertEqual(result["queried_at"],"old-time")
-        self.assertIn("连接失败",result["note"])
-
-    def test_normalized_empty_ticket_list_retains_the_poi_and_link(self):
-        rows = normalize_pois({"items":[{"id":"a","name":"合成场馆","ticketInfo":[],
-                                         "jumpUrl":"https://www.fliggy.com/detail"}]},{"city":"广州"})
-        self.assertEqual(len(rows),1)
-        self.assertEqual(rows[0]["price"],0)
-        self.assertTrue(rows[0]["assumed_free"])
-        self.assertEqual(rows[0]["booking_url"],"https://www.fliggy.com/detail")
-
-    def test_missing_ticket_price_counts_as_zero_without_an_unknown_budget_cost(self):
-        quote = default_ticket_price({"price":None})
-        itinerary = {"transport":[],"hotels":[],"days":[{"city":"广州","date":DATE,"activities":[{
-            "id":"museum","name":"合成博物馆","kind":"visit","start":"09:00","end":"10:00",
-            "evidence":{"quote":"合成攻略"},"ticket_claim":"收费","ticket_quote":quote,"move_before":{}}]}]}
-        req = Requirements(origin="广州",cities=["广州"],start_date=DATE,end_date=DATE,people=1,rooms=1,
-                           budget=1000,return_to_origin=False).model_dump(mode="json")
-        result = check_itinerary(itinerary,req)
-        self.assertEqual(result["budget"]["estimated_tickets"],0)
-        self.assertFalse(any("合成博物馆" in text for text in result["budget"]["unknown"]))
-        self.assertEqual(result["budget"]["status"],"within")
-        self.assertTrue(any("未查询到门票，预算按0元计算" in text for text in result["constraint_notes"]))

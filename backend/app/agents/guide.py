@@ -58,7 +58,7 @@ class GuideAgent(AgentRuntime):
             "source_versions":state.get("sources_snapshot",[])})
         self.assert_current(state)
         cached = self.store.agent_result(state["trip_id"],key)
-        if cached:
+        if isinstance(cached,dict):
             try:
                 result = GuideBrief.model_validate(cached["result"])
                 if not set(result.required_ids+result.excluded_ids) <= set(state["stops"]) or set(result.required_ids) & set(result.excluded_ids):

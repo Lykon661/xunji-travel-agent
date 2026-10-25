@@ -17,7 +17,7 @@ from tests.test_system_assumptions import assumption
 
 class AssumptionChange(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.fixture = graph_cases.CoordinatorGraph("test_click_resumes_without_model_and_rebuilds_only_affected_day")
+        self.fixture = graph_cases.CoordinatorGraph()
         self.fixture.addCleanup = self.addCleanup
         self.fixture.setUp()
         self.fixture.initial["candidates"][0]["title"] = "完整候选"

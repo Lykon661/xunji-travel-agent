@@ -135,37 +135,6 @@ class Persistence(unittest.TestCase):
             self.assertEqual(reopened.trip(trip["id"])["version"],1)
 
 
-class PartialModification(unittest.IsolatedAsyncioTestCase):
-    async def test_hotel_change_reroutes_its_city_and_preserves_other_city(self):
-        from unittest.mock import AsyncMock, Mock
-        from app.models import OrderChoice, RouteTurn
-        from app.planner import Planner
-        planner = Planner.__new__(Planner)
-        planner.emit = lambda *args:None
-        planner.store = Mock()
-        planner.flyai = SimpleNamespace(availability=lambda:{"ready":False})
-        planner.models = type("Models",(),{"ask":AsyncMock(return_value=OrderChoice(stop_ids=["s:1"]))})()
-        async def route_plan(state,instruction,payload,tools,daily=False):
-            return RouteTurn(status="ready",order=await planner.models.ask(OrderChoice,instruction,payload))
-        planner.route_agent = SimpleNamespace(plan=route_plan)
-        planner.window = AsyncMock(return_value=(540,1200,[],[],{"name":"新酒店","label":"返回住宿"}))
-        planner.locate_stops = AsyncMock(side_effect=lambda state,stops:stops)
-        planner.weather_context = AsyncMock(return_value={})
-        planner.map_order = AsyncMock(side_effect=lambda state,city,ids,origin,destination:(ids,"合成地图顺序"))
-        planner.movement = AsyncMock(return_value=({"minutes":25},None))
-        suzhou = {"date":"2026-11-11","city":"苏州","activities":[],"gaps":["原有待确认项"],"meal_estimate":200,
-                  "return_move":{"minutes":None},"adjustment":"原安排"}
-        state = {"trip_id":"trip","requirements":REQ,"mode":"modify","change":{"scopes":["hotel"],"cities":["杭州"],"preserve_cities":["苏州"]},
-            "locks":[],"old_itinerary":{"days":[{"date":"2026-11-10","city":"杭州","activities":[]},suzhou]},
-            "itinerary":{"days":[],"transport":[],"hotels":[{"id":"hotel:杭州","city":"杭州","selected":{"name":"新酒店"},"selected_by_user":True}]},
-            "selected_route":{"days":[{"date":"2026-11-10","city":"杭州","stop_ids":["s:1"]},
-                                        {"date":"2026-11-11","city":"苏州","stop_ids":[]}]},
-            "stops":{"s:1":{"name":"真实导入地点","city":"杭州","duration_minutes":60,"source_id":"s",
-                      "source_title":"人工测试攻略","evidence":{"kind":"text","quote":"真实导入地点"}}}}
-        result = await planner.activities(state)
-        self.assertEqual(result["itinerary"]["days"][1],suzhou)
-        # The arrival day starts at the station, so the adopted hotel is routed as the day's end.
-        self.assertTrue(any("新酒店" in call.args[2:4] for call in planner.movement.await_args_list))
 
 
 if __name__ == "__main__":

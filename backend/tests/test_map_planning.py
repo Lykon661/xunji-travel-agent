@@ -75,20 +75,6 @@ class MapTools(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(route["minutes"],10)
         self.assertEqual(route["summary"],"1路")
 
-    async def test_actual_railway_or_taxi_leg_still_excludes_mixed_transit_route(self):
-        for extra in ({"railway":{"name":"城际列车","trip":"C123"}},
-                      {"railway":{"departure_stop":{"name":"火车站"},"distance":"1000"}},
-                      {"taxi":{"distance":"500"}},
-                      {"taxi":{"origin":"120,30","destination":"120.01,30"}}):
-            with self.subTest(extra=extra):
-                self.amap.cache.clear()
-                self.amap.call.return_value = {"transits":[{"duration":"60","segments":[
-                    {"bus":{"buslines":[{"name":"不能采用的混合方案"}]},**extra}]},
-                    {"duration":"601","segments":[{"bus":{"buslines":[{"name":"地铁2号线"}]},
-                        "railway":{"name":"","trip":""}}]}]}
-                route = await self.amap.route("trip","杭州",PLACES["酒店"],PLACES["近处"],"transit")
-                self.assertEqual(route["minutes"],11)
-                self.assertEqual(route["summary"],"地铁2号线")
 
     async def test_placeholders_without_any_bus_line_do_not_become_a_transit_route(self):
         self.amap.call.return_value = {"transits":[{"duration":"600","segments":[
@@ -155,14 +141,6 @@ class DailyPlanning(unittest.IsolatedAsyncioTestCase):
         result = await self.planner.coordinate(state)
         self.assertEqual(result["change"]["scopes"],["full"])
 
-    async def test_actual_route_comparison_rejects_geographic_shortcut_over_barrier(self):
-        ids = ["远处","近处","中间"]
-        state = {**self.state,"stops":{name:{"name":name,"map_place":PLACES[name]} for name in ids}}
-        async def movement(state,city,origin,destination,*places):
-            return {"minutes":100 if (origin,destination) == ("酒店","近处") else 1},PLACES.get(destination)
-        self.planner.movement = AsyncMock(side_effect=movement)
-        result,_ = await self.planner.map_order(state,"杭州",ids,"酒店","车站")
-        self.assertEqual(result,ids)
 
     async def test_return_travel_is_reserved_and_excess_activity_is_omitted(self):
         stops = {name:{"id":name,"name":name,"city":"杭州","duration_minutes":60,

@@ -138,8 +138,10 @@ def build_spatial_plan(state: dict, stops: dict[str, dict], days=None, durations
     excluded = set(constraints.get("excluded",[])) | set(req.get("excluded_stop_ids",[]))
     locks,old = set(state.get("locks",[])),state.get("old_itinerary") or {}
     required |= {i for i,s in state.get("stops",stops).items() if i in locks and not is_dining(s)}
+    preferred_required = set(required)
     all_stops = {**state.get("stops",{}),**stops}
-    required |= protected_stops({**state,"stops":all_stops}) & stops.keys()
+    required |= {identity for identity in protected_stops({**state,"stops":all_stops}) & stops.keys()
+                 if not is_dining(all_stops[identity])}
     allowed_dates = fixed_dates({**state,"stops":all_stops})
     fixed,groups,pool,issues = {},{},{},[]
     plan = {"version":1,"status":"partial","policy":{"max_deviation":0.25,"max_addition":0.25,"small_trip_max":4},
@@ -149,7 +151,8 @@ def build_spatial_plan(state: dict, stops: dict[str, dict], days=None, durations
         if is_dining(stop) or stop.get("city") not in cities or represented_ids([stop]) & excluded:
             continue
         refs = represented_ids([stop]) | {i}
-        inherited_dates = [values for identity,values in allowed_dates.items() if identity in refs]
+        inherited_dates = [values for identity,values in allowed_dates.items() if identity in refs
+                           and (identity == i or identity not in stops or identity not in locks)]
         if inherited_dates:
             allowed_dates[i] = set().union(*inherited_dates)
         locked = i in locks or bool((refs & locks)-stops.keys())
@@ -174,7 +177,7 @@ def build_spatial_plan(state: dict, stops: dict[str, dict], days=None, durations
             fixed[i] = day
         groups.setdefault(canonical_key(stop),[]).append((i,bool(day or locked),i in required or bool((refs & required)-stops.keys())))
     for entries in groups.values():
-        entries.sort(key=lambda entry:(not entry[1],not entry[2],entry[0]))
+        entries.sort(key=lambda entry:(not entry[1],entry[0] not in preferred_required,not entry[2],entry[0]))
         protected = [i for i,p,_ in entries if p]
         keep = protected or [entries[0][0]]
         if len(protected) > 1 and not all(i in fixed and repeat_allowed(stops[i],{"date":fixed[i]},"visit",req) for i in protected):

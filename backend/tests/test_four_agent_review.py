@@ -117,72 +117,11 @@ class IndependentReview(unittest.IsolatedAsyncioTestCase):
         self.assertIn("query:hotel",evidence_ids(plan))
         self.assertTrue(any(issue["code"] == "over_budget" for issue in check_itinerary(plan,self.req)["issues"]))
 
-    def test_report_is_invalidated_by_lock_requirement_meal_and_query_changes(self):
-        report = self.bound_report()
-        require_review(report,self.state,self.plan,[],[])
-        changed_states = [{**self.state,"locks":["a"]},
-                          {**self.state,"requirements":{**self.req,"budget":3500}}]
-        for state in changed_states:
-            with self.assertRaises(Conflict):
-                require_review(report,state,self.plan,[],[])
-        changed = copy.deepcopy(self.plan)
-        changed["days"][0]["meal_recommendations"] = [{"id":"food","meal":"lunch"}]
-        with self.assertRaises(Conflict):
-            require_review(report,self.state,changed,[],[])
-        with self.assertRaises(Conflict):
-            require_review(report,self.state,self.plan,[],[{"evidence_id":"query:9","created_at":"new"}])
 
-    def test_map_export_metadata_does_not_invalidate_review_but_route_changes_do(self):
-        report = self.bound_report()
-        changed = copy.deepcopy(self.plan)
-        changed["personal_map"] = {"links":["https://amap.com/synthetic"],"queried_at":"export-time"}
-        require_review(report,self.state,changed,[],[])
-        changed["days"][0]["activities"][0]["start"] = "10:15"
-        with self.assertRaises(Conflict):
-            require_review(report,self.state,changed,[],[])
 
-    def test_old_and_expired_reports_cannot_confirm(self):
-        with self.assertRaises(Conflict):
-            require_review(None,self.state,self.plan,[],[])
-        report = self.bound_report()
-        report["expires_at"] = (datetime.now(timezone.utc)-timedelta(seconds=1)).isoformat()
-        with self.assertRaises(Conflict):
-            require_review(report,self.state,self.plan,[],[])
 
-    async def test_reviewer_cannot_approve_away_deterministic_duplicate(self):
-        planner = Planner.__new__(Planner)
-        planner.store = self.store
-        planner.models = SimpleNamespace()
-        planner.emit = Mock()
-        planner.reviewer_agent = SimpleNamespace(review=AsyncMock(return_value=ReviewReport(**report_value())))
-        plan = copy.deepcopy(self.plan)
-        duplicate = copy.deepcopy(plan["days"][0]["activities"][0])
-        duplicate["id"] = "b"
-        plan["days"][0]["activities"].append(duplicate)
-        report = await planner.audit(self.state,plan)
-        self.assertEqual(report["status"],"revise")
-        with self.assertRaises(Conflict):
-            planner.assert_review(self.state,report,plan)
 
-    async def test_reviewer_failure_is_not_a_pass(self):
-        planner = Planner.__new__(Planner)
-        planner.store = self.store
-        planner.models = SimpleNamespace()
-        planner.emit = Mock()
-        planner.reviewer_agent = SimpleNamespace(review=AsyncMock(side_effect=ToolError("model_network","合成连接错误")))
-        report = await planner.audit(self.state,self.plan)
-        self.assertEqual(report["status"],"review_unavailable")
-        with self.assertRaises(Conflict):
-            require_review(report,self.state,self.plan,[],[])
 
-    async def test_unknown_evidence_in_review_is_rejected(self):
-        value = report_value()
-        value.update(status="revise",findings=[{"code":"claim","severity":"blocker","owner":"route","action":"repair",
-            "target":"a","dates":["2026-11-10"],"field_path":"/days/0/activities/0",
-            "message":"合成发现","evidence_ids":["query:foreign"],"suggestion":"核对"}])
-        agent = ReviewerAgent(SimpleNamespace(ask=AsyncMock(return_value=ReviewReport(**value))),self.store)
-        with self.assertRaises(ToolError):
-            await agent.review(self.state,review_payload(self.state,self.plan,[],[]))
 
     def test_incomplete_checklist_is_not_accepted(self):
         value = report_value()

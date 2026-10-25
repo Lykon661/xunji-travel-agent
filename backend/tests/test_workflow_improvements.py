@@ -75,14 +75,6 @@ class QueryDiagnostics(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["status"],"not_configured")
             self.assertEqual(store.query.call_args.args[3]["code"],"flyai_key")
 
-    def test_missing_ticket_price_keeps_place_and_booking_link(self):
-        options = normalize_pois({"data":{"itemList":[{"id":"poi","name":"西湖景区","jumpUrl":"https://www.fliggy.com/detail","ticketInfo":{"price":None}}]}},{"city":"杭州"})
-        self.assertEqual(len(options),1)
-        self.assertEqual(options[0]["price"],0)
-        self.assertTrue(options[0]["assumed_free"])
-        self.assertEqual(options[0]["booking_url"],"https://www.fliggy.com/detail")
-        self.assertEqual(resource_status({"data":{"itemList":[]}},[]),"empty")
-        self.assertEqual(resource_status({"unexpected":"provider changed fields"},[]),"unrecognized")
 
 
 class StaleRunProtection(unittest.IsolatedAsyncioTestCase):

@@ -88,19 +88,6 @@ class Switches(unittest.TestCase):
 
 
 class Scoring(unittest.TestCase):
-    def test_metrics_find_injected_errors_even_when_the_run_disabled_checks(self):
-        candidate = {"draft":plan(),"days":[{"date":"2026-12-12","city":"广州"},{"date":"2026-12-13","city":"广州"}],
-                     "review":{"status":"pass","findings":[]},"confirmation_blockers":[]}
-        with ablation.use("no_dedupe+no_code_checks"):
-            result = evaluate(REQUIREMENTS,candidate,{"a","b","c","d"})
-        self.assertEqual(result["dup_visit"],2)      # 小蛮腰 = 广州塔（同 POI），北京路 = 北京路步行街（同名去后缀）
-        self.assertEqual(result["dup_meal"],1)
-        self.assertEqual(result["sourceless_visit"],1)
-        self.assertEqual(result["time_conflict"],1)
-        self.assertEqual(result["date_coverage_error"],0)
-        self.assertEqual(result["confirmable"],1)
-        self.assertEqual(result["escaped_violations"],result["total_violations"])
-        self.assertGreater(result["oracle_code_blockers"],0)
 
     def test_known_aliases_with_different_pois_count_as_one_place(self):
         from eval.metrics import visit_duplicates

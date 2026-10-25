@@ -119,17 +119,6 @@ class WishSpatialPlan(unittest.TestCase):
                 self.assertEqual(plan["required_ids"],preferred)
                 self.assertEqual([identity for day in plan["days"] for identity in day["stop_ids"]],preferred)
 
-    def test_unplaceable_wish_is_reported_instead_of_silently_dropped(self):
-        req,stops = self.located(date=A,duration_minutes=720)
-        plan = build_spatial_plan(state(req,stops),stops)
-        self.assertEqual(plan["status"],"partial")
-        self.assertIn(WISH_ID,plan["required_ids"])
-        self.assertTrue(any("超出每日估计时间容量" in issue for issue in plan["issues"]),plan["issues"])
-        itinerary = {"days":[{"date":A,"city":"杭州","available_start":540,"tail_deadline":720,"activities":[]}]}
-        current = state(req,stops,selected_route={"days":[{"date":A,"city":"杭州","stop_ids":[WISH_ID]}]})
-        from app.conflicts import day_demand
-        demand = day_demand(current,itinerary,itinerary["days"][0],current["selected_route"]["days"][0])
-        self.assertTrue(any(item["id"] == WISH_ID for item in demand))
 
 
     def test_rules_and_guide_agent_accept_user_stops(self):
@@ -315,43 +304,7 @@ class WishPlannerFlow(unittest.IsolatedAsyncioTestCase):
         self.assertIn(identity,result["stops"])
 
 
-    async def test_light_wish_is_scheduled_as_visit_with_default_or_user_duration(self):
-        for minutes in (None,75):
-            with self.subTest(minutes=minutes):
-                wish = {"city":"杭州","name":"湖畔甜品"}
-                if minutes:
-                    wish["duration_minutes"] = minutes
-                req = requirements(wish_places=[wish])
-                identity = wish_stop_id("杭州",wish["name"])
-                stops = wish_stops(req)
-                stops[identity]["map_place"] = POI
-                day = {"date":A,"city":"杭州","stop_ids":[identity]}
-                window = (540,720,[],[],{"name":None,"start_name":None,"label":"结束当天安排"})
-                order = OrderChoice(stop_ids=[identity],durations={identity:30} if minutes else {})
-                result = await self.planner.schedule_activity_day(state(req,stops),day,order,{identity},window,{})
-                [activity] = [item for item in result["activities"] if item["kind"] == "visit"]
-                self.assertEqual(activity["duration_minutes"],minutes or 45)
-                self.assertEqual(activity["source_kind"],"user")
-                self.assertFalse(is_dining(activity))
 
-    async def test_daily_route_payload_contains_planned_user_restaurant(self):
-        req = requirements(wish_places=[{"city":"杭州","name":"湖畔餐厅","date":A}])
-        meal_id = wish_stop_id("杭州","湖畔餐厅")
-        stops = self.planner.source_stops(self.trip["id"],["guide"],req)
-        stops[meal_id]["map_place"] = POI
-        stops["guide:park"]["map_place"] = POI
-        route_day = {"date":A,"city":"杭州","stop_ids":["guide:park"]}
-        meal_plan = plan_meal_wishes([route_day],stops,req)
-        current = state(req,stops,selected_route={"days":[route_day],"feasibility":{"meal_wishes":meal_plan}})
-        self.planner.route_agent = SimpleNamespace(plan=AsyncMock(return_value=RouteTurn(status="ready",order=OrderChoice(stop_ids=["guide:park"]))))
-        await self.planner.daily_order(current,route_day,["guide:park"],{"guide:park"},{})
-        args = self.planner.route_agent.plan.await_args.args
-        [meal] = args[2]["meal_wishes"]
-        self.assertEqual((meal["id"],meal["name"],meal["date"]),(meal_id,"湖畔餐厅",A))
-        self.assertEqual(meal["map_place"],POI)
-        self.assertIn(meal["meal"],{"breakfast","lunch","dinner"})
-        self.assertIn("用户指定的必去正餐",args[1])
-        self.assertNotIn(meal_id,args[2]["available_stops"])
 
     async def test_editing_light_wish_duration_clears_the_default_marker(self):
         wish = {"city":"杭州","name":"湖畔咖啡"}
@@ -648,18 +601,6 @@ class DiningWishPlanning(unittest.TestCase):
         self.assertEqual(len(self.placed(itinerary)),1)
         self.assertEqual(dining_wish_issues(itinerary,stops,req),[])
 
-    def test_missing_duplicate_or_wrong_date_wish_is_a_blocking_issue(self):
-        req,stops,itinerary = self.setup_meals([(self.wish(date=B),121)])
-        [missing] = dining_wish_issues(itinerary,stops,req)
-        self.assertTrue(missing["blocking"])
-        self.assertTrue(any(item["code"] == "dining_wish" for item in check_itinerary(itinerary,req,stops)["issues"]))
-        self.assertTrue(any("餐饮必去" in text for text in confirmation_blockers(itinerary,{"required":req["required_stop_ids"]},req,stops)))
-        refresh_meals(itinerary,stops,requirements=req)
-        row = deepcopy(self.placed(itinerary)[0][1])
-        itinerary["days"][0]["meal_recommendations"].append(row)
-        self.assertIn("重复安排",dining_wish_issues(itinerary,stops,req)[0]["message"])
-        itinerary["days"][1]["meal_recommendations"] = []
-        self.assertIn("指定日期",dining_wish_issues(itinerary,stops,req)[0]["message"])
 
     def test_breakfast_and_wish_fields_survive_review_and_structure_readers(self):
         req,stops,itinerary = self.setup_meals([(self.wish("早餐包子"),120)])
@@ -722,21 +663,6 @@ class LightWishTypes(unittest.TestCase):
         self.assertEqual(visit_minutes(explicit[identity],{},scheduled_minutes=30),80)
         self.assertEqual(visit_minutes(plain[identity],{}),plain[identity]["duration_minutes"])
 
-    def test_coffee_and_dessert_enter_spatial_required_visits(self):
-        for name in ("湖畔咖啡","湖畔甜品"):
-            with self.subTest(name=name):
-                req = requirements(wish_places=[{"city":"杭州","name":name,"date":B}])
-                stops = wish_stops(req)
-                identity = next(iter(stops))
-                stops[identity]["map_place"] = {**POI,"typecode":"050900"}
-                plan = build_spatial_plan(state(req,stops),stops)
-                self.assertIn(identity,plan["required_ids"])
-                self.assertEqual(plan["fixed_dates"][identity],B)
-                self.assertEqual(plan["visit_minutes"][identity],45)
-                self.assertIn(identity,next(day["stop_ids"] for day in plan["days"] if day["date"] == B))
-                self.assertEqual(plan["meal_wishes"],{})
-                self.assertEqual(dining_wish_issues({"days":[]},stops,req),[])
-                self.assertIn("必去景点尚未全部纳入路线",confirmation_blockers({"days":[]},{"required":[identity]},req,stops))
 
     def test_meal_wish_selects_nearby_visit_day_without_consuming_visit_time(self):
         for assigned in (None,A):

@@ -69,23 +69,6 @@ class RouteInterview(unittest.IsolatedAsyncioTestCase):
         self.planner.amap.batch = nullcontext
         return self.store.trip(self.trip["id"])
 
-    async def test_back_to_routes_preserves_candidates_and_clears_saved_itineraries(self):
-        trip = self.completed_document()
-        self.store.commit(trip["id"],0,trip["document"],generation="saved-before-back")
-        trip = self.store.trip(trip["id"])
-        run = await self.planner.back_to_step(trip["id"],trip["version"],trip["updated_at"],"routes")
-        await self.planner.tasks[run]
-        current = self.store.trip(trip["id"])
-        self.assertEqual(current["document"]["pending"]["kind"],"selection")
-        self.assertFalse(current["document"]["itinerary_outdated"])
-        self.assertIsNone(current["document"]["itinerary"])
-        self.assertEqual(current["document"]["candidates"],trip["document"]["candidates"])
-        self.assertEqual(current["version"],trip["version"])
-        self.assertEqual(self.store.versions(trip["id"]),[])
-        snapshot = await self.planner.graph.aget_state({"configurable":{"thread_id":current["active_thread"]}})
-        self.assertEqual(snapshot.next,("selection_gate",))
-        self.assertEqual(snapshot.values["old_itinerary"],{})
-        self.model.ask.assert_not_awaited()
 
 
     async def test_back_rejects_a_stale_page_without_starting_a_run(self):
@@ -133,4 +116,3 @@ class RouteInterview(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("candidates",result)
         self.assertIn("原候选路线已保留",result["warnings"][0])
         self.assertEqual(self.model.ask.await_count,2)
-

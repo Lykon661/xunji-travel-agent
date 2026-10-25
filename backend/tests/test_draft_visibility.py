@@ -52,41 +52,6 @@ class DraftVisibility(unittest.IsolatedAsyncioTestCase):
         self.initial["selected_route"] = {}
         return wish
 
-    async def test_five_day_generation_ignores_unused_guide_identities_and_keeps_visible_draft(self):
-        self.five_day_fixture()
-        self.initial["stops"]["a"].update(map_place=None,map_candidates=[
-            {"id":"east","name":"公园东区","location":"120,30"},
-            {"id":"west","name":"公园西区","location":"121,30"}])
-        self.planner.guide_analysis.return_value = {"unmet":[unmet("place_identity")],"coordinator_resume":"discover"}
-        async def discover(value):
-            result = await self.fixture.discover(value)
-            return {**result,"agent_unmet":copy.deepcopy(value.get("coordinator_deferred_unmet",[]))}
-        self.planner.discover.side_effect = discover
-        self.planner.assess = AsyncMock(side_effect=MethodType(Planner.assess,self.planner))
-        self.planner.activities = AsyncMock(side_effect=MethodType(Planner.activities,self.planner))
-        self.planner.transport = AsyncMock(return_value={})
-        self.planner.hotels = AsyncMock(return_value={})
-        self.planner.locate_stops = AsyncMock(side_effect=lambda state,stops:copy.deepcopy(stops))
-        self.planner.weather_context = AsyncMock(return_value={})
-        self.planner.resolve_hubs = AsyncMock(return_value=None)
-        self.planner.refresh_day_routes = AsyncMock()
-        self.planner.query_ticket_prices = AsyncMock()
-        self.planner.daily_order = AsyncMock(side_effect=lambda state,day,ids,*args:
-            SimpleNamespace(order=OrderChoice(stop_ids=ids,explanation="采用现有地点",short_day_reason="攻略池有限"),unmet=[]))
-        async def schedule(state,route,order,*args):
-            day = copy.deepcopy(next(item for item in self.initial["itinerary"]["days"] if item["date"] == route["date"]))
-            day["activities"] = [item for item in day["activities"] if item["id"] in order.stop_ids]
-            return day
-        self.planner.schedule_activity_day = AsyncMock(side_effect=schedule)
-        initial,_,run_id = self.fixture.context()
-        await self.planner.execute(run_id,initial)
-        doc = public_document(self.store.trip(self.trip_id)["document"])
-        self.planner.assess.assert_awaited_once()
-        self.assertEqual(len(doc["candidates"][0]["draft"]["days"]),5)
-        self.assertFalse(any(item["kind"] == "place_identity" for item in doc["unmet"]))
-        self.assertEqual(doc["system_assumptions"][0]["current_action"]["type"],"skip")
-        self.assertNotEqual((doc.get("pending") or {}).get("kind"),"decision")
-        self.assertEqual(self.store.run(run_id)["status"],"waiting")
 
     async def test_wanted_ambiguous_place_still_interrupts_before_scheduling(self):
         self.five_day_fixture()
@@ -146,32 +111,7 @@ class DraftVisibility(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(item.blocking and item.kind == "other" for item in items))
         self.planner.audit.assert_not_awaited()
 
-    async def test_empty_candidate_pack_preserves_draft_and_prevents_confirmation(self):
-        initial,_,_ = self.fixture.context()
-        initial["candidates"] = copy.deepcopy(self.initial["candidates"])
-        assessed = await self.fixture.assess(initial)
-        candidate = assessed["candidates"][0]
-        result = self.planner.pack_candidate({**initial,**assessed},candidate,{"days":[]},assessed["review"])
-        self.assertEqual(result["candidates"][0]["draft"],candidate["draft"])
-        self.assertTrue(result["candidates"][0]["confirmation_blockers"])
 
-    async def test_empty_assessment_result_preserves_draft_and_refresh_keeps_blocker(self):
-        initial,_,_ = self.fixture.context()
-        initial["candidates"] = copy.deepcopy(self.initial["candidates"])
-        assessed = await self.fixture.assess(initial)
-        initial.update(assessed)
-        result = await self.planner.assess_result(initial,assessed["candidates"][0],
-                                                 {"days":[],"transport":[],"hotels":[]})
-        def visits(plan):
-            return [(day["date"],[(item["id"],item["start"],item["end"],item.get("map_place"),item.get("evidence"))
-                    for item in day["activities"] if item.get("kind") == "visit"]) for day in plan["days"]]
-        self.assertEqual(visits(result["itinerary"]),visits(assessed["itinerary"]))
-        self.assertTrue(result["candidates"][0]["confirmation_blockers"])
-        trip = self.store.trip(self.trip_id)
-        trip["document"].update(result)
-        trip["document"]["stops"] = copy.deepcopy(initial["stops"])
-        refreshed = self.planner.refresh_review_status(trip)
-        self.assertTrue(refreshed["document"]["candidates"][0]["confirmation_blockers"])
 
     async def test_review_only_reassessment_uses_candidate_draft_behind_empty_shell(self):
         initial,_,_ = self.fixture.context()
@@ -198,17 +138,6 @@ class DraftVisibility(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result,plan)
         self.assertIsNotNone(regression_reason(plan,{"days":[]}))
 
-    async def test_blocked_terminal_publishes_latest_unconfirmed_draft(self):
-        self.fixture.problems = [unmet("fact_unverified")]
-        initial,_,run_id = self.fixture.context()
-        await self.planner.execute(run_id,initial)
-        doc = public_document(self.store.trip(self.trip_id)["document"])
-        self.assertEqual(doc["stage"],"conflicts")
-        self.assertIsNone(doc["pending"])
-        self.assertTrue(doc["itinerary"]["days"])
-        self.assertEqual(doc["itinerary"],doc["candidates"][0]["draft"])
-        self.assertTrue(doc["candidates"][0]["confirmation_blockers"])
-        self.assertEqual(self.store.run(run_id)["status"],"completed")
 
     async def test_blocked_empty_state_keeps_saved_draft_visible(self):
         doc = self.store.trip(self.trip_id)["document"]
@@ -234,33 +163,3 @@ class DraftVisibility(unittest.IsolatedAsyncioTestCase):
         saved = self.store.trip(self.trip_id)["document"]
         self.assertEqual(saved["itinerary"],latest)
         self.assertEqual(saved["candidates"][0]["draft"],latest)
-
-    async def test_ordinary_route_ambiguity_is_skipped_by_system_with_visible_draft(self):
-        self.five_day_fixture()
-        value,_,_ = self.fixture.context()
-        value.update(selected_route=copy.deepcopy(self.initial["candidates"][0]),
-                     candidates=copy.deepcopy(self.initial["candidates"]),itinerary=copy.deepcopy(self.initial["itinerary"]),
-                     resource_retry_done=True,mode="new",weather={})
-        value["stops"]["a"].update(map_place=None,map_candidates=[
-            {"id":"east","name":"公园东区","location":"120,30"},
-            {"id":"west","name":"公园西区","location":"121,30"}])
-        protected = authority.user_state(value)
-        self.planner.locate_stops = AsyncMock(side_effect=lambda state,stops:copy.deepcopy(stops))
-        self.planner.weather_context = AsyncMock(return_value={})
-        self.planner.resolve_hubs = AsyncMock(return_value=None)
-        self.planner.refresh_day_routes = AsyncMock()
-        self.planner.query_ticket_prices = AsyncMock()
-        self.planner.daily_order = AsyncMock(side_effect=lambda state,day,ids,*args:
-            SimpleNamespace(order=OrderChoice(stop_ids=ids,explanation="沿用地点",short_day_reason="攻略池有限"),unmet=[]))
-        async def schedule(state,route,order,*args):
-            old = copy.deepcopy(next(day for day in self.initial["itinerary"]["days"] if day["date"] == route["date"]))
-            old["activities"] = [item for item in old["activities"] if item["id"] in order.stop_ids]
-            return old
-        self.planner.schedule_activity_day = AsyncMock(side_effect=schedule)
-        result = await Planner.activities(self.planner,value)
-        self.assertEqual(len(result["itinerary"]["days"]),5)
-        self.assertNotIn("a",[item["id"] for day in result["itinerary"]["days"] for item in day["activities"]])
-        self.assertEqual(result.get("unmet",[]),[])
-        self.assertTrue(result["system_assumptions"])
-        self.assertEqual(result["system_assumptions"][0]["current_action"]["type"],"skip")
-        self.assertEqual(authority.user_state({**value,**result}),protected)

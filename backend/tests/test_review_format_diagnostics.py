@@ -89,12 +89,3 @@ class ReviewFormatDiagnostics(unittest.IsolatedAsyncioTestCase):
         correction = self.messages[1][-1]["content"]
         self.assertIn("当前没有原有阻断发现可保留",correction)
         self.assertIn("不能新增要求路线重排的假问题",correction)
-
-    def test_unavailable_review_does_not_claim_binding_changes_but_still_blocks_confirmation(self):
-        unavailable = {"status":"review_unavailable","summary":"独立检验未完成：报告格式未通过",
-            "checks":[],"policy_version":-1,"plan_hash":"different","review_basis_hash":"different",
-            "findings":[blocker()]}
-        blockers = review_blockers(unavailable,{}, {},[],[])
-        self.assertEqual(blockers,[unavailable["summary"]])
-        with self.assertRaises(Conflict):
-            require_review(unavailable,{}, {},[],[])

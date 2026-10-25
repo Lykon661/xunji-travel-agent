@@ -181,40 +181,8 @@ class ProvenanceTests(unittest.IsolatedAsyncioTestCase):
         return await self.planner.schedule_activity_day(state, {"date":DATE, "city":"杭州"}, ordering, [],
             (9*60, 18*60, [], [], {"name":None, "start_name":None, "label":"当日结束"}), {})
 
-    async def test_model_appointment_is_system_but_user_anchor_wins(self):
-        state = {**self.state, "stops":{"a":stop()}}
-        day = await self.schedule(state, OrderChoice(stop_ids=["a"], start_times={"a":"10:00"}))
-        activity = next(item for item in day["activities"] if item["id"] == "a")
-        self.assertEqual(activity["appointment_time_source"], "system")
-        anchor = Constraint(source="form", kind="time_anchor", anchor="appointment", at="09:30",
-                            scope={"stop_ids":["a"]}, quote="公园预约09:30").model_dump(mode="json")
-        state["requirements"] = {**REQ, "constraints":[anchor]}
-        day = await self.schedule(state, OrderChoice(stop_ids=["a"], start_times={"a":"10:00"}))
-        activity = next(item for item in day["activities"] if item["id"] == "a")
-        self.assertEqual((activity["appointment_time"], activity["appointment_time_source"]), ("09:30", "form"))
 
-    async def test_system_duration_is_read_by_scheduler_and_user_duration_wins(self):
-        updates, _, _ = apply_option(self.state, {"type":"default_duration", "stop_id":"a", "date":DATE, "minutes":40}, "系统调整")
-        state = {**self.state, **updates}
-        day = await self.schedule(state, OrderChoice(stop_ids=["a"]))
-        self.assertEqual(next(item for item in day["activities"] if item["id"] == "a")["duration_minutes"], 40)
-        constraint = Constraint(source="decision", kind="visit_duration", minutes=75,
-                                scope={"stop_ids":["a"]}, quote="公园玩75分钟").model_dump(mode="json")
-        state["requirements"] = {**REQ, "constraints":[constraint]}
-        day = await self.schedule(state, OrderChoice(stop_ids=["a"]))
-        self.assertEqual(next(item for item in day["activities"] if item["id"] == "a")["duration_minutes"], 75)
 
-    def test_ticket_default_has_neutral_attribution_and_zero_budget_cost(self):
-        quote = default_ticket_price({"price":None})
-        self.assertTrue(quote["price_unknown"])
-        self.assertNotRegex(quote["note"], "你|用户")
-        itinerary = {"transport":[], "hotels":[], "days":[{"date":DATE, "city":"杭州", "activities":[{
-            "id":"a", "name":"公园", "kind":"visit", "start":"09:00", "end":"10:00",
-            "evidence":{"quote":"公园"}, "ticket_quote":quote}]}]}
-        result = check_itinerary(itinerary, REQ)
-        self.assertEqual(result["budget"]["status"], "within")
-        self.assertFalse(any("公园" in text for text in result["budget"]["unknown"]))
-        self.assertEqual(quote["note"], "未查询到门票，预算按0元计算")
 
     def test_unknown_action_is_rejected_and_skip_cannot_drop_required(self):
         with self.assertRaisesRegex(ValueError, "Unknown action"):

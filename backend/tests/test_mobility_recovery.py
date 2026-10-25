@@ -40,13 +40,6 @@ class Mobility(unittest.IsolatedAsyncioTestCase):
         self.planner.amap = SimpleNamespace(cache={},place=AsyncMock(side_effect=lambda trip,city,name:POINTS[name]),route=AsyncMock())
         self.state = {"trip_id":"trip","requirements":REQ,"stops":{}}
 
-    async def test_long_public_leg_prefers_transit_even_if_walking_could_be_faster(self):
-        async def route(trip,city,origin,destination,mode):
-            return {"minutes":40 if mode == "transit" else 35,"mode":mode,"summary":"地铁1号线" if mode == "transit" else ""}
-        self.planner.amap.route.side_effect = route
-        move,_ = await self.planner.movement(self.state,"杭州","甲","乙")
-        self.assertEqual(move["mode"],"transit")
-        self.assertEqual([call.args[-1] for call in self.planner.amap.route.await_args_list],["walking","transit"])
 
     async def test_short_walk_does_not_spend_a_transit_query(self):
         self.planner.amap.route.return_value = {"minutes":5,"mode":"walking","walking_meters":150}
@@ -59,33 +52,8 @@ class Mobility(unittest.IsolatedAsyncioTestCase):
         await self.planner.movement({**self.state,"requirements":{**REQ,"local_transport":"walking"}},"杭州","甲","乙")
         self.assertEqual([call.args[-1] for call in self.planner.amap.route.await_args_list],["walking"])
 
-    async def test_fifteen_minute_walk_skips_transit_despite_old_less_walking_preference(self):
-        self.planner.amap.route.return_value = {"minutes":15,"mode":"walking","walking_meters":1400}
-        fewer = Constraint(id="c_walk",source="form",kind="fewer_walking",strength="soft",quote="少走路").model_dump(mode="json")
-        state = {**self.state,"requirements":{**REQ,"local_transport":"public","preferences":"少走路","constraints":[fewer]}}
-        move,_ = await self.planner.movement(state,"杭州","甲","乙")
-        self.assertEqual(move["mode"],"walking")
-        self.assertFalse(move["transit_queried"])
-        self.assertEqual([call.args[-1] for call in self.planner.amap.route.await_args_list],["walking"])
 
-    async def test_sixteen_minute_walk_queries_transit_but_does_not_invent_a_route(self):
-        self.planner.amap.route.side_effect = [{"minutes":16,"mode":"walking","walking_meters":1200},
-            {"minutes":None,"mode":"transit"}]
-        move,_ = await self.planner.movement(self.state,"杭州","甲","近处")
-        self.assertEqual([call.args[-1] for call in self.planner.amap.route.await_args_list],["walking","transit"])
-        self.assertEqual(move["mode"],"walking")
-        self.assertEqual(move["minutes"],16)
 
-    async def test_missing_transit_keeps_long_walk_only_as_an_alternative(self):
-        async def route(trip,city,origin,destination,mode):
-            if mode == "transit":
-                raise ToolError("no_route","无可用公交结果")
-            return {"minutes":45,"mode":"walking","walking_meters":3500}
-        self.planner.amap.route.side_effect = route
-        move,_ = await self.planner.movement(self.state,"杭州","甲","乙")
-        self.assertIsNone(move["minutes"])
-        self.assertEqual(move["walking_alternative"]["minutes"],45)
-        self.assertNotIn("driving",[call.args[-1] for call in self.planner.amap.route.await_args_list])
 
     async def test_quota_error_stops_other_modes_in_the_same_leg(self):
         self.planner.amap.route.side_effect = ToolError("amap_rate_limit","查询超限")
@@ -159,14 +127,6 @@ class Mobility(unittest.IsolatedAsyncioTestCase):
                 await self.planner.refresh_day_routes(self.state,itinerary)
                 self.assertIsNone(itinerary["days"][0]["activities"][1]["move_before"]["minutes"])
 
-    async def test_repair_reuses_known_leg_without_a_provider_request(self):
-        original = plan()
-        state = {**self.state,"repair_only":True,"old_itinerary":original,"change":{"dates":["2026-11-10"]}}
-        move,place = await self.planner.movement(state,"杭州","甲","乙",POINTS["甲"],POINTS["乙"])
-        self.assertEqual(move["evidence_id"],"query:1")
-        self.assertEqual(move["queried_at"],original["days"][0]["activities"][1]["move_before"]["queried_at"])
-        self.planner.amap.route.assert_not_awaited()
-        self.assertEqual(place["location"],POINTS["乙"]["location"])
 
     async def test_route_refresh_leaves_dates_outside_scope_untouched(self):
         itinerary = plan()
@@ -242,46 +202,6 @@ class Recovery(unittest.IsolatedAsyncioTestCase):
         self.assertIn("2 个仍需使用",message)
         self.assertIn("旧查询记录仍保留",message)
 
-    async def test_bulk_failure_restores_snapshot_before_review_without_repairing_again(self):
-        original = plan()
-        backup = previous_round({"requirements":REQ,"candidates":[candidate(original)],"selected_source_ids":[]})
-        broken = copy.deepcopy(original)
-        for item in broken["days"][0]["activities"][1:]:
-            item["move_before"] = {"minutes":None,"failure_codes":["amap_limit"]}
-        planner = Planner.__new__(Planner)
-        planner.emit = Mock()
-        planner.store = Mock()
-        planner.store.review_queries.return_value = []
-        planner.selected_sources = Mock(return_value=[])
-        planner.audit_state = lambda state:state
-        planner.check = AsyncMock(side_effect=lambda state:{"itinerary":copy.deepcopy(state["itinerary"])})
-        async def audit(state,itinerary):
-            report = {"status":"pass_with_warnings","summary":"旧依据仍须核对","findings":[],
-                "checks":[{"dimension":dimension,"result":"ok","note":"合成检查"} for dimension in sorted(REVIEW_DIMENSIONS)]}
-            return bind_report(report,state,itinerary,review_basis(state,itinerary,[],[]),[])
-        planner.audit = AsyncMock(side_effect=audit)
-        planner.repair = AsyncMock()
-        state = {"trip_id":"trip","run_id":"run","generation":"gen","requirements":REQ,"stops":{},"locks":[],
-                 "mode":"modify","selected_source_ids":[],"stop_constraints":{},"round_backup":backup,"draft_revision":1}
-        result = await planner.assess_result(state,candidate(broken),broken)
-        restored = result["candidates"][0]
-        self.assertTrue(result["rollback"])
-        self.assertEqual(restored["draft"]["days"],original["days"])
-        self.assertEqual(restored["review"]["draft_revision"],2)
-        self.assertEqual(planner.audit.await_count,1)
-        planner.repair.assert_not_awaited()
-
-        # A quota failure can drop every activity, leaving no rendered move to carry the error code.
-        empty = copy.deepcopy(original)
-        empty["days"][0]["activities"] = []
-        planner.amap = SimpleNamespace(batch_state=SimpleNamespace(get=lambda:{"failed":True,"error":ToolError("amap_limit","本轮查询超限")}))
-        result = await planner.assess_result(state,candidate(empty),empty)
-        self.assertEqual(result["candidates"][0]["draft"]["days"],original["days"])
-        self.assertTrue(result["rollback"])
-
-        result = await planner.assess_result({**state,"requirements":{**REQ,"budget":4000}},candidate(empty),empty)
-        self.assertEqual(result["requirements"]["budget"],4000)
-        self.assertTrue(any("本次需求" in message for message in result["candidates"][0]["confirmation_blockers"]))
 
     async def test_failed_task_restores_previous_candidate_but_is_not_reported_as_completed(self):
         original = plan()

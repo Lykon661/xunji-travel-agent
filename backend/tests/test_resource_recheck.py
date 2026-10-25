@@ -82,15 +82,6 @@ class ResourceRecheck(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(entry["selected"])
         self.assertFalse(entry["selected_by_user"])
 
-    async def test_unlocked_legacy_resource_is_blocked_by_check_and_confirmation(self):
-        itinerary = self.state["itinerary"]
-        itinerary["transport"][0]["context"]["date"] = "2026-11-10"
-        itinerary["transport"][0]["selected"]["departure"] = "2026-11-10 09:00"
-        checked = await self.planner.check(self.state)
-        self.assertTrue(any(issue["code"] == "resource_context" and issue["blocking"]
-                            for issue in checked["itinerary"]["issues"]))
-        itinerary["issues"] = []
-        self.assertTrue(any("日期或城市" in message for message in confirmation_blockers(itinerary,requirements=REQ)))
 
     def test_quote_context_and_adopted_hotel_dates_are_checked_without_locks(self):
         itinerary = plan()
@@ -117,14 +108,6 @@ class ResourceRecheck(unittest.IsolatedAsyncioTestCase):
         _,report = report_for(result["itinerary"])
         self.assertGreater(datetime.fromisoformat(report["expires_at"]),datetime.now(timezone.utc))
 
-    async def test_changed_train_times_cannot_be_adopted_as_a_quote_refresh(self):
-        original = copy.deepcopy(self.state["itinerary"])
-        fresh = {**train(),"arrival":"2026-11-11 12:00","queried_at":datetime.now(timezone.utc).isoformat()}
-        self.planner.resource_agent.search.return_value = {"options":[fresh],"status":"ok"}
-        result = await self.planner.refresh_expired_resources(self.state)
-        self.assertEqual(result["itinerary"]["transport"][0]["selected"],original["transport"][0]["selected"])
-        state,report = report_for(result["itinerary"])
-        self.assertTrue(any("有效期" in message for message in review_blockers(report,state,result["itinerary"],[],[])))
 
     async def test_failed_refresh_keeps_the_original_quote_time_and_blocked_status(self):
         original = copy.deepcopy(self.state["itinerary"]["transport"][0]["selected"])

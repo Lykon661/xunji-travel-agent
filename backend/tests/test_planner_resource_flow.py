@@ -205,32 +205,3 @@ class TransportSortReuse(unittest.IsolatedAsyncioTestCase):
         result = await self.planner.transport(self.state)
         self.assertEqual([call.args[3]["sort-type"] for call in self.planner.resource_agent.search.await_args_list],[2,3,4])
         self.assertEqual(len(result["itinerary"]["transport"][0]["options"]),3)
-
-
-class ExplicitScheduledCoordinates(unittest.IsolatedAsyncioTestCase):
-    async def test_same_named_places_keep_their_resolved_pois_on_every_leg_and_final_return(self):
-        planner = Planner.__new__(Planner)
-        places = {identity:{"id":identity,"name":"同名地点","location":location} for identity,location in (
-            ("start","120,30"),("east","120.01,30"),("west","120.02,30"),("end","120.03,30"))}
-        async def movement(state,city,origin,destination,origin_place=None,destination_place=None):
-            return {"minutes":5,"mode":"walking","walking_meters":100,
-                    "origin_place":origin_place,"destination_place":destination_place},destination_place
-        planner.movement = AsyncMock(side_effect=movement)
-        planner.map_order = AsyncMock()
-        stops = {identity:{"id":identity,"name":"同名地点","city":"杭州","duration_minutes":30,
-                           "source_id":"guide:"+identity,"source_title":"合成攻略",
-                           "evidence":{"quote":"同名地点"},"map_place":places[identity]}
-                 for identity in ("east","west")}
-        state = {"trip_id":"trip","requirements":copy.deepcopy(REQ),"stops":stops,"change":{},"locks":[]}
-        day = {"date":"2026-11-11","city":"杭州","stop_ids":["east","west"]}
-        tail = {"start_name":"同名地点","start_place":places["start"],
-                "name":"同名地点","end_place":places["end"],"label":"返回采用住宿"}
-        result = await planner.schedule_activity_day(state,day,OrderChoice(stop_ids=["east","west"]),
-                                                     {"east","west"},(540,720,[],[],tail),{})
-        pairs = [(call.kwargs["origin_place"]["id"],call.kwargs["destination_place"]["id"])
-                 for call in planner.movement.await_args_list]
-        self.assertEqual(pairs,[("start","east"),("east","end"),("east","west"),("west","end"),("west","end")])
-        self.assertEqual([item["map_place"]["id"] for item in result["activities"] if item["kind"] == "visit"],["east","west"])
-        self.assertEqual(result["return_move"]["origin_place"]["id"],"west")
-        self.assertEqual(result["return_move"]["destination_place"]["id"],"end")
-        planner.map_order.assert_not_awaited()

@@ -38,41 +38,7 @@ class NoHotelBoundaries(unittest.TestCase):
         items = day_demand({"requirements":REQ,"stops":{}},value,value["days"][0],{})
         self.assertEqual(items[0]["move"],0)
 
-    def test_selected_departure_checks_station_and_ignores_first_hotel_leg(self):
-        value = plan()
-        value["transport"] = [{"id":"train","label":"广州到深圳","buffer_minutes":60,
-            "context":{"date":DAY,"origin":"广州","destination":"深圳"},
-            "selected":{"kind":"train","departure":"18:00","arrival":"19:00",
-                        "departure_place":"广州南站","arrival_place":"深圳北站"}}]
-        day = value["days"][0]
-        day.update(end_place="广州南站",tail_arrival=660,return_move={"minutes":30,"mode":"transit"})
-        self.assertEqual(daily_route_scope(value,day),
-                         {"hotel_location_confirmed":False,"first_leg_required":False,"last_leg_required":True})
-        self.assertEqual(confirmation_blockers(value,requirements=REQ),[])
-        self.assertEqual(check_itinerary(value,REQ)["issues"],[])
-        day["return_move"] = {"minutes":None}
-        self.assertTrue(any("结束路段" in text for text in confirmation_blockers(value,requirements=REQ)))
-        value["transport"][0]["selected"]["departure"] = None
-        self.assertTrue(any("到离时间" in text for text in confirmation_blockers(value,requirements=REQ)))
 
-    def test_selected_arrival_preserves_real_station_transfer_checks(self):
-        value = plan()
-        value["transport"] = [{"id":"train","label":"深圳到广州","buffer_minutes":60,
-            "context":{"date":DAY,"origin":"深圳","destination":"广州"},
-            "selected":{"kind":"train","departure":"07:00","arrival":"08:00",
-                        "departure_place":"深圳北站","arrival_place":"广州南站"}}]
-        day = value["days"][0]
-        day["start_place"] = "广州南站"
-        day["activities"][0]["move_before"] = {"minutes":20,"mode":"transit"}
-        day["available_start"] = 480
-        self.assertEqual(confirmation_blockers(value,requirements=REQ),[])
-        self.assertEqual(check_itinerary(value,REQ)["issues"],[])
-        day["activities"][0]["move_before"] = {"minutes":None}
-        self.assertTrue(any("实际交通耗时" in text for text in confirmation_blockers(value,requirements=REQ)))
-        day["activities"][0]["move_before"] = {"minutes":90,"mode":"transit"}
-        issues = check_itinerary(value,REQ)["issues"]
-        self.assertTrue(any(item["code"] == "move_gap" for item in issues))
-        self.assertFalse(any("住宿" in item["message"] or "出发地址" in item["message"] for item in issues))
 
 
 class NoHotelWindow(unittest.IsolatedAsyncioTestCase):

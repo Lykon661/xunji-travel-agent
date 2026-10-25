@@ -161,7 +161,7 @@ def evaluate(schedule, day_date=None):
         target = date.fromisoformat(str(day_date)) if day_date else None
     except ValueError:
         return unknown
-    if target is None and any(rule.date_ranges or rule.months or rule.weekdays for rule in schedule.rules):
+    if target is None and any(rule.date_ranges or rule.months or rule.weekdays and set(rule.weekdays) != set(range(7)) for rule in schedule.rules):
         return unknown
     def applies(rule):
         if rule.date_ranges:
@@ -170,7 +170,7 @@ def evaluate(schedule, day_date=None):
                        for first, last in rule.date_ranges)
         return not rule.months or target.month in rule.months
     seasonal = [rule for rule in schedule.rules if applies(rule)]
-    matching = [rule for rule in seasonal if not rule.weekdays or target.weekday() in rule.weekdays]
+    matching = [rule for rule in seasonal if not rule.weekdays or target is None or target.weekday() in rule.weekdays]
     rank = lambda rule: 2 if rule.date_ranges else 1 if rule.months else 0
     highest = max((rank(rule) for rule in matching), default=-1)
     weekday_rank = max((rank(rule) for rule in seasonal if rule.weekdays), default=-1)
@@ -180,6 +180,9 @@ def evaluate(schedule, day_date=None):
                     "note":"星期开放规则未覆盖目标星期，按闭馆处理"+("；"+note if note else "")}
         return unknown
     matching = [rule for rule in matching if rank(rule) == highest]
+    weekday_rules = [rule for rule in matching if rule.weekdays]
+    if weekday_rules:
+        matching = weekday_rules
     if any(rule.closed for rule in matching):
         if any(not rule.closed for rule in matching):
             return unknown

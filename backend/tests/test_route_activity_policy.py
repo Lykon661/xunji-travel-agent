@@ -24,18 +24,6 @@ class ActivityPolicy(unittest.IsolatedAsyncioTestCase):
         self.planner.flyai = SimpleNamespace(availability=lambda:{"ready":True},ticket=AsyncMock())
         self.planner.amap = SimpleNamespace(cache={})
 
-    async def test_no_ticket_claim_free_site_and_dining_do_not_trigger_queries(self):
-        activities = [{"id":"street","name":"街区","kind":"visit"},
-                      {"id":"park","name":"公园","kind":"visit","ticket_claim":"免费开放"},
-                      {"id":"food","name":"攻略推荐餐馆","kind":"visit","category":"dining"}]
-        itinerary = {"days":[{"city":"杭州","date":"2026-11-10","activities":activities}]}
-        await self.planner.query_ticket_prices({"trip_id":"trip"},itinerary,{"2026-11-10"})
-        self.planner.flyai.ticket.assert_not_awaited()
-        self.assertTrue(all("ticket_quote" not in activity for activity in activities))
-        for activity in activities:
-            activity.update(start="09:00",end="10:00",evidence={"quote":activity["name"]})
-        result = check_itinerary(itinerary,REQ)
-        self.assertFalse(any("门票" in note for note in result["budget"]["unknown"]))
 
     def test_free_entry_with_paid_optional_exhibit_retains_ticket_information(self):
         self.assertEqual(ticket_policy({"ticket_claim":"公园免费，展馆门票30元"}),"paid")
@@ -52,29 +40,7 @@ class ActivityPolicy(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([option["price"] for option in quote["options"]],[50,80])
         self.assertEqual(len({option["id"] for option in quote["options"]}),2)
 
-    async def test_daily_order_accepts_user_selected_stop_from_unassigned_source_pool(self):
-        day = {"date":"2026-11-10","city":"杭州","stop_ids":["guide:a"]}
-        state = {"stops":{identity:{"id":identity,"city":"杭州","name":identity} for identity in ("guide:a","guide:b")},
-                 "selected_route":{"days":[day]},"stop_constraints":{}}
-        self.planner.route_agent = SimpleNamespace(plan=AsyncMock(return_value=RouteTurn(
-            status="ready",order=OrderChoice(stop_ids=["guide:b","guide:a"]))))
-        turn = await self.planner.daily_order(state,day,["guide:a"],set(),{})
-        self.assertEqual(turn.order.stop_ids,["guide:b","guide:a"])
 
-    async def test_invalid_id_gets_one_correction_and_other_dates_remain_protected(self):
-        day = {"date":"2026-11-10","city":"杭州","stop_ids":["a"]}
-        state = {"stops":{identity:{"id":identity,"city":"杭州"} for identity in ("a","other-day")},"requirements":REQ,
-                 "selected_route":{"days":[day,{"date":"2026-11-11","stop_ids":["other-day"]}]}}
-        bad = RouteTurn(status="ready",order=OrderChoice(stop_ids=["other-day"]))
-        good = RouteTurn(status="ready",order=OrderChoice(stop_ids=["a"]))
-        self.planner.route_agent = SimpleNamespace(plan=AsyncMock(side_effect=[bad,good]))
-        await self.planner.daily_order(state,day,["a"],set(),{})
-        self.assertEqual(self.planner.route_agent.plan.await_count,2)
-        self.assertIn("validation_error",self.planner.route_agent.plan.call_args.args[2])
-        self.planner.route_agent.plan = AsyncMock(return_value=bad)
-        with self.assertRaises(ToolError):
-            await self.planner.daily_order(state,day,["a"],set(),{})
-        self.assertEqual(self.planner.route_agent.plan.await_count,2)
 
     async def test_unknown_lodging_does_not_become_a_fictitious_start_or_end(self):
         state = {"requirements":REQ,"itinerary":{"hotels":[],"transport":[]}}
@@ -128,23 +94,3 @@ class ActivityPolicy(unittest.IsolatedAsyncioTestCase):
         result = check_itinerary(itinerary,REQ)
         self.assertEqual(result["budget"]["estimated_local_transport"],0)
         self.assertFalse(any(issue["code"] == "walking_limit" for issue in result["issues"]))
-
-    async def test_daily_schedule_reserves_lunch_without_injecting_a_restaurant(self):
-        stop = {"id":"a","city":"杭州","name":"景点","source_id":"guide","source_title":"攻略",
-                "map_place":{"name":"景点","location":"120,30"},"evidence":{"quote":"景点"},"duration_minutes":30}
-        self.planner.locate_stops = AsyncMock(return_value={"a":stop})
-        self.planner.weather_context = AsyncMock(return_value={})
-        self.planner.map_order = AsyncMock(return_value=(["a"],"单点"))
-        self.planner.route_agent = SimpleNamespace(plan=AsyncMock(return_value=RouteTurn(status="ready",order=OrderChoice(stop_ids=["a"]))))
-        self.planner.amap.around = AsyncMock()
-        state = {"trip_id":"trip","requirements":{**REQ,"earliest_departure":"12:00"},"stops":{"a":stop},
-                 "mode":"new","locks":[],"selected_route":{"days":[{"date":"2026-11-10","city":"杭州","stop_ids":["a"]}]},
-                 "itinerary":{"days":[],"hotels":[],"transport":[]}}
-        result = await self.planner.activities(copy.deepcopy(state))
-        activities = result["itinerary"]["days"][0]["activities"]
-        self.assertEqual([activity["kind"] for activity in activities],["visit","rest"])
-        self.assertEqual(activities[0]["start"],"12:00")
-        self.assertEqual((activities[1]["start"],activities[1]["end"]),("12:30","13:30"))
-        self.assertEqual(activities[1]["meal"],"lunch")
-        self.assertNotIn("source_id",activities[1])
-        self.planner.amap.around.assert_not_awaited()

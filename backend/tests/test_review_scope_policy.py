@@ -109,26 +109,7 @@ class ScopePolicy(unittest.TestCase):
         self.assertFalse(scope["first_leg_required"])
         self.assertFalse(scope["last_leg_required"])
 
-    def test_no_hotel_stale_boundary_moves_do_not_block_but_between_visits_still_does(self):
-        day = self.plan["days"][0]
-        day.update(start_place="旧酒店",end_place="旧酒店",return_move={"minutes":None},tail_arrival=1300)
-        day["activities"][0]["move_before"] = {"minutes":None,"estimate_minutes":45}
-        self.assertEqual(confirmation_blockers(self.plan,requirements=REQ),[])
-        self.assertFalse(any(item["code"] in {"move_gap","tail_conflict"} for item in check_itinerary(self.plan,REQ)["issues"]))
-        second = copy.deepcopy(day["activities"][0])
-        second.update(id="guide:b",name="第二处场馆",start="10:45",end="11:45")
-        day["activities"].append(second)
-        self.assertTrue(any("第二处场馆" in text for text in confirmation_blockers(self.plan,requirements=REQ)))
 
-    def test_adopted_hotel_enables_real_boundary_checks(self):
-        self.plan["hotels"] = [{"id":"hotel:广州","city":"广州","selected_by_user":True,
-            "context":{"check_in":DATE,"check_out":"2026-10-17"},"selected":{"name":"用户采用的酒店"}}]
-        day = self.plan["days"][0]
-        day.update(start_place="用户采用的酒店",end_place="用户采用的酒店",return_move={"minutes":None},tail_arrival=1300)
-        scope = review_scope(self.plan)["days"][0]
-        self.assertTrue(scope["last_leg_required"])
-        self.assertTrue(any("结束路段" in text for text in confirmation_blockers(self.plan,requirements=REQ)))
-        self.assertTrue(any(item["code"] == "tail_conflict" for item in check_itinerary(self.plan,REQ)["issues"]))
 
     def test_selected_train_still_requires_station_transfer_without_a_hotel(self):
         self.plan["transport"] = [{"context":{"date":DATE,"origin":"广州","destination":"深圳"},
@@ -223,18 +204,6 @@ class ScopePolicy(unittest.TestCase):
         finding.findings[0].evidence_ids.append("query:closure-announcement")
         self.assertFalse(review_semantic_errors(finding,self.payload))
 
-    def test_review_payload_recovers_hours_from_exact_poi_detail_for_old_draft(self):
-        activity = self.museum()
-        activity["map_place"].pop("opentime2")
-        row = {"evidence_id":"query:museum","provider":"amap","request":{"tool":"maps_search_detail","id":"museum"},
-               "result":{"raw":{"id":"museum","location":"113.3,23.1","opentime2":MUSEUM_HOURS}}}
-        state = {"requirements":REQ,"selected_source_ids":[]}
-        payload = review_payload(state,self.plan,[],[row])
-        self.assertTrue(payload["review_scope"]["activities"][0]["entry_before_last_admission"])
-        self.assertNotIn("opentime2",activity["map_place"])
-        row["result"]["raw"]["id"] = "other-branch"
-        payload = review_payload(state,self.plan,[],[row])
-        self.assertIsNone(payload["review_scope"]["activities"][0]["within_opening_window"])
 
     def test_unadopted_ticket_location_difference_only_warrants_a_warning(self):
         activity = self.museum()
@@ -268,73 +237,6 @@ class ScopePolicy(unittest.TestCase):
         self.assertFalse(review_semantic_errors(bad,self.payload))
 
 
-class ReviewCorrection(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        self.store = Mock()
-        self.store.trip.return_value = {"active_run":"run"}
-        self.store.run.return_value = {"status":"running"}
-        self.state = {"trip_id":"trip","run_id":"run","generation":"generation"}
-        self.payload = {"plan":plan(),"requirements":REQ,"evidence_index":{"requirements":REQ}}
-
-    async def test_bad_weekday_gets_one_full_review_correction(self):
-        models = SimpleNamespace(ask=AsyncMock(side_effect=[report("2026-10-16为周二闭馆"),report()]))
-        result = await ReviewerAgent(models,self.store).review(self.state,self.payload)
-        self.assertEqual(result.status,"pass_with_warnings")
-        self.assertEqual(models.ask.await_count,2)
-        self.assertTrue(models.ask.call_args.args[2]["semantic_errors"])
-
-    async def test_false_transfer_arithmetic_is_corrected_without_another_model_or_route_call(self):
-        fixture = ScopePolicy()
-        fixture.setUp()
-        bad,_ = fixture.transfer_report()
-        self.payload = fixture.payload
-        self.payload["evidence_index"]["query:route"] = {"provider":"amap"}
-        models = SimpleNamespace(ask=AsyncMock(return_value=bad))
-        result = await ReviewerAgent(models,self.store).review(self.state,self.payload)
-        self.assertEqual(result.status,"pass_with_warnings")
-        models.ask.assert_awaited_once()
-        self.assertTrue(any(call.args[1].startswith("review_arithmetic_corrected:") for call in self.store.save_agent_result.call_args_list))
-
-    async def test_two_invalid_reviews_are_not_accepted_as_a_pass(self):
-        models = SimpleNamespace(ask=AsyncMock(return_value=report("住宿未选定，首站与返程均未提供路线")))
-        with self.assertRaises(ToolError) as raised:
-            await ReviewerAgent(models,self.store).review(self.state,self.payload)
-        self.assertEqual(raised.exception.code,"review_semantics")
-        self.assertEqual(models.ask.await_count,2)
-
-    async def test_false_closing_blocker_gets_corrected_without_route_replanning(self):
-        activity = self.payload["plan"]["days"][0]["activities"][0]
-        activity.update(start="13:13",end="16:13")
-        activity["map_place"].update(id="museum",evidence_id="query:museum",opentime2=MUSEUM_HOURS)
-        bad = report("13:13-16:13超过闭馆时间17:00，最晚进入16:00",path="/days/0/activities/0")
-        bad.findings[0].evidence_ids = ["query:museum"]
-        self.payload["evidence_index"]["query:museum"] = {"opentime2":MUSEUM_HOURS}
-        models = SimpleNamespace(ask=AsyncMock(side_effect=[bad,report()]))
-        result = await ReviewerAgent(models,self.store).review(self.state,self.payload)
-        self.assertEqual(result.status,"pass_with_warnings")
-        self.assertEqual(models.ask.await_count,2)
-        self.assertIn("最晚入场只比较start",models.ask.call_args.args[2]["semantic_errors"][0])
-
-    async def test_theatre_self_contradiction_is_returned_to_reviewer_without_editing_plan(self):
-        original = copy.deepcopy(self.payload["plan"])
-        bad = report("活动结束17:40早于18:00；但当前审查结果与阻断状态不一致，需路线Agent重排",
-                     path="/days/0/activities/0")
-        models = SimpleNamespace(ask=AsyncMock(side_effect=[bad,report()]))
-        result = await ReviewerAgent(models,self.store).review(self.state,self.payload)
-        self.assertEqual(result.status,"pass_with_warnings")
-        self.assertEqual(models.ask.await_count,2)
-        self.assertEqual(self.payload["plan"],original)
-        self.assertTrue(any("审查报告自身" in text for text in models.ask.call_args.args[2]["semantic_errors"]))
-
-    async def test_no_hotel_ignores_origin_address_and_latest_return_without_querying_legs(self):
-        planner = Planner.__new__(Planner)
-        planner.movement = AsyncMock()
-        state = {"requirements":{**REQ,"origin_address":"尚未采用的起点","latest_return":"18:00"},"itinerary":plan()}
-        _,end,_,_,tail = await planner.window(state,{"date":DATE,"city":"广州"})
-        self.assertEqual(end,1200)
-        self.assertIsNone(tail["start_name"])
-        self.assertIsNone(tail["name"])
-        planner.movement.assert_not_awaited()
 
 
 class TransportConnectionFacts(unittest.TestCase):

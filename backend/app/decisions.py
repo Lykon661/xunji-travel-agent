@@ -7,6 +7,7 @@ from .places import duplicate_issues, represented_ids
 from .dining import dining_wishes, dining_wish_issues, visit_required_ids
 from datetime import date, timedelta
 import re
+import copy
 
 
 def walking_question(question):
@@ -160,7 +161,7 @@ def confirmation_issues(itinerary, constraints=None, requirements=None, stops=No
         if identity in visits or identity in pool and canonical_key(pool[identity]) in keys:
             add("excluded_stop","行程包含用户明确排除的地点",identity)
     if req:
-        checked = check_itinerary(itinerary,req,pool)
+        checked = check_itinerary(copy.deepcopy(itinerary),req,pool)
         selected = [entry for entry in itinerary.get("transport",[]) if entry.get("selected")]
         for issue in checked["issues"]:
             if issue["code"] in {"arrival_conflict","departure_conflict","transport_time"}:

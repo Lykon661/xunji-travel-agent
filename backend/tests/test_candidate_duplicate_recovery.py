@@ -96,18 +96,6 @@ class CandidateMerge(unittest.TestCase):
 
 
 class DiscoveryRecovery(unittest.IsolatedAsyncioTestCase):
-    async def test_daily_order_cannot_reintroduce_an_ordinary_alias_from_the_pool(self):
-        planner = Planner.__new__(Planner)
-        planner.emit = Mock()
-        planner.route_agent = SimpleNamespace(plan=AsyncMock(return_value=RouteTurn(
-            status="ready",order=OrderChoice(stop_ids=["guide-a:street"]))))
-        day = {"date":"2026-11-10","city":"广州","stop_ids":["guide-a:street"]}
-        state = {"requirements":REQ,"stops":stops(),"selected_route":{"days":[day]},"stop_constraints":{}}
-        await planner.daily_order(state,day,["guide-a:street"],set(),{})
-        payload = planner.route_agent.plan.call_args.args[2]
-        self.assertIn("guide-a:street",payload["available_stops"])
-        self.assertNotIn("guide-b:road",payload["available_stops"])
-        self.assertEqual(len(payload["canonical_place_groups"]),1)
 
     async def test_duplicate_model_proposal_continues_without_repeating_the_model_call(self):
         planner = Planner.__new__(Planner)

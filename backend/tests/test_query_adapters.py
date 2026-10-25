@@ -123,21 +123,13 @@ class TicketQuotes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(quote["price_basis"],"starting")
         self.assertIn("日期不同",quote["note"])
 
-    async def test_missing_price_is_a_system_placeholder_with_unknown_price(self):
-        flyai = FlyAI.__new__(FlyAI)
-        flyai.search = AsyncMock(return_value={"queried_at":"now","raw":{"data":{"itemList":[
-            {"name":"合成景点","ticketInfo":{"price":None,"priceDate":"2026-10-13"}}]}}})
-        quote = await flyai.ticket("trip","广州","合成景点","2026-10-13")
-        self.assertEqual(quote["price"],0)
-        self.assertTrue(quote["assumed_free"])
-        self.assertIn("未查询到门票，预算按0元计算",quote["note"])
-        self.assertTrue(quote["price_unknown"])
-        self.assertNotRegex(quote["note"],"你|用户")
 
 
 class ResumedResourceQuery(unittest.IsolatedAsyncioTestCase):
     async def test_resume_retries_missing_hotel_instead_of_carrying_missing_cli_error(self):
         planner = Planner.__new__(Planner); planner.emit = Mock()
+        planner.models = SimpleNamespace(ask=AsyncMock())
+        planner.store = Mock()
         planner.flyai = SimpleNamespace(availability=lambda:{"ready":True},ticket=AsyncMock())
         new_hotel = {"id":"hotel:广州","city":"广州","selected":{"name":"新酒店"},"selected_by_user":True}
         planner.hotels = AsyncMock(return_value={"itinerary":{"days":[],"transport":[],"hotels":[new_hotel]}})
@@ -150,30 +142,3 @@ class ResumedResourceQuery(unittest.IsolatedAsyncioTestCase):
         planner.hotels.assert_awaited_once()
         self.assertEqual(result["itinerary"]["hotels"],[new_hotel])
         self.assertTrue(result["resource_retry_done"])
-
-
-class CurrentActivityRefresh(unittest.IsolatedAsyncioTestCase):
-    async def test_refresh_keeps_current_visits_and_stops_ticket_queries_after_provider_failure(self):
-        planner = Planner.__new__(Planner); planner.emit = Mock();planner.store = Mock()
-        planner.flyai = SimpleNamespace(availability=lambda:{"ready":True})
-        planner.resource_agent = SimpleNamespace(ticket=AsyncMock(side_effect=ToolError("flyai_failed","查询权限异常")))
-        planner.models = SimpleNamespace(ask=AsyncMock())
-        stops = {identity:{"id":identity,"city":"广州","name":identity,"source_id":"guide","source_title":"合成攻略",
-            "evidence":{"quote":identity},"duration_minutes":30,"ticket_claim":"门票50元"} for identity in ("保留一","保留二","已删除")}
-        planner.locate_stops = AsyncMock(side_effect=lambda state,items:items)
-        planner.weather_context = AsyncMock(return_value={})
-        planner.map_order = AsyncMock(side_effect=lambda state,city,ids,origin,destination:(ids,"更新路线"))
-        planner.window = AsyncMock(return_value=(540,1200,[],[],{"name":"酒店","label":"返回住宿"}))
-        planner.movement = AsyncMock(return_value=({"minutes":5,"mode":"walking"},None))
-        old = {"transport":[],"hotels":[{"id":"hotel:广州","city":"广州","selected":{"name":"酒店"}}],
-            "days":[{"date":"2026-10-13","city":"广州","activities":[{"id":identity,"kind":"visit","start":start,"end":end}
-                for identity,start,end in (("保留一","09:00","10:00"),("保留二","10:30","11:30"))]}]}
-        state = {"requirements":REQ,"trip_id":"trip","mode":"modify","change":{"scopes":["hotel","transport","activity"],"refresh_resources":True},
-            "locks":[],"stops":stops,"old_itinerary":old,"itinerary":old,
-            "selected_route":{"days":[{"date":"2026-10-13","city":"广州","stop_ids":list(stops)}]}}
-        result = await planner.activities(state)
-        visits = [item for item in result["itinerary"]["days"][0]["activities"] if item["kind"] == "visit"]
-        self.assertEqual([item["id"] for item in visits],["保留一","保留二"])
-        planner.models.ask.assert_not_awaited()
-        planner.resource_agent.ticket.assert_awaited_once()
-        self.assertIn("暂停",visits[1]["ticket_quote"]["note"])

@@ -1003,7 +1003,7 @@ class Amap:
             "maps_text_search","maps_search_detail","maps_around_search","maps_geo","maps_regeocode"} else None
         if hours and hasattr(self.store,"amap_result"):
             cached = self.store.amap_result(trip_id,{"tool":tool,**args},hours)
-            if cached and not self.response_error(cached["raw"]):
+            if isinstance(cached,dict) and "raw" in cached and "id" in cached and not self.response_error(cached["raw"]):
                 self.cache[("evidence",trip_id,tool,json.dumps(args,sort_keys=True,default=str))] = cached["id"]
                 return copy.deepcopy(cached["raw"])
         if not self.api_key:

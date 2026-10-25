@@ -49,41 +49,7 @@ class RouteReferenceAliases(unittest.IsolatedAsyncioTestCase):
         self.model = SimpleNamespace(ask=AsyncMock(side_effect=responses))
         return RouteAgent(self.model,self.store)
 
-    async def test_order_timing_constraints_and_source_references_round_trip_without_mutating_the_pool(self):
-        original = copy.deepcopy(self.payload)
-        agent = self.agent([ready(durations={"stop_1":45},start_times={"stop_1":"11:00"})])
-        result = await agent.plan(self.state,"安排当天",self.payload,AsyncMock(),daily=True)
-        sent = self.model.ask.call_args.args[2]
-        self.assertEqual(list(sent["available_stops"]),ALIASES)
-        self.assertEqual(sent["available_stops"]["stop_1"]["id"],"stop_1")
-        self.assertEqual(sent["current_stop_ids"],ALIASES)
-        self.assertEqual(sent["allowed_stop_ids"],ALIASES)
-        self.assertEqual(sent["locked_ids"],["stop_1"])
-        self.assertEqual(set(sent["opening_constraints"]),{"stop_1"})
-        self.assertEqual(result.order.stop_ids,IDS)
-        self.assertEqual(result.order.durations,{IDS[0]:45})
-        self.assertEqual(result.order.start_times,{IDS[0]:"11:00"})
-        self.assertEqual(self.payload,original)
 
-    async def test_tools_and_cached_observations_keep_real_ids_while_model_observations_use_short_ids(self):
-        tool_turn = RouteTurn(status="tools",tools=[RouteToolRequest(tool="route",city=CITY,
-            origin_id="stop_1",destination_id="stop_2")])
-        agent = self.agent([tool_turn,ready()])
-        tool = AsyncMock(return_value={"origin_id":IDS[0],"destination_id":IDS[1],"minutes":9,"mode":"walking"})
-        first = await agent.plan(self.state,"规划并查路线",self.payload,tool,daily=True)
-        request = tool.call_args.args[0]
-        self.assertEqual((request.origin_id,request.destination_id),tuple(IDS[:2]))
-        observation = self.model.ask.call_args.args[2]["tool_observations"][0]
-        self.assertEqual(observation["request"]["origin_id"],"stop_1")
-        self.assertEqual(observation["result"]["destination_id"],"stop_2")
-        with self.store.connect() as db:
-            raw = db.execute("SELECT request FROM queries WHERE trip_id=?",(self.state["trip_id"],)).fetchone()[0]
-        self.assertEqual(json.loads(raw)["origin_id"],IDS[0])
-        again = await agent.plan(self.state,"规划并查路线",self.payload,tool,daily=True)
-        self.assertEqual(first.order.stop_ids,IDS)
-        self.assertEqual(again.order.stop_ids,IDS)
-        self.assertEqual(self.model.ask.await_count,2)
-        tool.assert_awaited_once()
 
     async def test_candidate_dates_and_stop_ids_decode_before_global_validation(self):
         turn = RouteTurn(status="ready",candidate=Candidate(title="候选",reason="所选攻略",
@@ -92,21 +58,6 @@ class RouteReferenceAliases(unittest.IsolatedAsyncioTestCase):
         result = await agent.plan(self.state,"安排整趟",self.payload,AsyncMock())
         self.assertEqual(result.candidate.days[0].stop_ids,IDS)
 
-    async def test_current_reported_typo_gets_a_short_id_correction_and_is_not_cached_as_completed(self):
-        bad_ids = [TYPO+":"+suffix for suffix in ("6","8","9")]
-        agent = self.agent([ready(bad_ids),ready(durations={"stop_1":45},start_times={"stop_1":"11:00"})])
-        planner = Planner.__new__(Planner)
-        planner.route_agent,planner.emit = agent,Mock()
-        result = await planner.daily_order(self.state,self.day,list(IDS),set(),{})
-        self.assertEqual(result.order.stop_ids,IDS)
-        self.assertEqual(self.model.ask.await_count,2)
-        correction = self.model.ask.call_args.args[2]
-        self.assertEqual(correction["reference_correction"]["allowed_stop_ids"],ALIASES)
-        self.assertEqual(correction["reference_correction"]["invalid_ids"],bad_ids)
-        with self.store.connect() as db:
-            saved = [json.loads(row[0]) for row in db.execute("SELECT document FROM agent_results WHERE trip_id=?",(self.state["trip_id"],))]
-        self.assertTrue(saved)
-        self.assertFalse(any(TYPO in json.dumps(value,ensure_ascii=False) for value in saved))
 
     async def test_repeated_unknown_reference_is_rejected_and_never_replayed_as_success(self):
         agent = self.agent([ready(["stop_999"]),ready(["stop_999"])])

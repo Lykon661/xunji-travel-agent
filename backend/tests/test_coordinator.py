@@ -52,6 +52,7 @@ def prepared():
 
 def agent(resolution=None, interpretation=None):
     result = AsyncMock()
+    result.word.side_effect = lambda state,batch:batch
     result.interpret.return_value = interpretation or {"interpretation_id":"i","summary":"模型描述不应用于执行消息",
         "actions":[{"type":"set_budget","amount":2000}],"quotes":[{"action_index":0,"quote":"预算2000"}]}
     return result

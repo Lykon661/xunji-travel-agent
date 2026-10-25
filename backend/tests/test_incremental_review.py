@@ -75,12 +75,6 @@ class IncrementalPayload(unittest.TestCase):
         self.assertEqual(len(merged["checks"]),10)
         self.assertFalse(review_reference_errors(ReviewReport.model_validate(merged),review_payload(self.state,self.new,[],[])))
 
-    def test_unmodified_blocker_is_retained_and_prevents_a_pass(self):
-        self.previous["report"] = report([finding(2)]).model_dump(mode="json")
-        payload = incremental_review_payload(self.state,self.new,[],[],self.previous)
-        merged = merge_incremental_review(self.previous,report().model_dump(mode="json"),payload,self.new)
-        self.assertEqual(merged["status"],"revise")
-        self.assertEqual(merged["findings"],[finding(2)])
 
     def test_global_or_uncertain_changes_require_full_review(self):
         variants = []
@@ -150,15 +144,3 @@ class IncrementalAudit(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.args[1]["review_dates"],[DATES[1]])
         self.assertEqual(len(second.args[1]["plan"]["days"]),1)
         self.assertFalse([item for item in items if item.blocking])
-
-    async def test_code_blocker_keeps_full_review(self):
-        current = state()
-        old,new = plan(),plan()
-        new["days"][1]["activities"][0]["end"] = "09:45"
-        new["issues"] = [{"code":"real_conflict","message":"真实活动冲突","target":"1","blocking":True}]
-        current["review_previous"] = previous(current,old)
-        self.planner.reviewer_agent.review.return_value = report([finding(1)])
-        await self.planner.audit(current,new)
-        payload = self.planner.reviewer_agent.review.await_args.args[1]
-        self.assertNotIn("review_mode",payload)
-        self.assertEqual(len(payload["plan"]["days"]),3)

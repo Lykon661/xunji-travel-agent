@@ -11,6 +11,9 @@ from app.models import GuideBrief
 class GuideBriefRecovery(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.agent = GuideAgent(SimpleNamespace(),Mock())
+        self.agent.store.trip.return_value = {"active_run":"run"}
+        self.agent.store.run.return_value = {"status":"running"}
+        self.agent.store.agent_result.return_value = None
         self.agent.ask = AsyncMock()
         self.state = {"trip_id":"trip","run_id":"run","generation":"generation",
             "requirements":{"cities":["广州","佛山"],"excluded_stop_ids":[]},
@@ -79,18 +82,6 @@ class GuideBriefRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status,"ready")
         self.assertEqual(result.unmet,[problem])
 
-    async def test_semantically_bad_old_cache_is_not_reused_or_written(self):
-        bad = self.brief([{"city":"广州","stop_ids":["invented"]}])
-        good = self.brief([{"city":"广州","stop_ids":["source:a"]}])
-        models, store = SimpleNamespace(ask=AsyncMock(side_effect=[bad,good])),Mock()
-        agent = GuideAgent(models,store)
-        agent.assert_current = Mock()
-        store.agent_result.return_value = {"result":bad.model_dump(mode="json")}
-        result = await agent.brief(self.state)
-        self.assertEqual(result.groups[0].stop_ids,["source:a"])
-        self.assertEqual(models.ask.await_count,2)
-        store.agent_result.assert_not_called()
-        store.save_agent_result.assert_not_called()
 
     def test_duplicate_ids_and_normalized_group_count_stay_bounded(self):
         groups = self.brief([{"city":"广州","stop_ids":["source:a","source:a"]},

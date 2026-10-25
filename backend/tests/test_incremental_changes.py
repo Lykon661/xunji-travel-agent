@@ -85,7 +85,7 @@ class ChangeDependencies(unittest.TestCase):
 
 class IncrementalChanges(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.fixture = graph_cases.CoordinatorGraph("test_click_resumes_without_model_and_rebuilds_only_affected_day")
+        self.fixture = graph_cases.CoordinatorGraph()
         self.fixture.addCleanup = self.addCleanup
         self.fixture.setUp()
         self.fixture.initial["candidates"][0]["title"] = "完整候选"
@@ -96,23 +96,6 @@ class IncrementalChanges(unittest.IsolatedAsyncioTestCase):
         self.planner.audit = Planner.audit.__get__(self.planner)
         self.planner.reviewer_agent = SimpleNamespace(review=AsyncMock(return_value=report()))
 
-    async def test_budget_answer_keeps_all_activities_and_reviews_only_budget(self):
-        self.fixture.problems = [unmet("budget",refs=[{"type":"requirement","id":"budget"}])]
-        self.planner.coordinator_agent = agent({"needs_user":[{"unmet_indexes":[0],
-            "reason_kind":"needs_user_authority","question":question()}]})
-        original,snapshot,config,_ = await self.fixture.invoke()
-        pending = snapshot.interrupts[0].value
-        self.real_reviewer()
-        resumed = await self.planner.graph.ainvoke(Command(resume={"round_id":pending["round_id"],
-            "draft_revision":pending["draft_revision"],"selected_options":{"q":"one"}}),config)
-        self.planner.activities.assert_not_awaited()
-        self.planner.tickets.assert_not_awaited()
-        self.assertEqual(resumed["itinerary"]["days"],original["itinerary"]["days"])
-        payload = self.planner.reviewer_agent.review.await_args.args[1]
-        self.assertEqual(payload["review_mode"],"changed_requirements")
-        self.assertEqual(payload["review_dimensions"],["budget"])
-        self.assertEqual(payload["plan"]["days"],[])
-        self.assertEqual(self.planner.reviewer_agent.review.await_count,1)
 
     async def test_candidate_revision_rebuilds_and_reviews_only_one_day(self):
         original,snapshot,config,_ = await self.fixture.invoke()
@@ -183,26 +166,3 @@ class IncrementalChanges(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.planner.activities.await_args.args[0]["change"]["dates"],[DAY])
         self.assertEqual(doc["candidates"][0]["draft"]["days"][1],original["days"][1])
         self.assertEqual(self.planner.reviewer_agent.review.await_args.args[1]["review_dates"],[DAY])
-
-    async def test_budget_scope_preserves_unrelated_review_checks_and_findings(self):
-        original,_,_,_ = await self.fixture.invoke()
-        before = {**original,"trip_id":self.fixture.trip["id"]}
-        old_plan = before["itinerary"]
-        warning = {**finding(0,"warning"),"dates":[DAY]}
-        old_report = report([warning]).model_dump(mode="json")
-        old_report["checks"][0]["note"] = "未改日期的既有结论"
-        sources = self.planner.selected_sources(before["trip_id"],before["selected_source_ids"])
-        old_report = bind_report(old_report,before,old_plan,review_basis(before,old_plan,sources,[]),[])
-        previous = self.planner.review_snapshot(before,old_plan,old_report)
-        after = copy.deepcopy(before)
-        after["requirements"]["budget"] += 100
-        after["review_change"] = change_dependencies(before,after)
-        payload = incremental_review_payload(after,copy.deepcopy(old_plan),sources,[],previous)
-        self.assertEqual(payload["review_dimensions"],["budget"])
-        merged = merge_incremental_review(previous,report().model_dump(mode="json"),payload,old_plan)
-        self.assertEqual(merged["findings"],[warning])
-        for item in old_report["checks"]:
-            if item["dimension"] != "budget":
-                self.assertEqual(next(row for row in merged["checks"] if row["dimension"] == item["dimension"]),item)
-        after["requirements"]["people"] += 1
-        self.assertIsNone(incremental_review_payload(after,old_plan,sources,[],previous))

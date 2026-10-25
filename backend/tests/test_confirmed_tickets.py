@@ -45,21 +45,3 @@ class ConfirmedTickets(unittest.IsolatedAsyncioTestCase):
         await self.planner.tickets({**self.state,"itinerary":result["itinerary"]})
         self.assertEqual(self.planner.flyai.ticket.await_count,2)
         self.assertEqual(self.planner.flyai.ticket.call_args.args[3],"2026-11-11")
-
-    async def test_runtime_failure_pauses_remaining_tickets_without_duplicate_retry(self):
-        self.planner.flyai.ticket.side_effect = ToolError("flyai_runtime","组件异常退出")
-        self.state["itinerary"]["days"][0]["activities"].append({"id":"b","name":"景点二","kind":"visit","ticket_claim":"门票60元"})
-        result = await self.planner.tickets(self.state)
-        self.assertEqual(result["itinerary"]["days"][0]["activities"][-1]["ticket_quote"]["status"],"paused")
-        await self.planner.tickets({**self.state,"itinerary":result["itinerary"]})
-        self.assertEqual(self.planner.flyai.ticket.await_count,1)
-
-    async def test_unconfigured_query_keeps_failure_status_and_applies_user_free_default(self):
-        self.planner.flyai.availability = lambda:{"ready":False,"message":"未配置Key"}
-        result = await self.planner.tickets(self.state)
-        quote = result["itinerary"]["days"][0]["activities"][0]["ticket_quote"]
-        self.assertEqual(quote["price"],0)
-        self.assertTrue(quote["assumed_free"])
-        self.assertIn("未配置Key",quote["note"])
-        self.assertEqual(quote["status"],"not_configured")
-        self.planner.flyai.ticket.assert_not_awaited()

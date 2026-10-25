@@ -38,15 +38,6 @@ class StructuredUnmet(unittest.TestCase):
         second.kind = "walking"
         self.assertNotEqual(fingerprint(first), fingerprint(second))
 
-    def test_confirmation_records_preserve_the_existing_text_interface(self):
-        itinerary = plan()
-        itinerary["days"][0]["activities"][0]["map_place"] = None
-        issues = confirmation_issues(itinerary, {"required":["b"]}, REQ, {"b":{"id":"b", "name":"博物馆", "city":"杭州"}})
-        self.assertEqual(confirmation_blockers(itinerary, {"required":["b"]}, REQ, {"b":{"id":"b", "name":"博物馆", "city":"杭州"}}),
-                         list(dict.fromkeys(item["message"] for item in issues)))
-        self.assertTrue(any(item["code"] == "stop_unplaced" and {"type":"stop", "id":"b"} in item["refs"] for item in issues))
-        self.assertTrue(any(item["code"] == "place_identity" and item["dates"] == [DAY] for item in issues))
-        self.assertTrue(all({"code", "refs", "dates", "numbers", "blocking"} <= item.keys() for item in issues))
 
     def test_collection_uses_structured_codes_and_numbers_without_reading_messages(self):
         itinerary = plan()

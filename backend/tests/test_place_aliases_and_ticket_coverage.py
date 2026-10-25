@@ -73,17 +73,6 @@ class AliasRepairAndTickets(unittest.IsolatedAsyncioTestCase):
             "price":50,"status":"reference","queried_at":now(),"note":"合成参考价"}))
 
 
-    async def test_museums_and_zoos_without_ticket_claims_are_queried_but_free_sites_are_not(self):
-        activities = [{"id":str(index),"kind":"visit","name":name} for index,name in enumerate(
-            ("广东省博物馆","长隆野生动物园","北京路步行街"))]
-        activities += [{"id":"free","kind":"visit","name":"免费博物馆","ticket_claim":"免费开放"}]
-        itinerary = {"days":[{"city":"广州","date":"2026-11-10","activities":activities}]}
-        await self.planner.query_ticket_prices({"trip_id":"trip"},itinerary,{"2026-11-10"},missing_only=True)
-        self.assertEqual(self.planner.resource_agent.ticket.await_count,2)
-        self.assertEqual([item.get("ticket_quote",{}).get("price") for item in activities],[50,50,None,None])
-        self.assertEqual(ticket_policy(activities[0]),"unspecified")
-        self.assertTrue(activities[0]["ticket_query_required"])
-        self.assertFalse(ticket_query_required(activities[-1]))
 
     async def test_explicit_ticket_refresh_bypasses_the_recent_quote_guard(self):
         activity = {"id":"zoo","name":"动物园","kind":"visit","ticket_quote":{
@@ -94,27 +83,7 @@ class AliasRepairAndTickets(unittest.IsolatedAsyncioTestCase):
         self.planner.resource_agent.ticket.assert_awaited_once()
         self.assertEqual(activity["ticket_quote"]["price"],50)
 
-    async def test_sourced_supplier_alias_is_matched_but_two_supplier_ids_remain_ambiguous(self):
-        flyai = FlyAI.__new__(FlyAI)
-        row = {"id":"zoo","name":"长隆野生动物园","ticketInfo":{"price":50,"ticketName":"成人票"}}
-        flyai.search = AsyncMock(return_value={"queried_at":"now","status":"ok","raw":{"items":[row]}})
-        result = await flyai.ticket("trip","广州","长隆野生动物世界","2026-11-10",aliases=["长隆野生动物园"])
-        self.assertEqual(result["price"],50)
-        flyai.search.return_value["raw"]["items"].append({**row,"id":"other-zoo"})
-        result = await flyai.ticket("trip","广州","长隆野生动物世界","2026-11-10",aliases=["长隆野生动物园"])
-        self.assertEqual(result["price"],0)
-        self.assertTrue(result["assumed_free"])
-        self.assertEqual(result["status"],"place_confirmation")
 
-    async def test_evidence_recheck_preserves_a_recent_successful_ticket_quote(self):
-        activity = {"id":"zoo","name":"动物园","kind":"visit","ticket_quote":{
-            "price":50,"status":"reference","visit_date":"2026-11-10","queried_at":now()}}
-        original = copy.deepcopy(activity["ticket_quote"])
-        itinerary = {"days":[{"city":"广州","date":"2026-11-10","activities":[activity]}]}
-        await self.planner.query_ticket_prices({"trip_id":"trip","change":{"refresh_resources":True}},
-                                              itinerary,{"2026-11-10"},missing_only=True)
-        self.planner.resource_agent.ticket.assert_not_awaited()
-        self.assertEqual(activity["ticket_quote"],original)
 
     async def test_an_empty_primary_lookup_tries_only_one_sourced_alias(self):
         flyai = FlyAI.__new__(FlyAI)

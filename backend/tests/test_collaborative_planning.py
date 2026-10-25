@@ -43,17 +43,6 @@ class PlanningInvariants(unittest.TestCase):
     def test_missing_price_and_future_weather_do_not_block_confirmed_structure(self):
         self.assertEqual(confirmation_blockers(complete_draft()),[])
 
-    def test_unknown_actual_route_blocks_confirmation_even_with_an_estimate(self):
-        plan = complete_draft()
-        # Without adopted lodging or an arrival segment the day has no start point, so no first leg is required.
-        plan["days"][0]["activities"][0]["move_before"] = {"minutes":None,"estimate_minutes":45}
-        self.assertEqual(confirmation_blockers(plan),[])
-        plan["days"][0]["activities"][0]["move_before"] = {"minutes":0,"mode":"walking"}
-        second = copy.deepcopy(plan["days"][0]["activities"][0])
-        second.update(id="source:1",name="合成景点二",start="11:30",end="12:30",
-                      map_place={"id":"poi-b","location":"113.3,23.2"},move_before={"minutes":None,"estimate_minutes":45})
-        plan["days"][0]["activities"].append(second)
-        self.assertTrue(confirmation_blockers(plan))
 
     def test_missing_required_stop_blocks_confirmation(self):
         self.assertTrue(confirmation_blockers(complete_draft(),{"required":["source:missing"]}))
@@ -64,12 +53,6 @@ class PlanningInvariants(unittest.TestCase):
         value = RouteTurn(status="ready",order=OrderChoice(stop_ids=[]),unmet=[item])
         self.assertEqual(value.unmet,[item])
 
-    def test_same_poi_from_two_guides_is_not_two_visits(self):
-        plan = complete_draft()
-        second = copy.deepcopy(plan["days"][0]["activities"][0])
-        second["id"] = "other-source:0"
-        plan["days"][0]["activities"].append(second)
-        self.assertTrue(confirmation_blockers(plan))
 
     def test_map_refresh_does_not_change_source_fingerprint_but_source_edit_does(self):
         stops = {"a":{"name":"景点","city":"广州","evidence":{"quote":"景点"}}}

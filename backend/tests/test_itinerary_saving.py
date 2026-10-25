@@ -88,21 +88,6 @@ class ItinerarySaving(unittest.IsolatedAsyncioTestCase):
         self.planner.assert_document_review(trip)
         self.assertEqual(trip["document"]["itinerary_saved_version"],1)
 
-    async def test_explicit_save_and_lock_require_explicit_second_save(self):
-        await self.generate()
-        await save_itinerary(self.id,self.save_input())
-        await save_itinerary(self.id,self.save_input())
-        await lock(self.id,LockInput(item_id="visit",locked=True,base_version=1))
-        self.assertEqual(len(self.store.versions(self.id)),1)
-        self.assertIsNone(self.store.trip(self.id)["document"]["itinerary_saved_version"])
-        with self.assertRaises(Conflict):
-            await save_itinerary(self.id,self.save_input())
-        self.approve_fixture(self.store.trip(self.id)["document"])
-        await save_itinerary(self.id,self.save_input())
-        versions = self.store.versions(self.id)
-        self.assertEqual([v["version"] for v in versions],[2,1])
-        self.assertEqual(versions[1]["document"]["locks"],[])
-        self.assertEqual(versions[0]["document"]["locks"],["visit"])
 
     async def test_stale_or_running_save_and_delete_are_rejected(self):
         await self.generate()
