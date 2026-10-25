@@ -29,34 +29,7 @@ class PlaceDisambiguation(unittest.IsolatedAsyncioTestCase):
         clarification = self.planner.place_clarification(stops,["guide:a"],[{"date":"2026-11-10","stop_ids":["guide:a"]}])
         return {**self.state,"stops":stops,**clarification}
 
-    async def test_unresolved_matching_retains_candidates_and_asks_a_concrete_place_question(self):
-        state = await self.question()
-        question = state["decision"]
-        self.assertIn("东路1号",question["options"][0])
-        self.assertIn("西路2号",question["options"][1])
-        self.assertEqual(question["affected_dates"],["2026-11-10"])
-        self.assertEqual(len(state["stops"]["guide:a"]["map_candidates"]),2)
-        self.assertIsNone(state["stops"]["guide:a"]["map_place"])
-        self.assertNotIn("接受缺口",question["question"])
 
-    async def test_user_option_binds_the_exact_poi_without_a_second_model_guess(self):
-        state = await self.question()
-        option = state["decision"]["options"][1]
-        self.planner.models.ask.reset_mock()
-        def answer(pending):
-            return {"round_id":pending["round_id"],"draft_revision":pending["draft_revision"],
-                    "answers":{state["decision"]["id"]:option}}
-        with patch("app.planner.interrupt",side_effect=answer):
-            result = await self.planner.decision_gate(state)
-        point = result["stops"]["guide:a"]["map_place"]
-        self.assertEqual((point["id"],point["location"]),("west","121,31"))
-        self.assertIn("明确选择",point["match_basis"])
-        self.assertEqual(result["decision_history"][-1]["place_selection"]["poi_id"],"west")
-        self.assertEqual(result["decision"],{})
-        self.planner.models.ask.assert_not_awaited()
-        reloaded = await self.planner.locate_stops({**self.state,"decision_history":result["decision_history"]},self.stops)
-        self.assertEqual(reloaded["guide:a"]["map_place"]["id"],"west")
-        self.planner.models.ask.assert_not_awaited()
 
     async def test_same_name_stops_keep_separate_source_contexts_and_choices(self):
         stops = copy.deepcopy(self.stops)
@@ -76,26 +49,13 @@ class PlaceDisambiguation(unittest.IsolatedAsyncioTestCase):
         searches = [call for call in self.planner.amap.call.call_args_list if call.args[1] == "maps_text_search"]
         self.assertEqual(len(searches),1)
 
-    async def test_failed_coordinates_keep_the_user_choice_without_claiming_a_location(self):
-        state = await self.question()
-        self.planner.amap.place = AsyncMock(side_effect=ToolError("amap_network","合成高德连接失败"))
-        option = state["decision"]["options"][0]
-        def answer(pending):
-            return {"round_id":pending["round_id"],"draft_revision":pending["draft_revision"],
-                    "answers":{state["decision"]["id"]:option}}
-        with patch("app.planner.interrupt",side_effect=answer):
-            result = await self.planner.decision_gate(state)
-        stop = result["stops"]["guide:a"]
-        self.assertIsNone(stop["map_place"])
-        self.assertEqual(stop["map_selected_id"],"east")
-        self.assertIn("连接失败",stop["map_issue"])
-        self.assertIsNone(self.planner.place_clarification(result["stops"],["guide:a"]))
 
-    async def test_changed_preferences_are_reassessed_instead_of_overriding_them_with_an_old_choice(self):
+    async def test_unrelated_preferences_preserve_the_user_selected_poi(self):
         history = [{"place_selection":{"stop_id":"guide:a","city":"杭州","name":"合成艺术馆","poi_id":"east",
                                         "preferences":"优先遵循攻略原文"}}]
         self.planner.models.ask.return_value = ResourceChoice(selected_id="west",reason="用户最新要求西路2号")
-        state = {**self.state,"decision_history":history,"requirements":{"preferences":"改为西路2号的场馆"}}
+        state = {**self.state,"decision_history":history,"requirements":{"preferences":"希望减少步行"}}
         result = await self.planner.locate_stops(state,self.stops)
-        self.assertEqual(result["guide:a"]["map_place"]["id"],"west")
-        self.planner.models.ask.assert_awaited_once()
+        self.assertEqual(result["guide:a"]["map_place"]["id"],"east")
+        self.assertEqual(result["guide:a"]["map_selected_by"],"user")
+        self.planner.models.ask.assert_not_awaited()

@@ -72,15 +72,6 @@ class AliasRepairAndTickets(unittest.IsolatedAsyncioTestCase):
         self.planner.resource_agent = SimpleNamespace(ticket=AsyncMock(return_value={
             "price":50,"status":"reference","queried_at":now(),"note":"合成参考价"}))
 
-    async def test_repair_keeps_one_visit_and_both_sources_and_refreshes_affected_legs(self):
-        self.planner.refresh_day_routes = AsyncMock()
-        result = await self.planner.repair({"itinerary":street_plan(),"locks":[],"requirements":{},
-                                           "stops":canonicalize_stops(street_stops())})
-        days = result["itinerary"]["days"]
-        self.assertEqual(len(days[0]["activities"]),1)
-        self.assertEqual(days[1]["activities"],[])
-        self.assertEqual({ref["stop_id"] for ref in days[0]["activities"][0]["source_references"]},set(street_stops()))
-        self.assertEqual(self.planner.refresh_day_routes.call_args.args[2],{"2026-11-11"})
 
     async def test_museums_and_zoos_without_ticket_claims_are_queried_but_free_sites_are_not(self):
         activities = [{"id":str(index),"kind":"visit","name":name} for index,name in enumerate(

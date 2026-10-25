@@ -104,7 +104,8 @@ class ProviderPrices(unittest.TestCase):
 
     def test_movement_and_opening_times_are_not_counted_as_unknown_fees(self):
         itinerary = {"hotels":[],"transport":[],"days":[{"date":"2026-10-13","city":"广州","meal_estimate":100,
-            "activities":[{"id":"a","kind":"visit","name":"合成景点","start":"09:45","end":"10:45","evidence":{"quote":"合成景点"},
+            "activities":[{"id":"first","kind":"visit","name":"首站","start":"08:30","end":"09:00","evidence":{"quote":"首站"}},
+                {"id":"a","kind":"visit","name":"合成景点","start":"09:45","end":"10:45","evidence":{"quote":"合成景点"},
                 "move_before":{"minutes":None,"estimate_minutes":45,"allowed_modes":["walking"]}}],"return_move":{"minutes":0,"mode":"walking"}}]}
         result = check_itinerary(itinerary,REQ)
         self.assertTrue(any("移动时间" in note for note in result["information_unknown"]))
@@ -122,14 +123,16 @@ class TicketQuotes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(quote["price_basis"],"starting")
         self.assertIn("日期不同",quote["note"])
 
-    async def test_missing_price_uses_the_explicit_user_free_default(self):
+    async def test_missing_price_is_a_system_placeholder_with_unknown_price(self):
         flyai = FlyAI.__new__(FlyAI)
         flyai.search = AsyncMock(return_value={"queried_at":"now","raw":{"data":{"itemList":[
             {"name":"合成景点","ticketInfo":{"price":None,"priceDate":"2026-10-13"}}]}}})
         quote = await flyai.ticket("trip","广州","合成景点","2026-10-13")
         self.assertEqual(quote["price"],0)
         self.assertTrue(quote["assumed_free"])
-        self.assertIn("未返回",quote["note"])
+        self.assertIn("未查询到门票，预算按0元计算",quote["note"])
+        self.assertTrue(quote["price_unknown"])
+        self.assertNotRegex(quote["note"],"你|用户")
 
 
 class ResumedResourceQuery(unittest.IsolatedAsyncioTestCase):

@@ -9,13 +9,12 @@ from unittest.mock import AsyncMock, Mock, patch
 from pydantic import ValidationError
 
 from app.agents.guide import GuideAgent
-from app.agents.runtime import digest
-from app.conflicts import apply_option, capacity_question, visit_minutes
+from app.conflicts import apply_option, visit_minutes
 from app.day_clustering import build_spatial_plan
 from app.decisions import input_hash, confirmation_blockers, route_structure
 from app.dining import is_dining, meal_recommendations, refresh_meals, dining_wish_issues, plan_meal_wishes
 from app.stop_types import is_light_wish, with_visit_defaults
-from app.models import Candidate, DecisionResolution, GuideBrief, GuideGroup, OrderChoice, Requirements, RouteTurn, wish_stop_id, wish_stops
+from app.models import Candidate, GuideBrief, GuideGroup, OrderChoice, Requirements, RouteTurn, wish_stop_id, wish_stops
 from app.places import canonicalize_stops, planning_stop_pool, duplicate_issues, occurrences
 from app.planner import Planner
 from app.rules import merge_candidate_duplicates, validate_candidate, check_itinerary
@@ -128,9 +127,10 @@ class WishSpatialPlan(unittest.TestCase):
         self.assertTrue(any("超出每日估计时间容量" in issue for issue in plan["issues"]),plan["issues"])
         itinerary = {"days":[{"date":A,"city":"杭州","available_start":540,"tail_deadline":720,"activities":[]}]}
         current = state(req,stops,selected_route={"days":[{"date":A,"city":"杭州","stop_ids":[WISH_ID]}]})
-        question,options = capacity_question(current,itinerary,A)
-        self.assertIn("西湖",question["question"])
-        self.assertTrue(any(action["type"] == "exclude" and action["stop_id"] == WISH_ID for action in options.values()))
+        from app.conflicts import day_demand
+        demand = day_demand(current,itinerary,itinerary["days"][0],current["selected_route"]["days"][0])
+        self.assertTrue(any(item["id"] == WISH_ID for item in demand))
+
 
     def test_rules_and_guide_agent_accept_user_stops(self):
         req,stops = self.located(date=B)
@@ -314,16 +314,6 @@ class WishPlannerFlow(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(identity,payload["spatial_plan"]["required_ids"])
         self.assertIn(identity,result["stops"])
 
-    async def test_free_text_can_remove_a_dining_wish_without_reviving_it(self):
-        req = requirements(wish_places=[{"city":"杭州","name":"湖畔餐厅"}])
-        identity = wish_stop_id("杭州","湖畔餐厅")
-        current = state(req,generation="generation",draft_revision=0,decision_resume="guide_analysis",
-                        decision={"id":"coffee","question":"取消哪项用餐？","why_needed":"用户修改需求","affected_dates":[A]})
-        self.planner.models.ask.return_value = DecisionResolution(excluded_ids=[identity],explanation="取消餐厅")
-        result = await self.resolve_decision(current,"取消湖畔餐厅")
-        self.assertEqual(Requirements(**result["requirements"]).wish_places,[])
-        self.assertEqual(result["stops"],{})
-        self.assertEqual(result["stop_constraints"],{"required":[],"excluded":[]})
 
     async def test_light_wish_is_scheduled_as_visit_with_default_or_user_duration(self):
         for minutes in (None,75):
@@ -372,52 +362,7 @@ class WishPlannerFlow(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["stops"][identity].get("duration_is_default",False))
         self.assertEqual(visit_minutes(result["stops"][identity],{},scheduled_minutes=30),75)
 
-    async def test_free_text_exclusion_removes_wish_and_preserves_other_constraints(self):
-        other = {"city":"杭州","name":"灵隐寺"}
-        other_id = wish_stop_id("杭州","灵隐寺")
-        req = requirements(wish_places=[WISH,other],required_stop_ids=["guide:park"])
-        stops = self.planner.source_stops(self.trip["id"],["guide"],req)
-        current = state(req,stops,generation="generation",draft_revision=1,decision_resume="assess",
-                        decision={"id":"wish-choice","question":"哪项活动可以取消？","why_needed":"时间不足","affected_dates":[A]},
-                        candidates=[{"id":"candidate","days":[{"date":A,"city":"杭州","stop_ids":["guide:park",other_id]},
-                                                                    {"date":B,"city":"杭州","stop_ids":[WISH_ID]}]}],
-                        repair_only=True,assessment_refresh=True)
-        self.planner.models.ask.return_value = DecisionResolution(excluded_ids=[WISH_ID,"guide:park"],keep_current_plan=True,
-                                                                 explanation="取消西湖和公园，保留灵隐寺")
-        original = deepcopy(current)
-        result = await self.resolve_decision(current,"西湖和公园不去，其他保留")
-        self.assertEqual(result["requirements"]["wish_places"],[{**other,"date":None,"duration_minutes":None}])
-        self.assertEqual(result["stop_constraints"],{"required":[other_id],"excluded":["guide:park"]})
-        self.assertNotIn(WISH_ID,result["stops"])
-        self.assertIn(other_id,result["stops"])
-        self.assertIn("guide:park",result["stops"])
-        self.assertEqual(result["candidates"][0]["days"][1]["stop_ids"],[])
-        self.assertEqual(result["assessment_dates"],[A,B])
-        self.assertFalse(result["keep_current_plan"])
-        self.assertFalse(result["repair_only"])
-        self.assertFalse(result["assessment_refresh"])
-        self.assertEqual(Requirements(**result["requirements"]).required_stop_ids,[other_id])
-        self.assertNotIn(WISH_ID,wish_stops(result["requirements"]))
-        self.assertEqual(current,original)
 
-    async def test_free_text_exclusion_of_last_wish_stays_removed_after_validation(self):
-        req = requirements(wish_places=[WISH])
-        current = state(req,generation="generation",draft_revision=0,decision_resume="guide_analysis",
-                        decision={"id":"wish-choice","question":"取消哪个地点？","why_needed":"时间不足","affected_dates":[A]})
-        self.planner.models.ask.return_value = DecisionResolution(excluded_ids=[WISH_ID],explanation="取消西湖")
-        result = await self.resolve_decision(current,"这次不去西湖")
-        validated = Requirements(**result["requirements"]).model_dump(mode="json")
-        self.assertEqual(validated["wish_places"],[])
-        self.assertEqual(validated["required_stop_ids"],[])
-        self.assertEqual(validated["excluded_stop_ids"],[])
-        self.assertEqual(result["stops"],{})
-
-    async def resolve_decision(self, current, answer):
-        token = digest({"question":current["decision"],"history":current.get("decision_history",[]),
-                        "generation":current["generation"],"revision":current["draft_revision"]})[:40]
-        reply = {"round_id":token,"draft_revision":current["draft_revision"],"answers":{current["decision"]["id"]:answer}}
-        with patch("app.planner.interrupt",return_value=reply):
-            return await self.planner.decision_gate(current)
 
     async def test_coordinate_removes_wish_without_excluding_it(self):
         req = requirements(wish_places=[WISH])

@@ -3,6 +3,12 @@ import json
 
 from ..adapters import ToolError
 from ..store import Conflict, now
+from ..views import model_view
+from ..assumptions import ASSUMPTION_NOTE, agent_payload as context_payload, visible_text
+
+
+def agent_payload(state, payload):
+    return context_payload(state,payload)
 
 
 def digest(value):
@@ -36,6 +42,11 @@ class AgentRuntime:
 
     async def ask(self, state, schema, instruction, payload, tools=None, cache=True, completion_schema=None):
         self.assert_current(state)
+        payload = agent_payload(state,payload)
+        if ASSUMPTION_NOTE not in instruction:
+            instruction += ASSUMPTION_NOTE
+        if self.role in {"行程 Agent","主理人 Agent"}:
+            instruction += "景点摘要的coordinates为经纬度；opening给出open/closed/unknown、分钟时段和停止入场，default为常规结果，exceptions只覆盖列出的日期。未知时间按09:00至17:00参考安排并提示未核实。必去或想去全程任一天安排即满足。"
         config_store = getattr(self.models,"config_store",None)
         config = config_store.snapshot().public() if config_store else {}
         references = self.model_references(state,payload)
@@ -44,7 +55,7 @@ class AgentRuntime:
                       "payload":payload,"generation":state["generation"]})
         cached = self.store.agent_result(state["trip_id"],key) if cache else None
         if cached:
-            result = schema.model_validate(cached["result"])
+            result = schema.model_validate(visible_text(cached["result"],state))
             if self.result_cacheable(state,payload,result):
                 for observation in cached.get("observations",[]):
                     self.apply_tool_observation(state,payload,observation)
@@ -53,7 +64,7 @@ class AgentRuntime:
         finish = False
         for turn in range(4):
             final_turn = tools is not None and (finish or turn == 3)
-            closing = ("本轮是收尾轮，禁止再请求工具，tools必须为空，status只能是ready或needs_decision。"
+            closing = ("本轮是收尾轮，禁止再请求工具，tools必须为空，status只能是ready。"
                        "直接利用已有依据完成当前任务；查不到的事实保留明确缺口，不编造耗时、位置或价格，"
                        "资料缺口本身不要求用户代查。不得删除必去、锁定项目或扩大所选攻略范围。") if final_turn else ""
             response_schema = completion_schema if final_turn and completion_schema else schema
@@ -61,12 +72,17 @@ class AgentRuntime:
             reference_note = ("本次available_stops的键是唯一允许的景点引用；内部长ID已换成stop_短编号。stop_ids、durations/start_times的键及工具origin_id/destination_id必须直接复制这些键；"
                               "不要生成、还原或抄写内部长ID，也不要只复制错误说明里的未知ID。程序会还原真实攻略引用。") if references else ""
             result = await self.models.ask(response_schema,f"你是{self.role}。"+instruction+closing+reference_note,
-                                           replace_references(model_payload,outward))
+                                           model_view(self.role,replace_references(state,outward),replace_references(model_payload,outward)))
             if references:
-                result = response_schema.model_validate(replace_references(result.model_dump(mode="json"),references))
+                restored = replace_references(result.model_dump(mode="json"),references)
+                result = response_schema.model_validate(restored)
             self.assert_current(state)
             requests = getattr(result,"tools",[]) if getattr(result,"status",None) == "tools" else []
             if not requests:
+                actual = result.model_dump(mode="json")
+                cleaned = visible_text(actual,state)
+                if cleaned != actual:
+                    result = type(result).model_validate(cleaned)
                 if cache and self.result_cacheable(state,payload,result):
                     self.store.save_agent_result(state["trip_id"],key,{"result":result.model_dump(mode="json"),"observations":observations})
                 self.store.event(state["run_id"],"agent",f"{self.role}已交接结果",agent=self.role,

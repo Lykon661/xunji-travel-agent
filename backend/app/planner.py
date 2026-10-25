@@ -15,22 +15,16 @@ from time import perf_counter
 from weakref import WeakValueDictionary
 
 from .adapters import Amap, Crawler, FlyAI, Models, ToolError
-from pydantic import ValidationError
 
-from .models import WISH_PREFIX, Candidate, Requirements, RequirementUpdate, DECISION_REQUIREMENT_FIELDS, DecisionResolution, wish_stop_id
+from .models import Candidate, Requirements
 from .rules import validate_candidate
-from .store import Conflict, now, dump
-from .routing import coordinates
+from .store import Conflict, now
 from .agents import GuideAgent, ResourceAgent, RouteAgent, ReviewerAgent
-from .agents.route import resolve_stop_id
-from .agents.runtime import digest
-from .decisions import apply_walking_decision, confirmation_blockers, walking_question
-from .decision_intent import has_delete_intent, unauthorized_stop_changes
-from .constraints import CONSTRAINT_GUIDE, UNQUOTED, check, merge, stop_catalog, trip_dates
-from .conflicts import accepted_shortage, apply_option
-from .dining import is_dining
-from .places import canonicalize_stops, plan_fingerprint
+from .decisions import confirmation_blockers
+from .places import plan_fingerprint
 from .nodes.candidates import CandidateNodes
+from .nodes.coordinating import CoordinatingNodes, pending_batch, persisted
+from .agents.coordinator import CoordinatorAgent
 from .nodes.guides import GuideNodes
 from .nodes.locations import LocationNodes
 from .nodes.resources import ResourceNodes
@@ -47,13 +41,9 @@ def interrupt(value):
     return graph_interrupt(value)
 
 
-def repeated_question(question, history):
-    """How many earlier rounds asked this question: same ID, or near-identical wording under a new ID."""
-    from difflib import SequenceMatcher
-    text = str(question.get("question") or "")
-    return sum(1 for entry in history for asked in entry.get("questions") or []
-               if asked.get("id") == question.get("id")
-               or text and SequenceMatcher(None,text,str(asked.get("question") or "")).ratio() >= 0.85)
+
+
+
 
 
 def error_leaves(error: BaseException):
@@ -64,7 +54,7 @@ def error_leaves(error: BaseException):
         yield error
 
 
-class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, LocationNodes, SchedulingNodes, ReviewLoopNodes):
+class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, LocationNodes, SchedulingNodes, ReviewLoopNodes, CoordinatingNodes):
     def __init__(self, store, checkpointer):
         self.store = store
         self.models = Models()
@@ -75,6 +65,7 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
         self.route_agent = RouteAgent(self.models,store)
         self.resource_agent = ResourceAgent(self.models,store,self.flyai)
         self.reviewer_agent = ReviewerAgent(self.models,store)
+        self.coordinator_agent = CoordinatorAgent(self.models,store)
         self.tasks: dict[str,asyncio.Task] = {}
         self.gates = WeakValueDictionary()
         self._checkpointer = checkpointer
@@ -85,32 +76,35 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
         from langgraph.graph import END, START, StateGraph
 
         graph = StateGraph(TripState)
-        for name in ("coordinate","requirements_gate","guides_gate","prepare_guides","guide_analysis","decision_gate","confirm_route","review_result","review_gate","planning_failed","interview","interview_gate","discover","assess","selection_gate","revise_candidate","transport","hotels","activities","tickets","check","save"):
+        names = ("coordinate","requirements_gate","guides_gate","prepare_guides","guide_analysis","confirm_route",
+                 "review_result","review_gate","planning_failed","discover","assess","selection_gate","revise_candidate",
+                 "transport","hotels","activities","tickets","check","save","coordinator","coordinator_gate",
+                 "interpret_answer","decision_confirmation_gate","blocked_plan","apply_assumption_change")
+        for name in names:
             graph.add_node(name,getattr(self,name))
         graph.add_edge(START,"coordinate")
-        graph.add_conditional_edges("coordinate",self.after_coordinate,{"requirements":"requirements_gate","guides":"guides_gate","resources":"transport"})
+        graph.add_conditional_edges("coordinate",self.after_coordinate,{"requirements":"requirements_gate","guides":"guides_gate",
+            "resources":"transport","assumption":"apply_assumption_change"})
+        graph.add_edge("apply_assumption_change","coordinator")
         graph.add_edge("requirements_gate","coordinate")
         graph.add_edge("guides_gate","prepare_guides")
         graph.add_conditional_edges("prepare_guides",lambda s:"guide_analysis" if s.get("stops") else "selection_gate")
-        graph.add_conditional_edges("guide_analysis",lambda s:"decision_gate" if s.get("decision") else "discover")
-        graph.add_conditional_edges("decision_gate",lambda s:s["decision_resume"],{"guide_analysis":"guide_analysis","discover":"discover","assess":"assess","review_result":"review_result","selection_gate":"selection_gate"})
-        graph.add_edge("interview","interview_gate")
-        graph.add_conditional_edges("interview_gate",lambda s:"discover" if s.get("interview",{}).get("confirmed") else "interview")
-        graph.add_conditional_edges("discover",lambda s:"decision_gate" if s.get("decision") else "assess")
-        graph.add_conditional_edges("assess",lambda s:"decision_gate" if s.get("decision") else "review_gate")
+        for name in ("guide_analysis","discover","assess","review_result","planning_failed"):
+            graph.add_edge(name,"coordinator")
+        graph.add_conditional_edges("coordinator",self.after_coordinator,
+            {name:name for name in ("coordinator_gate","decision_confirmation_gate","blocked_plan","discover","assess","review_gate")})
+        graph.add_edge("coordinator_gate","interpret_answer")
+        graph.add_edge("decision_confirmation_gate","interpret_answer")
+        graph.add_conditional_edges("interpret_answer",lambda s:"decision_confirmation_gate" if s.get("coordinator_confirmation")
+            else "coordinator_gate" if s.get("coordinator_batch") else "coordinator")
+        graph.add_edge("blocked_plan",END)
         graph.add_conditional_edges("review_gate",self.after_review_gate)
-        graph.add_edge("planning_failed","decision_gate")
-        graph.add_conditional_edges("selection_gate",lambda s:"revise" if s.get("route_edit") else "guides" if not s.get("selected_route") else "confirm",{"revise":"revise_candidate","guides":"guides_gate","confirm":"confirm_route"})
+        graph.add_conditional_edges("selection_gate",lambda s:"revise" if s.get("route_edit") else "guides" if not s.get("selected_route") else "confirm",
+            {"revise":"revise_candidate","guides":"guides_gate","confirm":"confirm_route"})
         graph.add_edge("confirm_route","save")
         graph.add_edge("revise_candidate","assess")
-        graph.add_edge("transport","hotels")
-        graph.add_edge("hotels","activities")
-        graph.add_edge("activities","tickets")
-        graph.add_edge("tickets","check")
-        # 规则检查后一律交给独立审查；修复由 assess_result 在审查结论后按共享预算调用 repair()，
-        # 不再经由 check -> repair 的图边（该边历史上恒不触发，已移除）。
-        graph.add_edge("check","review_result")
-        graph.add_conditional_edges("review_result",lambda s:END if s.get("factual_refresh_completed") else "decision_gate" if s.get("decision") else "review_gate")
+        for first,second in zip(("transport","hotels","activities","tickets","check"),("hotels","activities","tickets","check","review_result")):
+            graph.add_edge(first,second)
         graph.add_edge("save",END)
         compiled = graph.compile(checkpointer=self._checkpointer)
         logging.getLogger("uvicorn.error").info("[startup] planning graph initialized on demand: %.3fs",perf_counter()-started)
@@ -127,276 +121,15 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
         doc = trip["document"]; doc.update(stage=stage,progress_stage=stage,progress_message=message,pending=None)
         self.store.update(state["trip_id"],doc)
 
-    async def decision_gate(self,state):
-        question = state["decision"]
-        history = state.get("decision_history",[])
-        if history and walking_question(question) and not state.get("decision_reopened"):
-            last = history[-1]
-            previous = (last.get("questions") or [{}])[0]
-            text = " ".join(last.get("answers",{}).values())+" "+last.get("note","")
-            req,keep = apply_walking_decision(state["requirements"],previous,text)
-            affected = question.get("affected_dates",[])
-            if walking_question(previous) and keep and affected and set(affected) <= set(req.get("walking_limit_exempt_dates",[])):
-                self.emit(state,"assessing","已按你上一条保持规划的指令处理步行限制，不再重复追问")
-                return {"requirements":req,"decision":{},"decision_resume":"assess","keep_current_plan":True,
-                        "assessment_dates":affected,"assessment_base":state["candidates"][0]["id"] if state.get("candidates") else ""}
-        if not state.get("decision_reopened") and repeated_question(question,history) >= 2:
-            # Two answers did not clear it, so answering cannot: keep the draft and its blockers for the user to act on elsewhere.
-            note = ("“"+(question.get("title") or "该问题")+"”已回答两次仍无法解决，不再重复追问；"
-                    "请在住宿、交通等面板操作，或修改需求后重新审查")
-            candidates = copy.deepcopy(state.get("candidates",[]))
-            for candidate in candidates[:1]:
-                candidate["confirmation_blockers"] = list(dict.fromkeys([*(candidate.get("confirmation_blockers") or []),note]))
-            return {"decision":{},"decision_resume":"selection_gate","candidates":candidates,"selected_route":{},
-                    "warnings":list(dict.fromkeys([*state.get("warnings",[]),note]))}
-        coded = state.get("decision_options") or {}
-        if coded.get("question_id") != question.get("id") and accepted_shortage(state,question):
-            # The user already accepted fewer stops and the guides have none left: asking again would repeat that answer.
-            dates = sorted({str(day) for day in question.get("affected_dates",[])})
-            summary = "你已接受景点不够的日子少排，"+"、".join(dates)+"按现有景点继续，不再追问"
-            history = [*history,{"questions":[question],"answers":{},"note":"","summary":summary,"auto_settled":"accepted_shortage"}]
-            drafted = bool(state.get("candidates") and state["candidates"][0].get("draft",{}).get("days"))
-            self.emit(state,"assessing",summary)
-            return {"decision_history":history,"decision":{},"decision_options":{},"decision_reopened":False,
-                    "assessment_dates":dates,"assessment_base":state["candidates"][0]["id"] if state.get("candidates") else "",
-                    "keep_current_plan":drafted and state["decision_resume"] in {"assess","review_result"},
-                    "draft_revision":state.get("draft_revision",0)+1,"repair_round":0,"review_feedback":[],"place_selection":{},
-                    "decision_resume":"assess" if state["decision_resume"] == "review_result" else state["decision_resume"],
-                    "interview":{"summary":summary,"questions":[],"history":history,"confirmed":False}}
-        token = digest({"question":question,"history":state.get("decision_history",[]),"generation":state["generation"],"revision":state.get("draft_revision",0)})[:40]
-        answer = interrupt({"kind":"decision","message":question["question"],"questions":[question],"round_id":token,
-                            "round":len(state.get("decision_history",[]))+1,"summary":question["why_needed"],
-                            "origin_step":"interview","resume_stage":state["decision_resume"],"draft_revision":state.get("draft_revision",0)})
-        values = answer.get("answers",{})
-        if answer.get("round_id") != token or answer.get("draft_revision") != state.get("draft_revision",0) or set(values) != {question["id"]} or not values[question["id"]].strip() or answer.get("confirm"):
-            raise Conflict("问题或草稿已变化，请只回答当前这一题")
-        selection = state.get("place_selection") or {}
-        if selection.get("kind") == "hub" and selection.get("question_id") == question["id"]:
-            poi_id = selection["options"].get(values[question["id"]].strip())
-            if not poi_id:
-                raise Conflict("请从列出的航站楼或进出站口中选择一个")
-            summary = "已选择"+values[question["id"]]+"作为"+selection["name"]+"的接驳位置，重新查询接驳路线"
-            history = [*history,{"questions":[question],"answers":values,"note":answer.get("note",""),"summary":summary,
-                                 "hub_selection":{"city":selection["city"],"name":selection["name"],"poi_id":poi_id}}]
-            # Re-run the full assessment so transfers, day start times and reviews all use the chosen hub.
-            return {"decision_history":history,"decision":{},"place_selection":{},"decision_reopened":False,
-                    "assessment_dates":[],"assessment_base":"","repair_only":False,"repair_round":0,"review_feedback":[],
-                    "draft_revision":state.get("draft_revision",0)+1,"keep_current_plan":False,
-                    "interview":{"summary":summary,"questions":[],"history":history,"confirmed":False}}
-        poi_id = ((selection.get("options") or {}).get(values[question["id"]])
-                  if selection.get("question_id") == question["id"] and not answer.get("note","").strip() else None)
-        if poi_id:
-            stops = copy.deepcopy(state["stops"])
-            stop = stops[selection["stop_id"]]
-            allowed = {item["id"] for item in stop.get("map_candidates",[])}
-            if poi_id not in allowed:
-                raise Conflict("地点候选已变化，请重新选择当前候选")
-            async def selected_poi(candidates):
-                return (poi_id,"用户在需求追问中明确选择该高德POI") if any(item.get("id") == poi_id for item in candidates) else (None,"已选POI不在当前高德候选中")
-            try:
-                place = await self.amap.place(state["trip_id"],stop["city"],stop["name"],selector=selected_poi)
-                place = place if place and place.get("id") == poi_id and coordinates(place) else None
-                stop["map_issue"] = "" if place else "已保留你选择的地点，但高德尚未返回该POI的可用坐标"
-            except ToolError as exc:
-                place = None
-                stop["map_issue"] = str(exc)
-            stop.update(map_place=place,map_selected_id=poi_id)
-            summary = "已选择"+values[question["id"]]+("，继续使用高德定位规划" if place else "，将继续补查高德坐标")
-            history = [*history,{"questions":[question],"answers":values,"note":answer.get("note",""),"summary":summary,
-                "place_selection":{"stop_id":selection["stop_id"],"city":stop["city"],"name":stop["name"],"poi_id":poi_id,
-                                   "preferences":state["requirements"].get("preferences","")}}]
-            candidates,previews = copy.deepcopy(state.get("candidates",[])),copy.deepcopy(state.get("previews",{}))
-            for candidate in candidates:
-                draft = candidate.get("draft") or {}
-                for day in draft.get("days",[]):
-                    for activity in day.get("activities",[]):
-                        if activity["id"] == selection["stop_id"]:
-                            activity["map_place"] = copy.deepcopy(place)
-                if draft.get("days"):
-                    candidate["review"] = None
-                    previews[candidate["id"]] = {"itinerary":copy.deepcopy(draft)}
-            return {"stops":canonicalize_stops(stops),"candidates":candidates,"previews":previews,
-                    "decision_history":history,"decision":{},"place_selection":{},"decision_reopened":False,
-                    "assessment_dates":question.get("affected_dates",[]),"assessment_base":candidates[0]["id"] if candidates else "",
-                    "repair_only":any(candidate.get("draft",{}).get("days") for candidate in candidates),
-                    "repair_round":0,"review_feedback":[],"draft_revision":state.get("draft_revision",0)+1,
-                    "keep_current_plan":False,"interview":{"summary":summary,"questions":[],"history":history,"confirmed":False}}
-        coded = state.get("decision_options") or {}
-        action = ((coded.get("options") or {}).get(values[question["id"]].strip())
-                  if coded.get("question_id") == question["id"] and not answer.get("note","").strip() else None)
-        if action:
-            # A code-built option is executed as its structured action; no model reads the answer.
-            updates,dates,summary = apply_option(state,action,values[question["id"]].strip())
-            history = [*history,{"questions":[question],"answers":values,"note":"","summary":summary,"code_option":action["type"]}]
-            return {**updates,"decision_history":history,"decision":{},"decision_options":{},"decision_reopened":False,
-                    "assessment_dates":dates,"assessment_base":state["candidates"][0]["id"] if state.get("candidates") else "",
-                    "draft_revision":state.get("draft_revision",0)+1,"repair_round":0,"review_feedback":[],"place_selection":{},
-                    "decision_resume":"assess" if state["decision_resume"] == "review_result" else state["decision_resume"],
-                    "interview":{"summary":summary,"questions":[],"history":history,"confirmed":False}}
-        instruction = (
-            "将用户当前问题的明确回答转成约束更新。requirements只填用户在这次回答中明确授权改变的字段；"
-            "推荐选项不是回答。required_ids与excluded_ids仅包含现有景点ID，代表这次明确设为必去或排除的景点。"
-            "用户选择保留时excluded_ids必须为[]；明确移除的地点不能写入required_ids。"
-            "最新明确指令优先于默认规则与历史偏好，合并preferences时删除被本次指令推翻的旧限制；推翻此前constraints时用revoke=true或填写新条件，由系统覆盖旧条件。"
-            "在步行超限取舍问题中，用户说保持规划、不要删点或接受超限，就是授权对受影响日期豁免步行上限："
-            "walking_limit_action=relax，keep_current_plan=true，不要求用户再给一个数字，不重复要求削减。"
-            "用户要求恢复步行限制则walking_limit_action=restore；无相关授权为unchanged。"
-            "keep_current_plan仅在用户明确要求保留现有路线时为true。"
-            "用户说你决定时在已有约束内做选择并说明。不要虚构地点、事实或改变未授权的日期、城市及人数。"
-            '必须返回实际结果对象，七个字段直接放在根对象：{"requirements":{},"required_ids":[],"excluded_ids":[],"constraints":[],"explanation":"概括用户本次回答","walking_limit_action":"unchanged","keep_current_plan":false}。'
-            "这是字段形状示例，必须根据当前回答填写真实值；没有变更的requirements返回{}，没有增删景点时对应数组返回[]。"
-            "requirements的键只能使用allowed_requirement_fields；required_ids和excluded_ids只能使用allowed_stop_ids中的完整ID，不能用景点名、POI ID或canonical_place_id。"
-            "用户允许依据真实公共交通结果自动取舍时，写成constraints中的transit_rule=auto_by_transit，scope限定到回答提及的日期与地点，不新增判断策略等自定义字段；"
-            "尚未查询成立的条件不能提前变成无条件必去或排除，此时required_ids与excluded_ids返回[]。"
-            "不要返回字段定义、JSON Schema、问题对象或properties包装，不要把完整原需求复制到requirements。"+CONSTRAINT_GUIDE)
-        available = {identity:stop for identity,stop in state["stops"].items() if not is_dining(stop) or stop.get("source_kind") == "user"}
-        payload = {"requirements":state["requirements"],"question":question,"answer":values,"note":answer.get("note",""),
-                   "available_stops":available,"constraints":state.get("stop_constraints",{}),
-                   "allowed_requirement_fields":sorted(DECISION_REQUIREMENT_FIELDS),"allowed_stop_ids":sorted(available)}
-        answer_text = " ".join(values.values())+" "+answer.get("note","")
-        dropped_repeats = dropped_quotes = False
-        dropped_intents = {"required_ids":[],"excluded_ids":[]}
-        for attempt in range(2):
-            resolution = await self.models.ask(DecisionResolution,instruction,payload)
-            resolution.required_ids = [resolve_stop_id(identity,available) or identity for identity in resolution.required_ids]
-            resolution.excluded_ids = [resolve_stop_id(identity,available) or identity for identity in resolution.excluded_ids]
-            issues = []
-            unknown = sorted(set(resolution.requirements)-DECISION_REQUIREMENT_FIELDS)
-            if unknown:
-                issues.append({"field":"requirements","unknown_fields":unknown})
-            for field in ("required_ids","excluded_ids"):
-                unknown = sorted(set(getattr(resolution,field))-set(available))
-                if unknown:
-                    issues.append({"field":field,"unknown_ids":unknown})
-            intent_issues = unauthorized_stop_changes(answer_text,resolution.required_ids,resolution.excluded_ids,available)
-            issues.extend(intent_issues)
-            overlap = sorted(set(resolution.required_ids) & set(resolution.excluded_ids))
-            if overlap:
-                issues.append({"field":"required_ids/excluded_ids","conflicting_ids":overlap})
-            new_constraints,rejected = check(resolution.constraints,answer_text,state["requirements"],state["stops"])
-            if rejected:
-                issues.append({"field":"constraints","invalid_values":[str(item["index"])+"："+"；".join(item["problems"]) for item in rejected]})
-            try:
-                Requirements.model_validate({**state["requirements"],**{key:value for key,value in resolution.requirements.items()
-                                                                         if key in DECISION_REQUIREMENT_FIELDS}})
-            except ValidationError as exc:
-                # e.g. latest_return="2026-12-14 15:00" where HH:MM is required.
-                issues.append({"field":"requirements","invalid_values":[".".join(str(part) for part in error["loc"])+"："+error["msg"]
-                                                                        for error in exc.errors(include_url=False,include_input=False)][:5]})
-            if not issues:
-                break
-            # Log only the rejected keys/IDs, never the user's answer or model field values.
-            diagnostic = [{key:([str(value)[:120] for value in item[:5]] if isinstance(item,list) else item)
-                           for key,item in issue.items()} for issue in issues]
-            logging.getLogger(__name__).warning("Decision scope rejected: run=%s attempt=%s issues=%s",
-                                               state.get("run_id"),attempt+1,dump(diagnostic))
-            repeats = [issue for issue in issues if issue["field"] == "requirements" and issue.get("invalid_values")
-                       and all(value.startswith("repeat_exceptions") for value in issue["invalid_values"])]
-            unquoted = [issue for issue in issues if issue["field"] == "constraints"
-                        and all(item["problems"] == [UNQUOTED] for item in rejected)]
-            rejected_ids = {identity for issue in intent_issues for identity in issue["unauthorized_ids"]}
-            resolved_overlaps = [issue for issue in issues if issue["field"] == "required_ids/excluded_ids"
-                                 and set(issue["conflicting_ids"]) <= rejected_ids]
-            if attempt and len(repeats)+len(unquoted)+len(intent_issues)+len(resolved_overlaps) == len(issues):
-                # Omit only recoverable additions and unauthorized marks; dropping a mark can also resolve its overlap.
-                # Other scope errors retain their full diagnostics and still reject the answer.
-                if repeats:
-                    resolution.requirements.pop("repeat_exceptions",None)
-                dropped_repeats,dropped_quotes = bool(repeats),bool(unquoted)
-                for issue in intent_issues:
-                    field = issue["field"]
-                    dropped_intents[field] = issue["unauthorized_ids"]
-                    setattr(resolution,field,[identity for identity in getattr(resolution,field) if identity not in issue["unauthorized_ids"]])
-                break
-            if attempt:
-                detail = "；".join(issue["field"]+"："+"、".join(
-                    issue.get("unknown_fields",issue.get("unknown_ids",issue.get("conflicting_ids",issue.get("unauthorized_ids",issue.get("invalid_values",[])))))) for issue in diagnostic)
-                raise ToolError("decision_resolution","回答解析自动纠正一次后仍不符合允许范围（"+detail+"），原草稿已保留")
-            self.emit(state,"decision","回答解析中出现越界字段或景点，正在按允许范围自动纠正一次")
-            payload = {**payload,"previous_resolution":resolution.model_dump(mode="json"),"validation_errors":issues}
-            instruction += ("上一条解析未通过范围校验，请按validation_errors纠正，保留本次用户的真实意图。"
-                "只按原回答填写允许的变更；未知ID必须对照available_stops的完整键，不得猜测映射。"
-                "不复制未获授权的原需求字段，不为消除错误而删除用户明确要求；条件式授权用constraints表达。")
-        changes = dict(resolution.requirements)
-        for permission in changes.get("repeat_exceptions",[]):
-            if permission.get("place_id") not in state["stops"] or not permission.get("authorization") or permission["authorization"] not in answer_text:
-                raise ToolError("decision_resolution","重复安排必须引用现有地点及本次用户明确回答，未采用推测授权")
-        for field in ("budget","max_walk_per_day","max_transport_hours"):
-            value = changes.get(field)
-            if value is not None and value != state["requirements"].get(field):
-                explicit = [float(number) for number in re.findall(r"\d+(?:\.\d+)?",answer_text)]
-                try:
-                    numeric = float(value)
-                except (TypeError,ValueError) as exc:
-                    raise ToolError("decision_resolution","回答中没有明确可用的新额度或上限，请补充具体数值") from exc
-                if numeric not in explicit and not (field == "max_walk_per_day" and numeric/1000 in explicit and re.search(r"公里|千米|km",answer_text,re.I)):
-                    changes.pop(field)
-        req = Requirements.model_validate({**state["requirements"],**changes}).model_dump(mode="json")
-        if "max_walk_per_day" in changes:
-            req["walking_limit_exempt_dates"] = []
-        action = "restore" if "max_walk_per_day" in changes else resolution.walking_limit_action
-        req,keep = apply_walking_decision(req,question,answer_text,action,resolution.keep_current_plan)
-        explanation = resolution.explanation.strip() or "已记录你的回答："+answer_text.strip()[:1000]
-        if dropped_repeats:
-            explanation += "；重复安排授权的格式不合法，未采用，仍按每个地点只安排一次"
-        if dropped_quotes:
-            explanation += "；有条件无法对应到你回答的原话，未采用"
-        if req.get("walking_limit_exempt_dates") != state["requirements"].get("walking_limit_exempt_dates",[]):
-            explanation = "按你的最新指令更新步行限制；"+("保留当前规划，受影响日期不再因步行上限删点或追问" if keep else "已更新受影响日期的步行限制")
-        if dropped_intents["excluded_ids"]:
-            names = "、".join(available[identity]["name"] for identity in dropped_intents["excluded_ids"])
-            explanation += "；"+("回答中没有删除意图，未将" if not has_delete_intent(answer_text) else "回答中明确要求保留，未将")+names+"设为排除"
-        if dropped_intents["required_ids"]:
-            names = "、".join(available[identity]["name"] for identity in dropped_intents["required_ids"])
-            explanation += "；回答中明确要求移除"+names+"，未将其设为必去"
-        constraints = state.get("stop_constraints",{})
-        required = (set(constraints.get("required",[]))-set(resolution.excluded_ids)) | set(resolution.required_ids)
-        required = {identity for identity in required if not is_dining(state["stops"][identity])}
-        excluded = (set(constraints.get("excluded",[]))-set(resolution.required_ids)) | set(resolution.excluded_ids)
-        removed_wishes = {identity for identity in resolution.excluded_ids if identity.startswith(WISH_PREFIX)}
-        if removed_wishes:
-            req["wish_places"] = [place for place in req.get("wish_places",[]) if wish_stop_id(place["city"],place["name"]) not in removed_wishes]
-            excluded -= removed_wishes
-            keep = False
-        req.update(required_stop_ids=sorted(required),excluded_stop_ids=sorted(excluded),
-                   constraints=merge(req["constraints"],new_constraints,"decision",question.get("id",""),trip_dates=trip_dates(req)))
-        history = [*history,{"questions":[question],"answers":values,"note":answer.get("note",""),"summary":explanation,
-                             "walking_limit_exempt_dates":req.get("walking_limit_exempt_dates",[]),"keep_current_plan":keep}]
-        dates = question.get("affected_dates",[])
-        base = state.get("candidates",[{}])[0].get("id") if state.get("candidates") else ""
-        resume = state["decision_resume"]
-        global_changes = set(changes)-{"preferences","hotel_areas"}
-        # A new constraint without a date scope applies to the whole trip.
-        global_changes |= {"constraints"} if any(not item["scope"]["dates"] for item in new_constraints) else set()
-        if global_changes and resume in {"assess","review_result"}:
-            dates = [day["date"] for day in state.get("candidates",[{}])[0].get("days",[])]
-        elif "hotel_areas" in changes and state.get("candidates"):
-            cities = {city for city in state["requirements"]["cities"] if req.get("hotel_areas",{}).get(city) != state["requirements"].get("hotel_areas",{}).get(city)}
-            dates = sorted(set(dates) | {day["date"] for day in state["candidates"][0]["days"] if day["city"] in cities})
-        candidates = copy.deepcopy(state.get("candidates",[]))
-        if removed_wishes:
-            for candidate in candidates:
-                for day in candidate["days"]:
-                    if removed_wishes & set(day["stop_ids"]):
-                        dates = sorted(set(dates) | {day["date"]})
-                        day["stop_ids"] = [identity for identity in day["stop_ids"] if identity not in removed_wishes]
-        if candidates:
-            used = {identity for day in candidates[0]["days"] for identity in day["stop_ids"]}
-            for identity in required-used:
-                targets = [day for day in candidates[0]["days"] if (not dates or day["date"] in dates) and day["city"] == state["stops"][identity]["city"]]
-                if targets:
-                    targets[0]["stop_ids"].append(identity)
-                    targets[0]["adjustment"] = "根据你回答的必去选择重新安排"
-                else:
-                    resume = "discover"
-        return {"requirements":req,"candidates":candidates,"stop_constraints":{"required":sorted(required),"excluded":sorted(excluded)},"decision_history":history,
-                **({"stops":{identity:stop for identity,stop in state["stops"].items() if identity not in removed_wishes},
-                    "repair_only":False,"assessment_refresh":False} if removed_wishes else {}),
-                "decision":{},"decision_reopened":False,"assessment_dates":dates,"assessment_base":base,"draft_revision":state.get("draft_revision",0)+1,
-                "repair_round":0,"review_feedback":[],"place_selection":{},"decision_options":{},
-                "keep_current_plan":keep,
-                "decision_resume":"assess" if resume == "review_result" else resume,
-                "interview":{"summary":explanation,"questions":[],"history":history,"confirmed":False}}
+
+
+    async def coordinator_gate(self,state):
+        answer = interrupt(pending_batch(state))
+        return {"coordinator_answer":answer}
+
+    async def decision_confirmation_gate(self,state):
+        answer = interrupt(pending_batch(state,confirming=True))
+        return {"coordinator_answer":answer}
 
     async def confirm_route(self,state):
         itinerary = copy.deepcopy(state["selected_route"]["draft"])
@@ -421,11 +154,13 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
             if snapshot.interrupts:
                 pending = snapshot.interrupts[0].value
                 trip = self.store.trip(run["trip_id"]); doc = trip["document"]
+                doc.update(persisted(result))
                 doc.update(pending=pending,stage="waiting",requirements=result.get("requirements",doc["requirements"]),
                            selected_source_ids=result.get("selected_source_ids",[]),candidates=result.get("candidates",[]),warnings=result.get("warnings",[]),interview=result.get("interview") or None,
                            draft_revision=result.get("draft_revision",doc.get("draft_revision",0)),
+                           system_assumptions=copy.deepcopy(result.get("system_assumptions",doc.get("system_assumptions",[]))),
                            stop_constraints=result.get("stop_constraints",{}),decision_history=result.get("decision_history",[]),rollback=result.get("rollback",{}))
-                doc["workflow_step"] = {"requirements":"requirements","guides":"guides","sources":"guides","interview":"interview","interview_confirmation":"interview","decision":"interview","selection":"routes"}.get(pending.get("kind"),doc.get("workflow_step","interview"))
+                doc["workflow_step"] = {"requirements":"requirements","guides":"guides","sources":"guides","interview":"interview","interview_confirmation":"interview","decision":"interview","decision_confirmation":"interview","selection":"routes"}.get(pending.get("kind"),doc.get("workflow_step","interview"))
                 if pending.get("kind") == "selection" and doc.get("route_chat") and doc["route_chat"][-1]["role"] == "user":
                     candidate = (result.get("candidates") or [{}])[0]
                     reply = result.get("revision_reply") or candidate.get("reason") or "行程已更新，请查看左侧路线。"
@@ -437,8 +172,12 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
                 self.store.event(run_id,"waiting",pending["message"],pending=pending)
                 logging.getLogger(__name__).info("Run %s waiting for %s after %.1fs",run_id,pending.get("kind"),perf_counter()-started)
             else:
+                trip = self.store.trip(run["trip_id"])
+                doc = trip["document"]
+                doc.update(persisted(result))
+                self.store.update(run["trip_id"],doc)
                 self.store.finish_run(run_id,"completed",{"version":self.store.trip(run["trip_id"])["version"]})
-                self.store.event(run_id,"completed","已确认并保存这份每日行程")
+                self.store.event(run_id,"completed","仍有阻断，草稿已保留" if result.get("coordinator_blocked") else "本轮行程处理完成")
                 logging.getLogger(__name__).info("Run %s completed after %.1fs",run_id,perf_counter()-started)
         except asyncio.CancelledError:
             if self.store.trip(run["trip_id"])["active_run"] != run_id:
@@ -478,7 +217,9 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
                 if snapshot.next:
                     doc["progress_stage"] = NODE_STAGES.get(snapshot.next[0],doc["progress_stage"])
                 if snapshot.values:
+                    doc.update(persisted(snapshot.values))
                     doc.update(requirements=snapshot.values.get("requirements",doc["requirements"]),
+                               system_assumptions=copy.deepcopy(snapshot.values.get("system_assumptions",doc.get("system_assumptions",[]))),
                                interview=snapshot.values.get("interview") or doc.get("interview"),
                                candidates=snapshot.values.get("candidates",doc.get("candidates",[])))
             except Exception:
@@ -523,34 +264,6 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
         self.selected_sources(state["trip_id"], source_ids)
         return {"selected_source_ids":source_ids}
 
-    async def interview_gate(self,state):
-        interview = state["interview"]
-        questions = interview["questions"][:1]
-        answer = interrupt({"kind":"interview" if questions else "interview_confirmation",
-            "message":"请回答当前这一题，提交后再继续追问" if questions else "请确认需求总结，确认后生成候选路线",
-            "round_id":interview["round_id"],"round":interview["round"],"questions":questions,"summary":interview["summary"]})
-        if answer.get("round_id") != interview["round_id"]:
-            raise ValueError("追问轮次已改变，请刷新后回答")
-        if questions and (answer.get("confirm") or set(answer.get("answers",{})) != {questions[0]["id"]} or not answer["answers"][questions[0]["id"]].strip()):
-            raise ValueError("请只提交当前问题的回答")
-        if not questions and answer.get("confirm"):
-            return {"interview":{**interview,"confirmed":True}}
-        history = [*interview["history"],{"questions":questions,"summary":interview["summary"],
-                   "answers":answer.get("answers",{}),"note":answer.get("note","")}]
-        update = await self.models.ask(RequirementUpdate,
-            "根据用户当前这一题的回答补充旅行偏好，只允许返回preferences、transport、local_transport、bed_type、allow_taxi、earliest_departure、latest_arrival、latest_return、direct_only、max_transport_hours、max_walk_per_day、flight_cabin、train_seat、hotel_type、hotel_stars字段。"
-            "local_transport表示市内出行：公交地铁为public，只步行为walking，自驾为driving，骑行为bicycling；明确允许打车才填allow_taxi=true，与跨城transport分开。时间为HH:MM。"
-            "preferences合并保留历史明确偏好，明确修正的偏好用新值替换，不把推荐选项当成回答。"
-            "不改变日期、城市、人数、房间数或预算。不明确的字段不填写。"+CONSTRAINT_GUIDE,
-            {"current":state["requirements"],"questions":questions,"answers":answer.get("answers",{}),"note":answer.get("note",""),
-             "available_stops":stop_catalog(state.get("stops",{}))})
-        changes = {k:v for k,v in update.requirements.items() if k in {"preferences","transport","local_transport","bed_type","allow_taxi","earliest_departure","latest_arrival","latest_return","direct_only","max_transport_hours","max_walk_per_day","flight_cabin","train_seat","hotel_type","hotel_stars"}}
-        if re.search(r"(?:不|不要|不想|不能|禁止|拒绝)(?:乘坐|坐)?(?:打车|出租车|网约车)",str(answer)):
-            changes["allow_taxi"] = False
-        req = Requirements.model_validate({**state["requirements"],**changes}).model_dump(mode="json")
-        valid,_ = check(update.constraints," ".join(answer.get("answers",{}).values())+" "+answer.get("note",""),req,state.get("stops",{}))
-        req = Requirements.model_validate({**req,"constraints":merge(req["constraints"],valid,"interview",interview["round_id"],trip_dates=trip_dates(req))}).model_dump(mode="json")
-        return {"requirements":req,"interview":{**interview,"history":history,"confirmed":False}}
 
     async def selection_gate(self,state):
         candidates = state.get("candidates",[])
@@ -577,14 +290,17 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
 
     async def save(self,state):
         trip = self.store.trip(state["trip_id"]); doc = trip["document"]
+        doc.update(persisted(state))
         self.assert_review(state,(state.get("selected_route") or {}).get("review"),state["itinerary"])
         if doc.get("itinerary_generation") == state["generation"] or self.store.generation_version(state["trip_id"],state["generation"]) is not None:
+            doc["system_assumptions"] = copy.deepcopy(state.get("system_assumptions",doc.get("system_assumptions",[])))
             itinerary = doc.get("itinerary") or state["itinerary"]
             doc["stage"] = "completed" if doc.get("itinerary_saved_version") else "conflicts" if any(i["blocking"] for i in itinerary.get("issues",[])) else "incomplete" if itinerary.get("budget",{}).get("unknown") or itinerary.get("information_unknown") or any(d.get("gaps") for d in itinerary.get("days",[])) else "ready"
             self.store.update(state["trip_id"],doc)
             return {}
         self.emit(state,"saving","正在整理行程草稿和来源记录")
         trip = self.store.trip(state["trip_id"]); doc = trip["document"]
+        doc.update(persisted(state))
         itinerary = state["itinerary"]
         requirements = Requirements.model_validate(state["requirements"])
         dates = [(requirements.start_date + timedelta(days=i)).isoformat() for i in range((requirements.end_date-requirements.start_date).days+1)]
@@ -603,6 +319,7 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
             changes=state.get("change",{}),repair_round=state.get("repair_round",0),
             sources_snapshot=self.store.sources(state["trip_id"]))
         doc.update(draft_revision=state.get("draft_revision",0),stop_constraints=state.get("stop_constraints",{}),
+                   system_assumptions=copy.deepcopy(state.get("system_assumptions",doc.get("system_assumptions",[]))),
                    decision_history=state.get("decision_history",[]),interview=state.get("interview"),review=selected_route.get("review"))
         doc["messages"].append({"role":"assistant","content":state.get("change",{}).get("explanation") or "已生成行程，请查看来源、预算和待确认信息。","time":now()})
         if trip["version"] != state["base_version"]:

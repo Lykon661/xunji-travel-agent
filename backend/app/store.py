@@ -1,7 +1,7 @@
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -14,6 +14,24 @@ def now() -> str:
 
 def dump(value) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def amap_request_key(request):
+    def normalized(key, value):
+        if key in {"origin","destination","location"} and isinstance(value,str):
+            try:
+                return ",".join(f"{float(part):.6f}" for part in value.split(","))
+            except ValueError:
+                pass
+        if isinstance(value,bool):
+            return "true" if value else "false"
+        return str(value) if not isinstance(value,(dict,list)) else json.dumps(value,sort_keys=True,ensure_ascii=False)
+    return tuple(sorted((key,normalized(key,value)) for key,value in request.items() if value is not None))
+
+
+def dialogue_defaults(document):
+    return {"coordinator_messages":[],"system_assumptions":[],
+            "coordinator_confirmation":None,"unmet":[],"draft_revision":0,"decision_history":[],**document}
 
 
 class Conflict(Exception):
@@ -86,7 +104,8 @@ class Store:
         trip_id = uuid4().hex
         doc = {"requirements": requirements, "stage": "draft", "messages": [], "locks": [],
                "candidates": [], "selected_source_ids": [], "interview": None, "itinerary": None,
-               "itinerary_saved_version": None, "warnings": [], "pending": None}
+               "itinerary_saved_version": None, "warnings": [], "pending": None, "system_assumptions": []}
+        doc = dialogue_defaults(doc)
         with self.connect() as db:
             db.execute("INSERT INTO trips(id,title,document,updated_at) VALUES(?,?,?,?)", (trip_id,title,dump(doc),now()))
         return self.trip(trip_id)
@@ -98,6 +117,7 @@ class Store:
             raise KeyError("旅行不存在")
         result = dict(row)
         result["document"] = json.loads(result["document"])
+        result["document"] = dialogue_defaults(result["document"])
         # Older releases automatically saved generated itineraries.
         result["document"].setdefault("itinerary_saved_version", result["version"] if result["document"].get("itinerary") and result["version"] else None)
         result["sources"] = self.sources(trip_id)
@@ -138,6 +158,7 @@ class Store:
             db.execute("DELETE FROM agent_results WHERE trip_id=?", (trip_id,))
 
     def update(self, trip_id: str, document: dict):
+        document = dialogue_defaults(document)
         with self.connect() as db:
             db.execute("UPDATE trips SET document=?,updated_at=? WHERE id=?", (dump(document),now(),trip_id))
 
@@ -255,6 +276,20 @@ class Store:
             row = db.execute("SELECT document FROM agent_results WHERE trip_id=? AND cache_key=?",(trip_id,cache_key)).fetchone()
         return json.loads(row[0]) if row else None
 
+    def amap_result(self, trip_id: str, request: dict, hours: int):
+        cutoff = (datetime.now(timezone.utc)-timedelta(hours=hours)).isoformat()
+        key = amap_request_key(request)
+        with self.connect() as db:
+            rows = db.execute("SELECT id,request,result,created_at FROM queries WHERE trip_id=? AND provider='amap' "
+                              "AND created_at>=? AND json_extract(request,'$.tool')=? ORDER BY id DESC",
+                              (trip_id,cutoff,request["tool"])).fetchall()
+        for row in rows:
+            result = json.loads(row["result"])
+            if result.get("status") == "error" or "raw" not in result or amap_request_key(json.loads(row["request"])) != key:
+                continue
+            return {"id":row["id"],"raw":result["raw"],"created_at":row["created_at"]}
+        return None
+
     def review_queries(self, trip_id: str, evidence_ids: list[str]):
         identities = {int(value.split(":",1)[1]) for value in evidence_ids
                       if value.startswith("query:") and value.split(":",1)[1].isdigit()}
@@ -339,6 +374,7 @@ class Store:
 
     def commit(self, trip_id: str, base: int, doc: dict, generation: str | None = None,
                updated_at: str | None = None) -> int:
+        doc = dialogue_defaults(doc)
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             if generation:
@@ -391,14 +427,14 @@ class Store:
             if not include_documents:
                 return [dict(row) for row in db.execute("SELECT version,created_at FROM versions WHERE trip_id=? ORDER BY version DESC",(trip_id,))]
             rows = db.execute("SELECT version,document,created_at FROM versions WHERE trip_id=? ORDER BY version DESC", (trip_id,)).fetchall()
-        return [{"version":r[0],"document":json.loads(r[1]),"created_at":r[2]} for r in rows]
+        return [{"version":r[0],"document":dialogue_defaults(json.loads(r[1])),"created_at":r[2]} for r in rows]
 
     def version(self, trip_id: str, version: int) -> dict:
         with self.connect() as db:
             row = db.execute("SELECT version,document,created_at FROM versions WHERE trip_id=? AND version=?",(trip_id,version)).fetchone()
         if row is None:
             raise KeyError("行程版本不存在")
-        return {"version":row["version"],"document":json.loads(row["document"]),"created_at":row["created_at"]}
+        return {"version":row["version"],"document":dialogue_defaults(json.loads(row["document"])),"created_at":row["created_at"]}
 
     def recover(self):
         with self.connect() as db:

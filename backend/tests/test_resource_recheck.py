@@ -61,14 +61,16 @@ class ResourceRecheck(unittest.IsolatedAsyncioTestCase):
                       "selected_route":{"id":"candidate","days":[{"date":day["date"],"city":day["city"],
                           "stop_ids":[activity["id"] for activity in day["activities"]]} for day in itinerary["days"]]}}
 
-    async def test_failed_search_does_not_reuse_a_train_from_the_old_date(self):
+    async def test_failed_search_preserves_a_legacy_choice_but_blocks_its_old_date(self):
         old = self.state["old_itinerary"]["transport"][0]
         old["context"]["date"] = "2026-11-10"
         old["selected"]["context"]["date"] = "2026-11-10"
         result = await self.planner.transport(self.state)
         entry = result["itinerary"]["transport"][0]
-        self.assertEqual(entry["context"],CTX)
-        self.assertIsNone(entry["selected"])
+        self.assertEqual(entry["context"]["date"],"2026-11-10")
+        self.assertEqual(entry["selected"],old["selected"])
+        self.assertTrue(entry["errors"])
+        self.assertTrue(resource_context_issues(result["itinerary"],REQ))
 
     async def test_failed_search_does_not_reuse_an_adopted_hotel_from_old_dates(self):
         old_ctx = {**HOTEL_CTX,"check_in":"2026-11-10","check_out":"2026-11-11"}

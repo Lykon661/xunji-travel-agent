@@ -8,7 +8,7 @@ from app.agents.resource import ResourceAgent
 
 from app.adapters import Models, ToolError
 from app.llm import ModelRuntimeError, StructuredOutputError
-from app.models import CandidateDay, DecisionResolution, GuideBrief, OrderChoice, ResourceChoice
+from app.models import CandidateDay, GuideBrief, OrderChoice, ResourceChoice
 from app.planner import Planner
 
 
@@ -102,37 +102,10 @@ class ModelFormat(unittest.IsolatedAsyncioTestCase):
         self.assertIn("stop_ids：最多12项（当前 13项）",message)
         self.assertNotIn("source:12",message)
 
-    async def test_decision_without_display_explanation_preserves_actual_changes(self):
-        self.client(iter(['{"requirements":{"budget":6000},"required_ids":[],"excluded_ids":[]}']))
-        result = await self.models.ask(DecisionResolution,"解析当前回答",{"answer":"预算改为6000"})
-        self.assertEqual(result.requirements,{"budget":6000})
-        self.assertEqual(result.explanation,"")
-        self.assertEqual(len(self.messages),1)
 
-    async def test_decision_accepts_reason_as_a_display_explanation(self):
-        self.client(iter(['{"requirements":{},"reason":"用户要求保持现有安排","keep_current_plan":true}']))
-        result = await self.models.ask(DecisionResolution,"解析当前回答",{"answer":"保持安排"})
-        self.assertEqual(result.explanation,"用户要求保持现有安排")
-        self.assertTrue(result.keep_current_plan)
 
-    async def test_empty_decision_requires_a_real_result_after_correction(self):
-        self.client(iter(['{}','{"requirements":{},"explanation":"无需修改已有需求"}']))
-        result = await self.models.ask(DecisionResolution,"解析当前回答",{})
-        self.assertEqual(result.requirements,{})
-        self.assertEqual(len(self.messages),2)
-        self.assertIn("业务字段直接放在根对象",self.messages[1][-1]["content"])
 
-    async def test_json_schema_is_not_accepted_as_a_completed_decision(self):
-        schema = '{"type":"object","properties":{"explanation":{"type":"string"}}}'
-        self.client(iter([schema,schema]))
-        with self.assertRaises(ToolError) as caught:
-            await self.models.ask(DecisionResolution,"解析当前回答",{})
-        self.assertEqual(caught.exception.code,"model_format")
 
-    async def test_unknown_decision_fields_are_not_silently_ignored(self):
-        self.client(iter(['{"budget":9999,"explanation":"修改预算"}','{"budget":9999,"explanation":"修改预算"}']))
-        with self.assertRaises(ToolError):
-            await self.models.ask(DecisionResolution,"解析当前回答",{})
 
     async def test_repeated_invalid_field_exposes_issue_without_returned_values(self):
         self.client(iter(['{"stop_ids":"private-value"}', '{"stop_ids":"private-value"}']))

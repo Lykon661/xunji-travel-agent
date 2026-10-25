@@ -168,6 +168,47 @@ def canonical_key(item, city=""):
     return item.get("canonical_place_id") or place_key(item,city)
 
 
+def represented_stop_ids(state):
+    stops = state.get("stops",{})
+    keys = {canonical_key(stop) for stop in stops.values() if stop.get("represented_by")}
+    return {identity for identity,stop in stops.items() if canonical_key(stop) in keys}
+
+
+def verified_review_duplicates(state, itinerary, suspected):
+    from .planning_repairs import protected_stops
+    protected = protected_stops(state)
+    protected |= {identity for identity,stop in state.get("stops",{}).items() if stop.get("assigned_date")}
+    current = {item["id"]:({**state.get("stops",{}).get(item["id"],{}),**item,"city":day["city"],
+                           "map_place":state.get("stops",{}).get(item["id"],{}).get("map_place") or item.get("map_place")},day["date"],index)
+               for day in itinerary.get("days",[]) for index,item in enumerate(day.get("activities",[])) if item.get("kind") == "visit"}
+    def names(stop):
+        values = [stop.get("name"),(stop.get("map_place") or {}).get("name"),*(stop.get("alias_names") or [])]
+        return {local_name(re.sub(r"[（(][^）)]*[）)]","",str(value or "")),stop.get("city")) for value in values if value} - {""}
+    result,removed,retained = [],set(),set()
+    for group in (suspected or [])[:6]:
+        ids = group.get("stop_ids",[])
+        if len(ids) != 2 or len(set(ids)) != 2 or not set(ids) <= current.keys() or set(ids) & removed:
+            continue
+        first,second = (current[identity] for identity in ids)
+        a,b = first[0],second[0]
+        pa,pb = coordinates(a.get("map_place")),coordinates(b.get("map_place"))
+        if normalized(a["city"]).removesuffix("市") != normalized(b["city"]).removesuffix("市") or not pa or not pb or distance(pa,pb) > 2000:
+            continue
+        na,nb = names(a),names(b)
+        if not (na & nb or any(min(len(x),len(y)) >= 2 and (x in y or y in x) for x in na for y in nb)):
+            continue
+        if set(ids) <= protected:
+            continue
+        keep = min(ids,key=lambda identity:(identity not in protected,current[identity][1],current[identity][2]))
+        drop = next(identity for identity in ids if identity != keep)
+        if drop in retained:
+            continue
+        result.append({"keep":keep,"drop":drop,"date":current[drop][1],"reason":group.get("reason","")})
+        removed.add(drop)
+        retained.add(keep)
+    return result
+
+
 def planning_stop_pool(stops, preferred_ids=(), locked_ids=()):
     preferred = set(preferred_ids) | set(locked_ids)
     groups, representatives = {},{}

@@ -2,9 +2,9 @@ from datetime import date as Date
 import hashlib
 import json
 import re
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import AliasChoices, BaseModel, Field, SecretStr, model_validator
+from pydantic import AliasChoices, BaseModel, Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 from .stop_types import with_visit_defaults
 
@@ -59,7 +59,7 @@ class ConstraintDraft(BaseModel):
     anchor: Literal["", "sunrise", "sunset", "appointment"] = ""
     at: str | None = Field(default=None, pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$", description="time_anchor的指定时刻HH:MM")
     minutes: int | None = Field(default=None, ge=5, le=720, description="visit_duration游玩分钟数或transfer_buffer缓冲分钟数")
-    meters: int | None = Field(default=None, ge=500, le=50000, description="fewer_walking用户给出的每天步行上限（米）")
+    meters: int | None = Field(default=None, ge=0, le=50000, description="fewer_walking用户给出的每天步行上限（米）")
     count: int | None = Field(default=None, ge=1, le=12, description="daily_min_stops每天至少安排的景点个数")
     mode: Literal["", "train", "flight", "ferry"] = ""
     rule: Literal["", "public_only", "auto_by_transit"] = ""
@@ -293,9 +293,6 @@ class InterviewQuestion(BaseModel):
     recommendation: str = Field(min_length=1, max_length=1000)
 
 
-class PlanningDecision(InterviewQuestion):
-    why_needed: str = Field(min_length=1, max_length=1500)
-    affected_dates: list[Date] = Field(default_factory=list, max_length=30)
 
 
 class GuideGroup(BaseModel):
@@ -304,21 +301,64 @@ class GuideGroup(BaseModel):
     reason: str = Field(default="", max_length=1500)
 
 
+ActionId = Annotated[str, Field(min_length=1, max_length=200)]
+ActionText = Annotated[str, Field(min_length=1, max_length=2000)]
+ActionNumber = Annotated[int | float, Field(ge=-10000000, le=10000000)]
+
+
+class CoordinatorModel(BaseModel):
+    model_config = {"extra":"forbid", "allow_inf_nan":False}
+
+
+class UnmetReference(CoordinatorModel):
+    type: Literal["requirement", "constraint", "stop", "resource", "day"]
+    id: ActionId | None = None
+    field: ActionId | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize(cls, value):
+        if not isinstance(value, dict):
+            return value
+        value = {**value, **{key:(value.get(key) or None) for key in ("id", "field")}}
+        if value["id"] is not None or value.get("type") != "requirement":
+            value["id"], value["field"] = value["id"] or value["field"], None
+        return value
+
+    @model_validator(mode="after")
+    def one_reference(self):
+        if (self.id is None) == (self.field is None) or self.field is not None and self.type != "requirement":
+            raise ValueError("引用必须提供id；requirement也可仅提供field")
+        return self
+
+
+class UnmetItem(CoordinatorModel):
+    kind: Literal["stop_unplaced", "time_conflict", "capacity", "budget", "walking", "opening", "transfer", "lunch",
+                  "place_identity", "hub_identity", "pool_shortage", "fact_unverified", "other"]
+    refs: list[UnmetReference] = Field(default_factory=list, max_length=24)
+    dates: list[Date] = Field(default_factory=list, max_length=30)
+    numbers: dict[Annotated[str, Field(min_length=1, max_length=80)], ActionNumber] = Field(default_factory=dict, max_length=16)
+    detail: str = Field(default="", max_length=2000)
+    evidence_ids: list[ActionId] = Field(default_factory=list, max_length=40)
+    blocking: bool = True
+
+    @field_validator("refs", mode="before")
+    @classmethod
+    def drop_empty_refs(cls, value):
+        if not isinstance(value, list):
+            return value
+        return [item for item in value if not isinstance(item, dict) or item.get("id") or item.get("field")]
+
+
 class GuideBrief(BaseModel):
-    status: Literal["ready", "needs_decision"]
+    model_config = {"extra":"forbid"}
+    status: Literal["ready"] = "ready"
     summary: str
     required_ids: list[str] = Field(default_factory=list)
     excluded_ids: list[str] = Field(default_factory=list)
     groups: list[GuideGroup] = Field(default_factory=list, max_length=30)
-    question: PlanningDecision | None = None
+    unmet: list[UnmetItem] = Field(default_factory=list,max_length=40)
 
-    @model_validator(mode="after")
-    def explicit_decision(self):
-        if (self.status == "needs_decision") != (self.question is not None):
-            raise ValueError("待决定状态必须有一道问题，完成状态不能遗留问题")
-        if self.question is None and re.search(r"当前尚未明确的是|需要用户(?:决定|选择)|待用户(?:决定|选择)|尚未(?:确定|明确)(?:用户|你).{0,12}是否",self.summary):
-            raise ValueError("总结中存在未决用户选择，必须返回needs_decision和question，不能直接结束")
-        return self
 
 
 class GuideFeedback(BaseModel):
@@ -337,66 +377,18 @@ class RouteToolRequest(BaseModel):
 
 
 class RouteTurn(BaseModel):
-    status: Literal["tools", "ready", "needs_decision"]
+    status: Literal["tools", "ready"]
     tools: list[RouteToolRequest] = Field(default_factory=list, max_length=4)
     candidate: Candidate | None = None
     order: "OrderChoice | None" = None
-    question: PlanningDecision | None = None
+    unmet: list[UnmetItem] = Field(default_factory=list,max_length=40)
 
     @model_validator(mode="after")
     def valid_turn(self):
-        if self.status == "needs_decision" and (self.question is None or self.tools):
-            raise ValueError("需要用户决定时必须返回一道完整问题，不能同时请求工具")
-        if self.status == "tools" and (not self.tools or self.question is not None):
+        if self.status == "tools" and not self.tools:
             raise ValueError("工具轮次必须提供工具请求")
-        if self.status == "ready" and (self.question is not None or self.tools or (self.candidate is None and self.order is None)):
-            raise ValueError("完成轮次必须有路线或顺序，不能遗留问题或工具请求")
-        text = (self.candidate.reason if self.candidate else "")+(self.order.explanation if self.order else "")
-        if self.status == "ready" and re.search(r"当前尚未明确的是|需要用户(?:决定|选择)|待用户(?:决定|选择)|尚未(?:确定|明确)(?:用户|你).{0,12}是否",text):
-            raise ValueError("路线说明仍有未决选择，应返回具体问题")
-        return self
-
-
-DECISION_REQUIREMENT_FIELDS = frozenset({
-    "preferences","allow_taxi","local_transport","max_walk_per_day","budget","earliest_departure",
-    "latest_arrival","latest_return","max_transport_hours","hotel_areas","repeat_exceptions",
-})
-
-
-class DecisionResolution(BaseModel):
-    model_config = {"extra":"forbid", "json_schema_extra":{"minProperties":1}}
-
-    requirements: dict = Field(default_factory=dict,
-        description="只返回本次回答明确授权的变更；条件式取舍写入constraints，不新建业务字段或复制完整原需求",
-        json_schema_extra={"propertyNames":{"enum":sorted(DECISION_REQUIREMENT_FIELDS)}})
-    required_ids: list[str] = Field(default_factory=list, description="只填allowed_stop_ids中的完整ID，且用户本次明确要求必去；条件式保留不能直接设为必去")
-    excluded_ids: list[str] = Field(default_factory=list, description="只填allowed_stop_ids中的完整ID，且用户本次明确要求排除；待查询后再决定的景点不能立即排除")
-    constraints: list[ConstraintDraft] = Field(default_factory=list, max_length=20)
-    explanation: str = Field(default="", validation_alias=AliasChoices("explanation","reason","summary"))
-    walking_limit_action: Literal["unchanged", "relax", "restore"] = "unchanged"
-    keep_current_plan: bool = False
-
-    @model_validator(mode="before")
-    @classmethod
-    def actual_resolution(cls, value):
-        if isinstance(value,dict) and not set(value).intersection(set(cls.model_fields) | {"reason","summary"}):
-            raise ValueError("需要返回实际的需求解析结果，不能返回空对象、JSON Schema或不相关字段")
-        return value
-
-
-class PlanningReview(BaseModel):
-    question: PlanningDecision
-
-
-class ReviewRepairResolution(BaseModel):
-    status: Literal["repair", "needs_decision", "blocked"]
-    explanation: str = Field(min_length=1, max_length=2000)
-    question: PlanningDecision | None = None
-
-    @model_validator(mode="after")
-    def decision_has_question(self):
-        if (self.status == "needs_decision") != (self.question is not None):
-            raise ValueError("只有真实用户取舍才返回问题；可自动修复或技术失败不能夹带问题")
+        if self.status == "ready" and (self.tools or self.candidate is None and self.order is None):
+            raise ValueError("完成轮次须交付草稿或顺序及未满足条目")
         return self
 
 
@@ -410,6 +402,7 @@ class ReviewCheck(BaseModel):
 
 
 class ReviewFinding(BaseModel):
+    dimension: Literal["places", "dining", "sources"] | None = None
     code: str = Field(min_length=1, max_length=80)
     severity: Literal["warning", "blocker"]
     owner: Literal["guide", "resource", "route", "reviewer"] = Field(
@@ -424,12 +417,18 @@ class ReviewFinding(BaseModel):
     suggestion: str = Field(default="", max_length=2000)
 
 
+class SuspectedDuplicate(BaseModel):
+    stop_ids: list[str] = Field(min_length=2, max_length=2)
+    reason: str = Field(min_length=1, max_length=500)
+
+
 class ReviewReport(BaseModel):
-    status: Literal["pass", "pass_with_warnings", "revise", "needs_evidence", "needs_decision"]
+    status: Literal["pass", "pass_with_warnings", "revise", "needs_evidence"]
     summary: str = Field(min_length=1, max_length=2000)
     checks: list[ReviewCheck] = Field(min_length=10, max_length=10)
     findings: list[ReviewFinding] = Field(default_factory=list, max_length=40)
-    question: PlanningDecision | None = None
+    suspected_duplicates: list[SuspectedDuplicate] = Field(default_factory=list, max_length=6)
+    unmet: list[UnmetItem] = Field(default_factory=list,max_length=40)
 
     @model_validator(mode="after")
     def complete_review(self):
@@ -442,10 +441,31 @@ class ReviewReport(BaseModel):
             raise PydanticCustomError("review_pass_warnings","存在缺口时必须明确显示提示")
         if self.status not in {"pass", "pass_with_warnings"} and not blocked:
             raise PydanticCustomError("review_missing_blocker","未通过的重审必须给出具体阻断发现")
-        if self.status == "needs_decision" and self.question is None:
-            raise PydanticCustomError("review_question_missing","用户取舍状态必须有一道问题")
-        if self.status != "needs_decision" and self.question is not None:
-            raise PydanticCustomError("review_question_unexpected","非用户取舍状态的question必须为null")
+        return self
+
+
+class SemanticReviewCheck(BaseModel):
+    dimension: Literal["places", "dining", "sources"]
+    result: Literal["ok", "warning", "unknown", "not_applicable"]
+    note: str = Field(default="", max_length=1000)
+
+
+class SemanticReviewFinding(ReviewFinding):
+    dimension: Literal["places", "dining", "sources"]
+    severity: Literal["warning"] = "warning"
+
+
+class SemanticReviewReport(BaseModel):
+    status: Literal["pass", "pass_with_warnings"]
+    summary: str = Field(min_length=1, max_length=2000)
+    checks: list[SemanticReviewCheck] = Field(min_length=3, max_length=3)
+    findings: list[SemanticReviewFinding] = Field(default_factory=list, max_length=40)
+    suspected_duplicates: list[SuspectedDuplicate] = Field(default_factory=list, max_length=6)
+
+    @model_validator(mode="after")
+    def semantic_dimensions(self):
+        if {item.dimension for item in self.checks} != {"places","dining","sources"}:
+            raise ValueError("语义审查只覆盖places、dining、sources，各一次")
         return self
 
 
@@ -475,15 +495,19 @@ class InterviewRound(BaseModel):
 
 class InterviewResponse(BaseModel):
     round_id: str = Field(min_length=1, max_length=80)
-    answers: dict[str, str] = Field(default_factory=dict, max_length=1)
-    note: str = Field(default="", max_length=4000)
+    answers: dict[str, str] = Field(default_factory=dict, max_length=6)
+    selected_options: dict[str,str] = Field(default_factory=dict,max_length=6)
+    interpretation_id: str | None = Field(default=None,min_length=1,max_length=200)
+    note: str = Field(default="", max_length=8000)
     confirm: bool = False
     draft_revision: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def bounded_answers(self):
-        if any(len(key) > 80 or len(value) > 2000 for key, value in self.answers.items()):
-            raise ValueError("每个回答最多 2000 字")
+        if any(len(key) > 80 or len(value) > 8000 for key, value in self.answers.items()):
+            raise ValueError("每个回答最多 8000 字")
+        if any(len(key) > 200 or len(value) > 200 for key,value in self.selected_options.items()):
+            raise ValueError("选项引用最多200字")
         return self
 
 
@@ -637,6 +661,15 @@ class DecisionReopenInput(BaseModel):
     updated_at: str = Field(min_length=1)
 
 
+class AssumptionChangeInput(BaseModel):
+    model_config = {"extra":"forbid"}
+
+    alternative_id: str = Field(min_length=1, max_length=200)
+    assumption_revision: int = Field(ge=1, le=1000000000)
+    draft_revision: int = Field(ge=0, le=1000000000)
+    base_version: int = Field(ge=0)
+
+
 class HotelAreaInput(BaseModel):
     city: str = Field(min_length=1, max_length=80)
     area: str = Field(default="", max_length=150)
@@ -668,3 +701,259 @@ class LockInput(BaseModel):
 class ItinerarySaveInput(BaseModel):
     base_version: int = Field(ge=0)
     updated_at: str = Field(min_length=1)
+
+
+_COMMON_STOP = {"stop_id", "date"}
+ACTION_PARAMETERS = {
+    "skip":(_COMMON_STOP, _COMMON_STOP), "exclude":(_COMMON_STOP, _COMMON_STOP),
+    "default_duration":(_COMMON_STOP | {"minutes"}, _COMMON_STOP | {"minutes"}),
+    "shorten":(_COMMON_STOP | {"minutes"}, _COMMON_STOP | {"minutes"}),
+    "move":(_COMMON_STOP | {"to"}, _COMMON_STOP | {"to"}),
+    "add_source":({"source_id"}, {"source_id", "date", "stop_ids"}),
+    "lower_count":({"count"}, {"count", "dates"}), "accept_short":(set(), {"dates"}),
+    "keep_short":(set(), {"date", "dates"}),
+    "set_walk_limit":({"dates", "meters"}, {"dates", "meters"}),
+    "exempt_walk_limit":({"dates"}, {"dates"}), "restore_walk_limit":({"dates"}, {"dates"}),
+    "set_budget":({"amount"}, {"amount"}),
+    "set_time_window":(set(), {"field", "value", "stop_id", "at", "dates", "unlock", "resource_id"}),
+    "set_hotel_area":({"city", "area"}, {"city", "area"}),
+    "select_poi":({"stop_id", "poi_id"}, {"stop_id", "poi_id"}),
+    "select_hub":({"city", "name", "poi_id"}, {"city", "name", "poi_id", "resource_id"}),
+    "grant_repeat":({"stop_id", "role", "dates"}, {"stop_id", "role", "dates", "meals"}),
+    "reorder_day":({"date", "stop_ids"}, {"date", "stop_ids"}),
+    "replace_optional_stop":(_COMMON_STOP | {"replacement_stop_id"}, _COMMON_STOP | {"replacement_stop_id"}),
+    "add_optional_stop":(_COMMON_STOP, _COMMON_STOP),
+    "retain_free_time":({"date"}, {"date", "free_minutes"}),
+    "omit_unselected_hotel_legs":({"dates"}, {"dates"}),
+}
+
+
+class PlanAction(CoordinatorModel):
+    type: Literal["skip", "default_duration", "exclude", "move", "shorten", "add_source", "lower_count", "accept_short", "keep_short",
+                  "set_walk_limit", "exempt_walk_limit", "restore_walk_limit", "set_budget", "set_time_window", "set_hotel_area",
+                  "select_poi", "select_hub", "grant_repeat", "reorder_day", "replace_optional_stop",
+                  "add_optional_stop", "retain_free_time", "omit_unselected_hotel_legs"]
+    stop_id: ActionId | None = None
+    date: Date | None = None
+    dates: list[Date] = Field(default_factory=list, max_length=30)
+    to: Date | None = None
+    minutes: int | None = Field(default=None, ge=10, le=720, strict=True)
+    meters: int | None = Field(default=None, ge=0, le=50000, strict=True)
+    amount: float | None = Field(default=None, gt=0, le=10000000)
+    count: int | None = Field(default=None, ge=1, le=12, strict=True)
+    source_id: ActionId | None = None
+    stop_ids: list[ActionId] = Field(default_factory=list, max_length=80)
+    replacement_stop_id: ActionId | None = None
+    city: Annotated[str, Field(min_length=1, max_length=80)] | None = None
+    name: Annotated[str, Field(min_length=1, max_length=200)] | None = None
+    area: Annotated[str, Field(max_length=150)] | None = None
+    poi_id: ActionId | None = None
+    resource_id: ActionId | None = None
+    unlock: bool | None = Field(default=None, description="仅用户明确取消锁定及预约时刻限制时为true；资源选择用set_time_window的resource_id/value引用已有选项ID")
+    field: Literal["earliest_departure", "latest_arrival", "latest_return", "max_transport_hours"] | None = None
+    value: Annotated[str, Field(max_length=200)] | float | None = None
+    at: Annotated[str, Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")] | None = None
+    role: Literal["visit", "dining"] | None = None
+    meals: list[Literal["breakfast", "lunch", "dinner"]] = Field(default_factory=list, max_length=3)
+    quote: str = Field(default="", max_length=200)
+    free_minutes: int | None = Field(default=None, ge=0, le=720, strict=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize(cls, value):
+        if not isinstance(value, dict) or value.get("type") not in ACTION_PARAMETERS:
+            return value
+        allowed = ACTION_PARAMETERS[value["type"]][1]
+        value = {key:item for key,item in value.items() if key in {"type", "quote"} or item not in (None, "", [])}
+        if "date" in value and "date" not in allowed and "dates" in allowed:
+            value["dates"] = list(dict.fromkeys([*value.get("dates", []), value["date"]]))
+        if "date" in value and "date" not in allowed:
+            value.pop("date")
+        if isinstance(value.get("dates"), list) and len(value["dates"]) == 1 and "dates" not in allowed and "date" in allowed:
+            value["date"] = value.get("date", value["dates"][0])
+            if value["date"] == value["dates"][0]:
+                value.pop("dates")
+        return value
+
+    @model_validator(mode="after")
+    def action_parameters(self):
+        required, allowed = ACTION_PARAMETERS[self.type]
+        supplied = {key for key in self.model_fields_set - {"type", "quote"} if getattr(self,key) is not None and getattr(self,key) != []}
+        if supplied - allowed or any(getattr(self, key) is None or getattr(self, key) == [] for key in required):
+            raise ValueError("动作参数不完整或不适用于" + self.type)
+        if self.type == "keep_short" and not (self.date or self.dates):
+            raise ValueError("keep_short需要日期")
+        if self.type == "set_time_window":
+            global_window = self.field is not None and self.value is not None and self.stop_id is None and self.at is None and not self.dates
+            anchor = self.stop_id is not None and self.at is not None and self.field is None and self.value is None
+            release = self.unlock and bool(self.stop_id or self.resource_id) and self.at is None and self.field is None and self.value is None
+            resource = self.resource_id is not None and isinstance(self.value,str) and self.field is None and self.stop_id is None and self.at is None and not self.unlock
+            if sum(map(bool,(global_window and not self.unlock and not self.resource_id,anchor and not self.unlock and not self.resource_id,release,resource))) != 1:
+                raise ValueError("时间窗须指定field/value或stop_id/at/dates")
+            if global_window and (self.field == "max_transport_hours" and (isinstance(self.value,bool) or not isinstance(self.value,(int,float)) or not 0 < self.value <= 72)
+                                  or self.field != "max_transport_hours" and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(self.value))):
+                raise ValueError("时间窗数值无效")
+        if len(set(self.dates)) != len(self.dates) or len(set(self.stop_ids)) != len(self.stop_ids) or len(set(self.meals)) != len(self.meals):
+            raise ValueError("动作范围不可重复")
+        if self.type == "grant_repeat" and (self.role == "dining") != bool(self.meals):
+            raise ValueError("餐饮再访须指定餐次；游览再访不指定餐次")
+        return self
+
+
+class DecisionImpact(CoordinatorModel):
+    minutes: Annotated[int, Field(ge=-43200, le=43200)] | None = None
+    amount: ActionNumber | None = None
+    meters: Annotated[int, Field(ge=-1000000, le=1000000)] | None = None
+    dates: list[Date] = Field(default_factory=list, max_length=30)
+    removed_stop_ids: list[ActionId] = Field(default_factory=list, max_length=80)
+    added_stop_ids: list[ActionId] = Field(default_factory=list, max_length=80)
+    moved_stops: list[dict] = Field(default_factory=list, max_length=80)
+    known_before: ActionNumber | None = None
+    known_after: ActionNumber | None = None
+    budget_limit: ActionNumber | None = None
+    travel_minutes: int | None = None
+    estimated_transport: bool = False
+
+
+class DecisionOption(CoordinatorModel):
+    id: ActionId
+    label: Annotated[str, Field(min_length=1, max_length=200)]
+    description: str = Field(default="", max_length=2000)
+    actions: list[PlanAction] = Field(min_length=1, max_length=24)
+    impact: DecisionImpact = Field(default_factory=DecisionImpact)
+    recommended: bool = False
+
+
+class DecisionQuestion(CoordinatorModel):
+    id: ActionId
+    title: Annotated[str, Field(min_length=1, max_length=200)]
+    question: ActionText
+    why_needed: ActionText
+    unmet_refs: list[UnmetReference] = Field(default_factory=list, max_length=24)
+    affected_dates: list[Date] = Field(default_factory=list, max_length=30)
+    affected_stop_ids: list[ActionId] = Field(default_factory=list, max_length=80)
+    options: list[DecisionOption] = Field(min_length=2, max_length=4)
+    recommended_option_id: ActionId
+
+    @model_validator(mode="after")
+    def option_references(self):
+        ids = [item.id for item in self.options]
+        recommended = [item.id for item in self.options if item.recommended]
+        if len(set(ids)) != len(ids) or self.recommended_option_id not in ids or recommended and recommended != [self.recommended_option_id]:
+            raise ValueError("选项ID或推荐引用不一致")
+        return self
+
+
+class DecisionBatch(CoordinatorModel):
+    batch_id: ActionId
+    draft_revision: int = Field(ge=0, le=1000000000)
+    stage_scope: Literal["early_identity", "draft_tradeoff"]
+    summary: ActionText
+    questions: list[DecisionQuestion] = Field(min_length=1, max_length=6)
+
+    @model_validator(mode="after")
+    def question_ids(self):
+        if len({item.id for item in self.questions}) != len(self.questions):
+            raise ValueError("问题ID不可重复")
+        return self
+
+
+class ActionQuote(CoordinatorModel):
+    action_index: int = Field(ge=0, le=23)
+    quote: Annotated[str, Field(min_length=1, max_length=200)]
+
+
+class DecisionInterpretation(CoordinatorModel):
+    interpretation_id: ActionId
+    summary: ActionText
+    actions: list[PlanAction] = Field(default_factory=list, max_length=24)
+    quotes: list[ActionQuote] = Field(default_factory=list, max_length=24)
+    matched_option_ids: list[ActionId] = Field(default_factory=list, max_length=24)
+    ambiguities: list[ActionText] = Field(default_factory=list, max_length=24)
+    changes: list[ActionText] = Field(default_factory=list, max_length=40)
+    relaxed: list[ActionText] = Field(default_factory=list, max_length=40)
+
+    @model_validator(mode="after")
+    def quote_references(self):
+        indices = [item.action_index for item in self.quotes]
+        if len(set(indices)) != len(indices) or any(index >= len(self.actions) for index in indices):
+            raise ValueError("引文须引用本次不同动作的索引")
+        return self
+
+
+class AssumptionAlternative(CoordinatorModel):
+    id: ActionId
+    label: Annotated[str, Field(min_length=1, max_length=200)]
+    description: str = Field(default="", max_length=2000)
+    actions: list[PlanAction] = Field(min_length=1, max_length=24)
+
+
+class SystemAssumption(CoordinatorModel):
+    id: ActionId
+    title: Annotated[str, Field(min_length=1, max_length=200)]
+    dates: list[Date] = Field(default_factory=list, max_length=30)
+    stop_ids: list[ActionId] = Field(default_factory=list, max_length=80)
+    current_action: PlanAction
+    reason: ActionText
+    revision: int = Field(default=0, ge=0, le=1000000000)
+    status: Literal["active", "replaced", "withdrawn"] = "active"
+    alternatives: list[AssumptionAlternative] = Field(default_factory=list, max_length=4)
+
+    @model_validator(mode="after")
+    def alternative_ids(self):
+        if len({item.id for item in self.alternatives}) != len(self.alternatives):
+            raise ValueError("替代方案ID不可重复")
+        return self
+
+
+class DecisionOptionCopy(CoordinatorModel):
+    id: ActionId
+    description: str = Field(default="", max_length=2000)
+
+
+class DecisionQuestionCopy(CoordinatorModel):
+    id: ActionId
+    title: Annotated[str, Field(min_length=1, max_length=200)]
+    question: ActionText
+    why_needed: ActionText
+    options: list[DecisionOptionCopy] = Field(min_length=2, max_length=4)
+
+
+class DecisionWording(CoordinatorModel):
+    questions: list[DecisionQuestionCopy] = Field(min_length=1, max_length=6)
+
+
+class CoordinatorAnswer(CoordinatorModel):
+    round_id: ActionId | None = None
+    batch_id: ActionId | None = None
+    draft_revision: int = Field(ge=0, le=1000000000)
+    selected_options: dict[ActionId, ActionId] = Field(default_factory=dict, max_length=6)
+    answers: dict[ActionId, Annotated[str, Field(max_length=8000)]] = Field(default_factory=dict, max_length=6)
+    note: str = Field(default="", max_length=8000)
+    interpretation_id: ActionId | None = None
+    confirm: bool = False
+
+    @model_validator(mode="after")
+    def round_reference(self):
+        if not (self.round_id or self.batch_id) or self.round_id and self.batch_id and self.round_id != self.batch_id:
+            raise ValueError("回答须引用同一个有效批次")
+        return self
+
+
+class CoordinatorConfirmation(CoordinatorModel):
+    batch_id: ActionId
+    draft_revision: int = Field(ge=0, le=1000000000)
+    interpretation: DecisionInterpretation
+    original_answers: dict[ActionId, Annotated[str, Field(max_length=8000)]] = Field(default_factory=dict, max_length=6)
+    original_note: str = Field(default="", max_length=8000)
+    state_hash: ActionId
+    batch_hash: ActionId
+
+
+class CoordinatorOutcome(CoordinatorModel):
+    state_updates: dict = Field(default_factory=dict)
+    itinerary: dict
+    batch: DecisionBatch | None = None
+    confirmation: CoordinatorConfirmation | None = None
+    messages: list[dict] = Field(default_factory=list)
+    remaining_blockers: list[UnmetItem] = Field(default_factory=list)

@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 from app.adapters import ToolError
 from app.agents.reviewer import ReviewerAgent
-from app.agents.runtime import digest
+from app.agents.runtime import agent_payload, digest
 from app.models import REVIEW_DIMENSIONS, Requirements, ReviewReport, ReviewReferenceCorrections
 from app.reviewing import canonical_review_path, pointer_exists, review_field_index
 from app.store import Store
@@ -81,7 +81,7 @@ class ReviewReferenceRecovery(unittest.IsolatedAsyncioTestCase):
         self.agent = ReviewerAgent(self.models,self.store)
 
     def invalid_key(self, attempt):
-        return "review_invalid:"+digest([self.payload,self.state["generation"],self.state["run_id"],attempt])
+        return "review_invalid:"+digest([agent_payload(self.state,self.payload),self.state["generation"],self.state["run_id"],attempt])
 
     async def test_valid_review_is_accepted_without_an_extra_model_call(self):
         value = report_value()

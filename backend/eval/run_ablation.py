@@ -40,7 +40,7 @@ VARIANTS = {"full": "全部开启", "no_reviewer": "关掉检验 Agent", "no_ded
             "no_code_checks": "关掉代码硬约束校验", "no_clustering": "关掉空间分日聚类"}
 UNAVAILABLE = re.compile(r"额度|重新登录|模型权限")
 TRANSIENT = {"model_network", "model_format", "amap_network", "amap_rate_limit", "flyai_timeout"}
-RUN_LEVEL = {"decisions", "code_option_decisions", "model_calls", "elapsed_seconds"}
+RUN_LEVEL = {"decisions", "code_option_decisions", "model_calls", "elapsed_seconds", "incremental_reviews", "full_reviews"}
 SPATIAL_LABELS = {"visit_path_geo_m": "visit 路径直线距离（米）", "within_day_dispersion_m": "日内分散度（米）",
                   "cross_day_outlier_count": "跨日空间 outlier", "spatial_coordinate_coverage": "坐标覆盖率",
                   "visits": "景点访问数（visits）", "visit_minutes": "已知游玩分钟（visit_minutes）",
@@ -76,11 +76,41 @@ async def wait_run(planner, run_id, timeout):
         return True
 
 
+def count_model_calls(ask, row):
+    for field in ("model_calls","model_seconds","incremental_reviews","full_reviews"):
+        row.setdefault(field,0)
+    row.setdefault("calls_by_schema",{})
+    row.setdefault("seconds_by_schema",{})
+    seconds = dict(row["seconds_by_schema"])
+
+    async def counted(*call_args, **call_kwargs):
+        schema = call_args[0] if call_args else call_kwargs.get("schema")
+        name = getattr(schema,"__name__","unknown")
+        payload = call_args[2] if len(call_args) > 2 else call_kwargs.get("payload")
+        incremental = isinstance(payload,dict) and payload.get("review_mode") == "changed_dates"
+        begun = perf_counter()
+        try:
+            return await ask(*call_args, **call_kwargs)
+        finally:
+            elapsed = perf_counter()-begun
+            row["model_calls"] += 1
+            row["model_seconds"] += elapsed
+            row["calls_by_schema"][name] = row["calls_by_schema"].get(name,0)+1
+            seconds[name] = seconds.get(name,0)+elapsed
+            row["seconds_by_schema"][name] = round(seconds[name],1)
+            if incremental:
+                row["incremental_reviews"] += 1
+            elif name == "ReviewReport":
+                row["full_reviews"] += 1
+    return counted
+
+
 async def run_one(case, variant, repeat, out, cassette, args):
     work = out / "work" / f"{case['id']}-{variant}-{repeat}-{uuid4().hex[:6]}"
     store = Store(work)
     row = {"case": case["id"], "variant": variant, "repeat": repeat, "started_at": now(), "outcome": "failed",
-           "error": "", "decisions": 0, "resumes": 0, "model_calls": 0, "model_seconds": 0.0}
+           "error": "", "decisions": 0, "resumes": 0, "model_calls": 0, "model_seconds": 0.0,
+           "calls_by_schema": {}, "seconds_by_schema": {}, "incremental_reviews": 0, "full_reviews": 0}
     started = perf_counter()
     before = dict(cassette.stats)
     planner = None
@@ -93,16 +123,7 @@ async def run_one(case, variant, repeat, out, cassette, args):
         try:
             planner = Planner(store, InMemorySaver())
             undo = replay.install(planner, cassette)
-            ask = planner.models.ask
-
-            async def counted(*call_args, **call_kwargs):
-                begun = perf_counter()
-                try:
-                    return await ask(*call_args, **call_kwargs)
-                finally:
-                    row["model_calls"] += 1
-                    row["model_seconds"] += perf_counter() - begun
-            planner.models.ask = counted
+            planner.models.ask = count_model_calls(planner.models.ask,row)
 
             trip = store.create_trip(case["title"], case["requirements"])
             source_ids = []
@@ -349,7 +370,9 @@ def report(out: Path):
     variants = list(dict.fromkeys(row["variant"] for row in rows))
     metrics = [*VIOLATIONS, "dup_visit_strict", "total_violations", "escaped_violations", "confirmable", "reviewer_blockers",
                "oracle_code_blockers", "decisions", "code_option_decisions", "model_calls", "elapsed_seconds",
-               "constraints_expected", "constraints_extracted", "constraints_matched", "constraints_active_form"]
+               "incremental_reviews", "full_reviews", "constraints_expected", "constraints_extracted", "constraints_matched", "constraints_active_form"]
+    schemas = sorted({name for row in rows for field in ("calls_by_schema","seconds_by_schema")
+                      for name in (row.get(field) or {})})
     summary = {}
     for variant in variants:
         group = [row for row in rows if row["variant"] == variant]
@@ -368,7 +391,8 @@ def report(out: Path):
         summary[variant] = {
             "runs": len(group), "plans": len(planned),
             "outcomes": {name: sum(row["outcome"] == name for row in group) for name in OUTCOMES if any(row["outcome"] == name for row in group)},
-            "mean": {name: mean([row.get(name) for row in (group if name in RUN_LEVEL else planned)]) for name in metrics},
+            "mean": {name: mean([row.get(name,0) if name in {"incremental_reviews","full_reviews"} else row.get(name)
+                                  for row in (group if name in RUN_LEVEL else planned)]) for name in metrics},
             "sum": {name: sum(row.get(name) or 0 for row in planned) for name in metrics},
             "dup_visit_rate": sum(row.get("dup_visit", 0) for row in planned) / visits if visits else None,
             "dup_meal_rate": sum(row.get("dup_meal", 0) for row in planned) / meals if meals else None,
@@ -379,6 +403,8 @@ def report(out: Path):
             "violations_per_repeat_stdev": statistics.stdev(totals) if len(totals) > 1 else None,
         }
         item = summary[variant]
+        for field in ("calls_by_schema","seconds_by_schema"):
+            item["mean"][field] = {name:mean([(row.get(field) or {}).get(name,0) for row in group]) for name in schemas}
         item["mean"].update({name: mean([row[name] for row in values]) for name, values in spatial.items()})
         item["sum"].update({name: sum(row[name] for row in values) if values else None
                             for name, values in spatial.items() if name not in SPATIAL_WEIGHTS})
@@ -411,6 +437,7 @@ def report(out: Path):
               "over_budget": "超预算", "user_constraint_violation": "违反用户条件", "total_violations": "违反合计", "escaped_violations": "漏检违反",
               "confirmable": "可确认方案", "reviewer_blockers": "检验 Agent 额外阻断", "oracle_code_blockers": "完整代码规则阻断",
               "decisions": "追问次数", "code_option_decisions": "其中代码给出选项", "model_calls": "模型调用", "elapsed_seconds": "用时(秒)",
+              "incremental_reviews": "增量审查次数", "full_reviews": "全量审查次数",
               "constraints_expected": "应抽取的偏好条件", "constraints_extracted": "实际抽取的偏好条件", "constraints_matched": "其中种类正确",
               "constraints_active_form": "仍生效的表单条件"}
     lines += ["", "## 指标合计（只统计得到方案的运行）", "", "| 指标 | " + " | ".join(VARIANTS.get(v, v) for v in variants) + " |",
@@ -428,6 +455,14 @@ def report(out: Path):
     lines.append("| 每轮违反合计 均值±标准差 | " + " | ".join(
         fmt(summary[v]["violations_per_repeat_mean"], 1) + ("" if summary[v]["violations_per_repeat_stdev"] is None else
         "±" + fmt(summary[v]["violations_per_repeat_stdev"], 1)) for v in variants) + " |")
+    lines += ["", "## 按响应 schema 的调用统计（全部运行均值）", "",
+              "旧结果缺失埋点字段按0汇总；未记录的分项无法还原历史实际调用分布。", "",
+              "| schema | "+" | ".join(f"{VARIANTS.get(v,v)} 平均调用次数 | {VARIANTS.get(v,v)} 平均秒数" for v in variants)+" |",
+              "|---|"+"---|---|"*len(variants)]
+    for name in schemas:
+        lines.append("| "+name+" | "+" | ".join(
+            fmt(summary[v]["mean"]["calls_by_schema"][name],1)+" | "+fmt(summary[v]["mean"]["seconds_by_schema"][name],1)
+            for v in variants)+" |")
     lines += ["", "## 空间指标（只统计得到方案的运行）", "",
               "缺失运行数 = 得到方案数 - 各项有效运行数；请同时查看成功数、visits、游玩分钟、已知时长数及坐标覆盖。",
               "距离是直线代理，outlier 不是实际错误标签；缺失显示 -，合法 0 参与统计。", "",

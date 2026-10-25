@@ -17,7 +17,7 @@ PRIVATE = "PRIVATE_GUIDE_CONTENT_NOT_FOR_LOGS"
 
 
 def report():
-    return {"status":"pass","summary":PRIVATE,"question":None,"findings":[],
+    return {"status":"pass","summary":PRIVATE,"findings":[],
         "checks":[{"dimension":dimension,"result":"ok","note":"合成检查"} for dimension in sorted(REVIEW_DIMENSIONS)]}
 
 
@@ -25,11 +25,6 @@ def blocker():
     return {"code":"timing","severity":"blocker","owner":"route","action":"repair","target":"visit",
         "dates":["2026-11-10"],"field_path":"/days/0/activities/0","message":PRIVATE,
         "evidence_ids":["requirements"],"suggestion":"调整时间"}
-
-
-def question():
-    return {"id":"choice","title":"固定安排取舍","question":"调整哪个固定条件？","options":["改日期","改时刻"],
-        "recommendation":"改时刻","why_needed":"用户指定条件冲突","affected_dates":["2026-11-10"]}
 
 
 class ReviewFormatDiagnostics(unittest.IsolatedAsyncioTestCase):
@@ -51,11 +46,8 @@ class ReviewFormatDiagnostics(unittest.IsolatedAsyncioTestCase):
         blocked_pass = {**report(),"findings":[blocker()]}
         warning_pass = {**report(),"findings":[{**blocker(),"severity":"warning"}]}
         missing_blocker = {**report(),"status":"revise"}
-        missing_question = {**report(),"status":"needs_decision","findings":[blocker()]}
-        unexpected_question = {**report(),"status":"revise","findings":[blocker()],"question":question()}
         for value,code in ((dimensions,"review_dimensions"),(blocked_pass,"review_blocker_status"),
-                (warning_pass,"review_pass_warnings"),(missing_blocker,"review_missing_blocker"),
-                (missing_question,"review_question_missing"),(unexpected_question,"review_question_unexpected")):
+                (warning_pass,"review_pass_warnings"),(missing_blocker,"review_missing_blocker")):
             with self.subTest(code=code):
                 with self.assertRaises(ValidationError) as raised:
                     ReviewReport.model_validate(value)

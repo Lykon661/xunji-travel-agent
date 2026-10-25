@@ -36,6 +36,7 @@ class PlannerResume(unittest.IsolatedAsyncioTestCase):
         self.planner.execute = AsyncMock()
 
     async def test_continue_keeps_checkpoint_route_and_progress_while_queued(self):
+        self.snapshot.values["system_repair"] = {"dates":["2026-11-10"],"candidate":{"id":"old"}}
         run = await self.planner.submit(self.trip["id"], 0, retry=True, resume=True)
         await self.planner.tasks[run]
         self.assertEqual(self.store.run(run)["thread_id"], "existing-thread")
@@ -45,6 +46,7 @@ class PlannerResume(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(doc["progress_stage"], "activities")
         self.assertEqual(doc["selected_route"], {"id":"candidate"})
         self.assertEqual(doc["candidates"], [{"id":"candidate"}])
+        self.assertEqual(self.planner.graph.aupdate_state.await_args.args[1]["run_id"],run)
 
     async def test_continue_does_not_silently_restart_after_input_change(self):
         with self.assertRaises(Conflict):
@@ -52,21 +54,6 @@ class PlannerResume(unittest.IsolatedAsyncioTestCase):
         self.planner.execute.assert_not_awaited()
         self.assertEqual(self.store.trip(self.trip["id"])["active_run"], self.old_run)
 
-    async def test_reopening_a_decision_marks_the_checkpoint_as_an_explicit_new_answer(self):
-        doc = self.store.trip(self.trip["id"])["document"]
-        question = {"id":"walk","title":"步行上限","question":"是否保持规划？","why_needed":"步行超限",
-                    "affected_dates":["2026-11-10"]}
-        doc.update(candidates=[{"id":"candidate","draft":{"days":[{"date":"2026-11-10"}]},
-                                "days":[{"date":"2026-11-10","city":"杭州","stop_ids":[]}]}],
-                   decision_history=[{"questions":[question],"answers":{"walk":"保持规划"}}])
-        self.store.update(self.trip["id"],doc)
-        trip = self.store.trip(self.trip["id"])
-        run = await self.planner.reopen_decision(trip["id"],trip["version"],trip["updated_at"],0)
-        await self.planner.tasks[run]
-        checkpoint = self.planner.graph.aupdate_state.await_args.args[1]
-        self.assertTrue(checkpoint["decision_reopened"])
-        self.assertEqual(checkpoint["decision"],question)
-        self.assertEqual(checkpoint["decision_history"],doc["decision_history"])
 
     async def test_quote_refresh_keeps_route_candidates_and_starts_at_resources(self):
         self.store.add_source(self.trip["id"],{"id":"guide","title":"合成攻略","extraction":{"stops":[

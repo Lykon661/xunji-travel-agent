@@ -1,7 +1,7 @@
 from . import ablation
 from .agents.runtime import digest
-from .routing import coordinates, daily_route_scope, reference_opening
-from .rules import timestamp
+from .routing import coordinates, daily_route_scope, reference_opening, route_issue_applies, scoped_day, selected_route_resources
+from .rules import timestamp, walking_limit
 from .resource_planning import resource_context_issues
 from .places import duplicate_issues, represented_ids
 from .dining import dining_wishes, dining_wish_issues, visit_required_ids
@@ -73,49 +73,161 @@ def route_structure(itinerary):
             "resources":{group:[resource_signature(entry) for entry in itinerary.get(group,[])] for group in ("transport","hotels")}}
 
 
-def confirmation_blockers(itinerary, constraints=None, requirements=None, stops=None):
+def issue_record(itinerary, issue, requirements=None, stops=None):
+    requirements, stops = requirements or {}, stops or {}
+    target = str(issue.get("target") or "")
+    refs = [dict(ref) for ref in issue.get("refs", [])]
+    dates = list(map(str, issue.get("dates") or ([issue["date"]] if issue.get("date") else [])))
+    numbers = dict(issue.get("numbers") or {})
+    code = issue.get("code", "other")
+    if issue.get("constraint_id"):
+        refs.append({"type":"constraint", "id":issue["constraint_id"]})
+    if target in requirements:
+        refs.append({"type":"requirement", "id":target})
+    if target in stops:
+        refs.append({"type":"stop", "id":target})
+        if stops[target].get("assigned_date"):
+            dates.append(str(stops[target]["assigned_date"]))
+    for day in itinerary.get("days", []):
+        if target == day["date"]:
+            refs.append({"type":"day", "id":target})
+            dates.append(day["date"])
+        for item in [*day.get("activities", []), *day.get("meal_recommendations", [])]:
+            if target and target in {item.get("id"), item.get("name")}:
+                refs.append({"type":"stop", "id":item["id"]})
+                dates.append(day["date"])
+    for group in ("transport", "hotels"):
+        for entry in itinerary.get(group, []):
+            if target == entry.get("id"):
+                refs.append({"type":"resource", "id":target})
+                context = entry.get("context") or {}
+                if context.get("date"):
+                    dates.append(context["date"])
+    if code == "walking_limit":
+        refs.append({"type":"requirement", "id":"max_walk_per_day"})
+        for day in itinerary.get("days", []):
+            if day["date"] in dates:
+                limit = walking_limit(requirements, day["date"])
+                if limit is not None:
+                    numbers.setdefault("excess_meters", max(0, day.get("walking_meters", 0)-limit))
+    if code == "over_budget":
+        refs.append({"type":"requirement", "id":"budget"})
+        budget = itinerary.get("budget") or {}
+        numbers.setdefault("excess_amount", max(0, budget.get("known_plus_estimates", 0)-(requirements.get("budget") or budget.get("limit", 0))))
+    for key in ("shortfall_minutes", "excess_amount", "excess_meters", "shortfall_stops"):
+        if key in issue:
+            numbers[key] = issue[key]
+    if "available_minutes" in issue and "required_minutes" in issue:
+        numbers.setdefault("shortfall_minutes", max(0, issue["required_minutes"]-issue["available_minutes"]))
+    unique = {(ref["type"], ref.get("id") or ref.get("field")):ref for ref in refs}
+    return {**issue, "code":code, "message":issue.get("message", ""), "refs":[unique[key] for key in sorted(unique)],
+            "dates":sorted(set(dates)), "numbers":numbers, "blocking":issue.get("blocking", True)}
+
+
+def confirmation_issues(itinerary, constraints=None, requirements=None, stops=None, state=None):
     if ablation.disabled("code_checks"):
         return []
-    blockers = [issue["message"] for issue in itinerary.get("issues",[]) if issue.get("blocking")]
-    if requirements:
-        blockers.extend(issue["message"] for issue in resource_context_issues(itinerary,requirements))
-    visits = represented_ids([activity for day in itinerary.get("days",[]) for activity in day.get("activities",[]) if activity["kind"] == "visit"])
-    meal_stops = {item["id"]:{**item,"city":day["city"]} for day in itinerary.get("days",[]) for item in day.get("meal_recommendations",[]) if item.get("id")}
-    meal_stops.update(stops or {})
-    wishes = dining_wishes(meal_stops,requirements)
-    blockers.extend(issue["message"] for issue in dining_wish_issues(itinerary,meal_stops,requirements))
-    blockers.extend(issue["message"] for issue in duplicate_issues(itinerary,requirements))
-    if not visits and not wishes:
-        blockers.append("路线尚未包含有来源的景点安排")
-    if visit_required_ids((constraints or {}).get("required",[]),meal_stops,requirements) - visits:
-        blockers.append("必去景点尚未全部纳入路线")
-    if set((constraints or {}).get("excluded",[])) & visits:
-        blockers.append("行程包含用户明确排除的地点或其攻略别名")
-    for day in itinerary.get("days",[]):
-        scope = daily_route_scope(itinerary,day)
-        previous_visit = None
-        for activity in day.get("activities",[]):
-            if activity["kind"] != "visit":
+    from .constraints import active, trip_dates
+    from .models import wish_stops
+    from .places import canonical_key
+    from .rules import check_itinerary
+    req, state = requirements or {}, state or {}
+    pool = {**wish_stops(req), **(stops or {})}
+    issues = []
+    def add(code, message, target="", dates=(), refs=()):
+        issues.append({"code":code,"message":message,"target":target,"dates":list(dates),"refs":list(refs),"blocking":True})
+    days = itinerary.get("days",[])
+    expected = set(trip_dates(req)) if req.get("start_date") and req.get("end_date") else set()
+    actual = [day["date"] for day in days]
+    rows = [(day,item) for day in days for item in [*day.get("activities",[]),*day.get("meal_recommendations",[])]
+            if item.get("kind") == "visit" or item.get("meal") in {"breakfast","lunch","dinner"}]
+    visits = represented_ids([item for _,item in rows])
+    keys = {canonical_key(item,day.get("city","")) for day,item in rows}
+    if not days or expected and (set(actual) != expected or len(actual) != len(expected)) or not rows:
+        add("no_draft","路线尚无完整逐日草稿，不能确认或保存",refs=[{"type":"requirement","id":"start_date"}])
+    required = set(req.get("required_stop_ids",[])) | set((constraints or {}).get("required",[])) | set(wish_stops(req))
+    for entry in req.get("constraints",[]):
+        if (entry.get("kind") in {"time_anchor","booking_prerequisite"} and entry.get("at")
+                and not entry.get("revoke") and not entry.get("superseded_by")
+                and entry.get("source","legacy_unknown") in {"form","message","interview","decision","user","legacy_unknown"}
+                and (entry["kind"] == "booking_prerequisite" or entry.get("anchor") == "appointment")):
+            required.update(entry.get("scope",{}).get("stop_ids",[]))
+    for identity in sorted(required):
+        if identity not in visits and (identity not in pool or canonical_key(pool[identity]) not in keys):
+            add("stop_unplaced","用户必去或想去地点尚未纳入全程路线："+pool.get(identity,{}).get("name",identity),identity)
+    excluded = set(req.get("excluded_stop_ids",[])) | set((constraints or {}).get("excluded",[]))
+    for identity in sorted(excluded):
+        if identity in visits or identity in pool and canonical_key(pool[identity]) in keys:
+            add("excluded_stop","行程包含用户明确排除的地点",identity)
+    if req:
+        checked = check_itinerary(itinerary,req,pool)
+        selected = [entry for entry in itinerary.get("transport",[]) if entry.get("selected")]
+        for issue in checked["issues"]:
+            if issue["code"] in {"arrival_conflict","departure_conflict","transport_time"}:
+                issues.append({**issue,"blocking":True})
+            elif issue["code"] == "tail_conflict" and any(entry.get("context",{}).get("date") == issue.get("target")
+                    and any(day["date"] == issue["target"] and day.get("city") == entry["context"].get("origin") for day in days) for entry in selected):
+                issues.append({**issue,"blocking":True})
+        known = checked["budget"].get("known_subtotal",0)
+        if req.get("budget") is not None and known > req["budget"]:
+            add("over_budget",f"已知费用 {known} 元超过用户预算上限 {req['budget']} 元","budget")
+        for entry in selected:
+            from .resource_planning import transport_issues
+            for message in transport_issues(entry["selected"],entry.get("context",{}),req):
+                add("transport_time",(entry.get("label") or "已选班次")+"："+message,entry["id"])
+    user_sources = {"form","message","interview","decision","user","legacy_unknown"}
+    for day in days:
+        for item in day.get("activities",[]):
+            if item.get("kind") != "visit":
                 continue
-            opening = reference_opening(activity,day["date"])
-            if opening and opening.get("closed"):
-                blockers.append(day["date"]+" "+activity["name"]+"的参考信息为闭馆")
-            if not coordinates(activity.get("map_place")):
-                blockers.append(f"{day['date']} {activity['name']}的位置尚未确定")
-            move = activity.get("move_before") or {}
-            if (previous_visit or scope["first_leg_required"] and (day.get("start_place") or move)) and move.get("minutes") is None:
-                blockers.append(f"{day['date']} 前往{activity['name']}的实际交通耗时尚未取得")
-            previous_visit = activity
-        if scope["last_leg_required"] and day.get("activities") and day.get("return_move") and day["return_move"].get("minutes") is None:
-            blockers.append(day["date"]+"结束路段的实际交通耗时尚未取得")
-        for transfer in day.get("transfers",[]):
-            if transfer["move"].get("minutes") is None:
-                blockers.append(day["date"]+" "+transfer["label"]+"的实际耗时尚未取得")
-    for entry in itinerary.get("transport",[]):
-        selected = entry.get("selected") or {}
-        day = entry.get("context",{}).get("date","")
-        if not timestamp(selected.get("departure"),day) or not timestamp(selected.get("arrival"),day):
-            blockers.append(entry["label"]+"的到离时间尚未取得")
-        if not selected.get("departure_place") or not selected.get("arrival_place"):
-            blockers.append(entry["label"]+"的出发或到达站点尚未确定")
-    return list(dict.fromkeys(blockers))
+            start = timestamp(item.get("start"),day["date"])
+            anchors = [entry for kind in ("time_anchor","booking_prerequisite")
+                       for entry in active(req,kind,date=day["date"],stop_id=item["id"])
+                       if entry.get("at") and entry.get("source","legacy_unknown") in user_sources
+                       and (kind == "booking_prerequisite" or entry.get("anchor") == "appointment")]
+            times = [entry["at"] for entry in anchors]
+            if item.get("appointment_time") and item.get("appointment_time_source","legacy_unknown") in user_sources:
+                times.append(item["appointment_time"])
+            opening = reference_opening({**pool.get(item["id"],{}),**item},day["date"])
+            stop = pool.get(item["id"],{})
+            if (not coordinates(item.get("map_place") or stop.get("map_place")) and not stop.get("map_selected_id")
+                    and len(stop.get("map_candidates",[])) >= 2):
+                add("place_identity",item["name"]+"将进入路线，仍需在当前同名候选中确认地点身份",item["id"],[day["date"]])
+            for at in times:
+                moment = timestamp(at,day["date"])
+                if moment and (start != moment or opening["closed"] or opening.get("last_entry_minutes") is not None
+                        and moment.hour*60+moment.minute > opening["last_entry_minutes"]):
+                    add("appointment_time",item["name"]+"与用户预约时刻或当日开放安排冲突",item["id"],[day["date"]])
+    old = state.get("old_itinerary") or (state.get("review_previous") or {}).get("plan") or {}
+    for identity in state.get("locks",[]):
+        previous = [(day,item) for day in old.get("days",[]) for item in day.get("activities",[]) if item.get("id") == identity]
+        current = [(day,item) for day in days for item in day.get("activities",[]) if item.get("id") == identity]
+        conflict = bool(previous and not current)
+        for group in ("transport","hotels"):
+            before = next((entry for entry in old.get(group,[]) if entry.get("id") == identity),None)
+            after = next((entry for entry in itinerary.get(group,[]) if entry.get("id") == identity),None)
+            if before:
+                conflict |= not after or before.get("context") != after.get("context") or any(
+                    (before.get("selected") or {}).get(field) != (after.get("selected") or {}).get(field)
+                    for field in ("departure","arrival"))
+        if previous and current:
+            first,before = previous[0]
+            last,after = current[0]
+            conflict |= (first["date"],before.get("start"),before.get("end")) != (last["date"],after.get("start"),after.get("end"))
+        if current:
+            day,item = current[0]
+            opening = reference_opening({**pool.get(identity,{}),**item},day["date"])
+            start,end = timestamp(item.get("start"),day["date"]),timestamp(item.get("end"),day["date"])
+            conflict |= opening["closed"] or not start or not end
+            if start and end and not opening.get("unknown"):
+                begin,finish = start.hour*60+start.minute,end.hour*60+end.minute
+                conflict |= not any(a <= begin < finish <= b for a,b in opening["windows"])
+                conflict |= opening.get("last_entry_minutes") is not None and begin > opening["last_entry_minutes"]
+        if conflict:
+            add("locked_time","用户锁定项目与当前日期、时刻或开放时间冲突",identity)
+    unique = {(item["code"],item.get("target"),tuple(item.get("dates",[]))):item for item in issues}
+    return [issue_record(itinerary,item,req,pool) for item in unique.values()]
+
+
+def confirmation_blockers(itinerary, constraints=None, requirements=None, stops=None, state=None):
+    return list(dict.fromkeys(issue["message"] for issue in confirmation_issues(itinerary, constraints, requirements, stops, state)))

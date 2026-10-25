@@ -4,9 +4,10 @@ from typing import Literal
 from pydantic import Field
 
 from ..adapters import ToolError
-from ..models import PlanningReview, ReviewRepairResolution, RouteToolRequest, RouteTurn
+from ..models import RouteToolRequest, RouteTurn
 from ..routing import coordinates
-from .runtime import AgentRuntime
+from ..assumptions import ASSUMPTION_NOTE
+from .runtime import AgentRuntime, agent_payload
 
 
 def resolve_stop_id(value, stops, city=None):
@@ -23,22 +24,15 @@ def resolve_stop_id(value, stops, city=None):
 
 
 class RouteCompletion(RouteTurn):
-    status: Literal["ready", "needs_decision"]
+    status: Literal["ready"]
     tools: list[RouteToolRequest] = Field(default_factory=list, max_length=0)
     order: None = None
 
 
 class DailyRouteCompletion(RouteTurn):
-    status: Literal["ready", "needs_decision"]
+    status: Literal["ready"]
     tools: list[RouteToolRequest] = Field(default_factory=list, max_length=0)
     candidate: None = None
-
-
-# 回答只能修改这些内容（见 DECISION_REQUIREMENT_FIELDS 与必去/排除景点），问题必须落在其中。
-ANSWERABLE_QUESTIONS = (
-    "问题只能询问用户回答后系统能记录的内容：偏好、预算、是否打车、市内交通方式、每日步行上限、最早出发/最晚到达/最晚返回时刻、"
-    "交通时长上限、住宿区域、重复安排授权，以及现有景点中哪些必去或排除。选择具体酒店须由用户在住宿面板采用，不能通过回答完成；"
-    "某天的出发地址、往返班次及时刻等信息无法通过回答记录。遇到这些情况不得提问，写成资料缺口，保留其余安排。")
 
 
 class RouteAgent(AgentRuntime):
@@ -98,7 +92,7 @@ class RouteAgent(AgentRuntime):
         stop = stops.get(request.get("destination_id")) if isinstance(stops,dict) else None
         if stop and not coordinates(stop.get("map_place")):
             # Replaying evidence must not restore an old stop's name, source text or duration.
-            for field in ("map_place","map_candidates","map_selected_id","map_issue","query_status"):
+            for field in ("map_place","map_candidates","map_selected_id","map_selected_by","map_issue","query_status"):
                 if field in value:
                     stop[field] = copy.deepcopy(value[field])
         if stop and coordinates(stop.get("map_place")):
@@ -106,6 +100,8 @@ class RouteAgent(AgentRuntime):
             stop.pop("map_issue",None)
 
     async def plan(self, state, instruction, payload, tools, daily=False):
+        payload = {**payload,"guide_suggestions":state.get("guide_suggestions",{})}
+        payload = agent_payload(state,payload)
         pool = payload.get("available_stops")
         if isinstance(pool,dict):
             # Annotate a copy for the model; the caller's pool only receives actual tool observations.
@@ -120,7 +116,7 @@ class RouteAgent(AgentRuntime):
                     original = pool.get(identity)
                     if not isinstance(original,dict):
                         continue
-                    for field in ("map_place","map_candidates","map_selected_id","map_issue"):
+                    for field in ("map_place","map_candidates","map_selected_id","map_selected_by","map_issue"):
                         if field in stop:
                             if original.get(field) != stop[field]:
                                 original[field] = stop[field]
@@ -129,7 +125,7 @@ class RouteAgent(AgentRuntime):
 
     async def plan_turn(self, state, instruction, payload, tools, daily):
         prompt = (
-            "你与攻略 Agent、资源 Agent 协作，只形成一条完整行程。交通、住宿和门票使用资源 Agent 交接的真实结果。"
+            ASSUMPTION_NOTE+"你与攻略 Agent、资源 Agent 协作，只形成一条完整行程。交通、住宿和门票使用资源 Agent 交接的真实结果。"
             "住宿仅在selected_by_user=true时参与行程；未选定酒店不得暂用，不安排酒店起终点、放行李或接驳，也不要求用户先选酒店。"
             "全程同一canonical_place_id默认只游览一次，多个source_references只是同一地点的多个来源；用户明确repeat_exceptions除外。"
             "可通过tools请求place、route、weather或guide_feedback，"
@@ -151,13 +147,13 @@ class RouteAgent(AgentRuntime):
             "不得默认所有景点间都有公共交通，未查询公交不等于公交查询失败；短途已核实步行无需补公交证据或据此删点，仍计入每日步行上限。不把某日期/某景点的条件推广到整趟。"
             "先利用高德查询证据再确定顺序，不虚构交通耗时、位置或天气。"
             "地点坐标与路段起终点只用高德map_place，飞猪仅查询票务；不比较两平台坐标，不因票务坐标差异更换或清空高德定位，也不据此要求用户确认场馆。"
-            "需要工具时status=tools；有重要未决取舍时status=needs_decision并返回一道question；"
+            "需要工具时status=tools；完成时status=ready，未满足条件写入unmet，引用对象、日期及差额数字，不向用户提问。"
             "普通可选项目可自行取舍并解释，必去/锁定项不能删除。"
             "普通攻略餐饮另列用餐推荐，不加入stop_ids；source_kind=user的咖啡、甜品、饮品是必去游览，默认45分钟，用户时长优先。meal_wishes是用户必去正餐餐厅，不加入stop_ids，让对应餐次前后景点靠近它，尽量在2公里内。"
             "门票不是每个地点的必备条件；保留攻略中的免费说明和多个票种，不因未提供票价反复追问。"
             "用户最新明确指令优先于默认规则与旧偏好。walking_limit_exempt_dates中的日期已获用户授权豁免步行上限，"
             "effective_max_walk_per_day为null时只提示真实距离，不能因旧上限删点、换住宿或重复追问。"
-            "工具失败是资料缺口，不冒充偏好问题。没有未决决策才status=ready，"
+            "工具失败如实写入unmet；交付尽力完成的草稿，"
             +("返回order，candidate为null。" if daily else "返回单个candidate，order为null。")+instruction)
         completion = DailyRouteCompletion if daily else RouteCompletion
         def incomplete(turn):
@@ -166,36 +162,10 @@ class RouteAgent(AgentRuntime):
         if incomplete(result):
             # One correction, like other format errors: say what was missing instead of failing the whole run.
             correction = ("上一次返回status=ready却没有"+("order" if daily else "candidate")+"，本步骤无法采用。"
-                          "完成时必须填写"+("order（candidate为null）" if daily else "candidate（order为null）")+"；仍有未决取舍时返回needs_decision和question。")
+                          "完成时必须填写"+("order（candidate为null）" if daily else "candidate（order为null）")+"；未解决条件写入unmet。")
             result = await self.ask(state,RouteTurn,prompt+correction,payload,tools,cache=False,completion_schema=completion)
         if incomplete(result):
             raise ToolError("route_format","路线 Agent 未交接当前步骤需要的结构，未采用")
         return result
 
-    async def review(self, state, issues):
-        return await self.ask(state,PlanningReview,
-            "当前路线经过局部自动修复后，仍有冲突或资料不足导致无法确定调整方式。按用户要求转到需求追问，不能以规划失败结束。"
-            "围绕最先需要明确的一项问题，引用当前活动和具体卡点问一道可回答的问题，不把不确定性编造成已证实冲突。"
-            "可询问必须保留的活动/时刻、可删减或可调整的范围，不能询问是否批准自动修复、查询或重审。"
-            "只修改问题涉及的活动及必要的相邻衔接，其他日期与活动保持原样。"
-            "给选项、推荐理由和影响日期；不要要求用户代查事实。不得把推荐当回答，也不得自行提高预算、"
-            "删除必去项或修改交通限制。用户最新明确指令可以覆盖默认规则和历史偏好；用户已经接受的步行超限只做说明，"
-            "不得以未解除旧上限为由再次要求选择。已经回答的问题不要重复，提出新的具体取舍。"+ANSWERABLE_QUESTIONS+
-            "requirements.self_arranged_round_trip=true表示出发地与目的地之间的去程、返程由用户自行安排：不检查、不查询、不追问去程返程班次、到离时刻或车站机场接驳，只规划目的地内的行程及多个目的地之间的交通。",
-            {"requirements":state["requirements"],"issues":issues,"route":state.get("selected_route") or state.get("candidates",[]),
-             "available_stops":state.get("stops",{}),"constraints":state.get("stop_constraints",{}),"history":state.get("decision_history",[])})
 
-    async def resolve_review(self, state, findings):
-        return await self.ask(state,ReviewRepairResolution,
-            "审查后的自动修复仍有阻断，请判断下一步，不能一律推给用户点击修复。"
-            "若可在现有授权内改顺序、缩减可选项、预留午餐或调整时段，返回repair，explanation给出不同于前次失败的具体修复指令。"
-            "只有必须修改用户明确保留的日期/时刻、删除必去或锁定项、放宽预算/交通限制等真实取舍才返回needs_decision及一道question。"
-            "问题必须列出无法同时满足的用户条件与具体可行选项，不得询问是否允许继续自动修复、重审或查询。"
-            "接口失败、事实查不到、模型或系统未修好属于blocked，不能包装成用户偏好问题。"
-            "地点及路线坐标以高德为准，飞猪仅查票；两平台坐标差异不是用户取舍，不因此要求选择场馆或清空高德定位。"
-            "只改变受影响日期，不虚构地点、耗时、价格和授权。已回答的取舍不重复追问。"+ANSWERABLE_QUESTIONS+
-            "requirements.self_arranged_round_trip=true表示出发地与目的地之间的去程、返程由用户自行安排：不检查、不查询、不追问去程返程班次、到离时刻或车站机场接驳，只规划目的地内的行程及多个目的地之间的交通。",
-            {"requirements":state["requirements"],"findings":findings,"itinerary":state["itinerary"],
-             "constraints":state.get("stop_constraints",{}),"locks":state.get("locks",[]),
-             "preserved_dates":state.get("assessment_dates",[]) if state.get("keep_current_plan") else [],
-             "repair_attempts":state.get("repair_round",0),"history":state.get("decision_history",[])},cache=False)

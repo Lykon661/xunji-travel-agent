@@ -5,8 +5,8 @@ import re
 from . import ablation
 from .models import Candidate, Requirements
 from .dining import is_dining, dining_wishes, dining_wish_issues
-from .places import canonicalize_stops, canonical_key, repeat_allowed, duplicate_issues
-from .routing import daily_route_scope, daily_movements, transport_access_transfers
+from .places import canonicalize_stops, canonical_key, repeat_allowed, duplicate_issues, represented_stop_ids
+from .routing import daily_route_scope, daily_movements, transport_access_transfers, scoped_day
 from .constraints import active, walking_target
 
 
@@ -14,32 +14,71 @@ def walking_limit(req, day_date=None):
     if day_date and day_date in req.get("walking_limit_exempt_dates",[]):
         return None
     # A "less walking" condition with an explicit distance tightens the daily cap.
-    caps = [item["meters"] for item in active(req,"fewer_walking",date=day_date) if item["meters"] and item["strength"] == "hard"]
+    from .constraints import dated_walking_limit
+    override = dated_walking_limit(req, day_date)
+    if override is not None:
+        return override
+    caps = [item["meters"] for item in active(req,"fewer_walking",date=day_date) if item.get("meters") is not None and item["strength"] == "hard"]
     return min([req.get("max_walk_per_day",8000),*caps])
+
+
+def ticket_claim_prices(claim):
+    number = r"(\d+(?:\.\d+)?)"
+    span = number+r"(?:\s*[-–—~～至]\s*"+number+r")?"
+    matches = re.findall(span+r"\s*(?:元|[rR]|块)(?![A-Za-z])",str(claim or ""))
+    matches += re.findall(r"[￥¥]\s*"+span,str(claim or ""))
+    return [float(value) for pair in matches for value in pair if value and float(value) > 0]
 
 
 def ticket_policy(item):
     if item.get("category") == "dining":
         return "not_applicable"
     claim = item.get("ticket_claim") or ""
-    prices = [float(value) for value in re.findall(r"(\d+(?:\.\d+)?)\s*元",claim)]
-    prices += [float(value) for value in re.findall(r"[￥¥]\s*(\d+(?:\.\d+)?)",claim)]
+    prices = ticket_claim_prices(claim)
     paid_claim = re.sub(r"不收费|无需付费|不收门票","",claim)
     if not any(value > 0 for value in prices) and not re.search(r"收费|付费",paid_claim) and (claim.strip() == "免费" or re.search(r"免门票|(?:无需|不需要)(?:门票|购票)|不收(?:费|门票)|免费(?:开放|入园|进入)|门票[：:\s]*(?:免费|0\s*元)",claim)):
         return "free"
-    if claim:
+    if prices or re.search(r"收费|付费|需(?:要)?购票|门票[：:\s]*\d+|票价[：:\s]*\d+",paid_claim):
         return "paid"
     return "unspecified"
 
 
 def ticket_query_required(item):
-    policy = ticket_policy(item)
-    if policy in {"free","not_applicable"}:
-        return False
     place = item.get("map_place") or {}
-    venue = " ".join(str(value or "") for value in (item.get("name"),place.get("name"),place.get("type")))
-    return policy == "paid" or bool(re.search(
-        r"博物馆|博物院|动物园|野生动物|海洋馆|水族馆|科技馆|美术馆|纪念馆|展览馆|植物园|主题乐园|游乐园|游乐场|欢乐世界|水上乐园|海洋公园",venue))
+    if str(place.get("typecode") or "").startswith("05") or "餐饮" in str(place.get("type") or ""):
+        return False
+    return not is_dining(item) and ticket_policy(item) not in {"free","not_applicable"}
+
+
+def ticket_price_quote(item, quote):
+    quote = dict(quote or {})
+    if quote.get("status") in {"error","paused","not_configured"} or quote.get("code") in {"flyai_network","flyai_timeout","flyai_rate_limit","rate_limit"}:
+        return {**quote,"ticket_status":"unknown","price":0,"assumed_free":False,"price_unknown":True,
+                "query_error":quote.get("query_error") or quote.get("note") or "","note":"","price_note":""}
+    if not item and quote.get("ticket_status") in {"free","paid_unpriced"} and quote.get("price") == 0:
+        return quote
+    policy = ticket_policy(item)
+    if quote.get("reported_free") or quote.get("free_poi_status") == "FREE":
+        return {**quote,"ticket_status":"free","price":0,"status":"free","reported_free":True,
+                "assumed_free":False,"price_unknown":False,"note":"","price_note":""}
+    if quote.get("price") is not None and quote["price"] > 0 and not (quote.get("assumed_free") or quote.get("price_unknown")):
+        return {**quote,"ticket_status":"paid_priced","note":quote.get("note") or "门票参考价，适用票种与最终结算待核对"}
+    options = [option for option in quote.get("options",[]) if option.get("price") is not None and option["price"] > 0 and
+               not (option.get("assumed_free") or option.get("price_unknown"))]
+    if options:
+        return {**quote,"ticket_status":"paid_priced","price":min(option["price"] for option in options),"status":"reference","price_basis":"starting",
+                "assumed_free":False,"price_unknown":False,"note":"飞猪参考价，按最低票种起价估算，适用票种与最终结算待核对"}
+    prices = ticket_claim_prices(item.get("ticket_claim"))
+    if prices:
+        return {**quote,"ticket_status":"paid_priced","price":min(prices),"status":"reference","price_basis":"guide_reference",
+                "assumed_free":False,"price_unknown":False,"note":"攻略参考价，按攻略最低票价估算，适用票种与最终结算待核对"}
+    if quote.get("reported_paid") or quote.get("free_poi_status") == "NOT_FREE" or policy == "paid":
+        note = "飞猪标注收费，暂无在售票价，预算按0元计算" if quote.get("reported_paid") or quote.get("free_poi_status") == "NOT_FREE" else "收费，未查询到价格，预算按0元计算"
+        return {**quote,"ticket_status":"paid_unpriced","price":0,"assumed_free":True,"price_unknown":True,
+                "note":note,"price_note":note}
+    if policy == "free":
+        return {**quote,"ticket_status":"free","price":0,"assumed_free":False,"price_unknown":False,"note":"","price_note":""}
+    return {**quote,"ticket_status":"unknown","price":0,"assumed_free":False,"price_unknown":True,"note":"","price_note":""}
 
 
 def money(value) -> Decimal:
@@ -93,6 +132,11 @@ def merge_candidate_duplicates(candidate: Candidate, req: Requirements, stops: d
     stops = canonicalize_stops(stops)
     requirements = req.model_dump(mode="json")
     locked = set(locked_ids)
+    suppressed = represented_stop_ids({"stops":stops,"requirements":requirements,"locks":list(locked)})
+    for day in candidate.days:
+        day.stop_ids = [identity for identity in day.stop_ids if identity not in suppressed]
+    if isinstance(candidate.feasibility.get("spatial_unplaced"),list):
+        candidate.feasibility["spatial_unplaced"] = [item for item in candidate.feasibility["spatial_unplaced"] if item.get("id") not in suppressed]
     groups = {}
     for day_index,day in enumerate(candidate.days):
         for position,identity in enumerate(day.stop_ids):
@@ -219,6 +263,7 @@ def constraint_issues(itinerary: dict, req: dict):
             elif kind == "booking_prerequisite":
                 notes.append(activity["name"]+"：按你的要求须先完成预约再前往，请出发前确认预约")
     for day in itinerary.get("days",[]):
+        day = scoped_day(itinerary,day)
         visits = sum(activity.get("kind") == "visit" for activity in day.get("activities",[]))
         for item in active(req,"daily_min_stops",date=day["date"]):
             if (not item["scope"]["cities"] or day.get("city") in item["scope"]["cities"]) and visits < item["count"]:
@@ -290,9 +335,11 @@ def check_itinerary(itinerary: dict, req: dict, stops: dict | None = None) -> di
                     issues.append({"code":"resource_constraint","message":label+"："+issue,"target":entry["id"],"blocking":True})
     estimates = Decimal("0")
     for day in itinerary.get("days",[]):
+        original_day = day
+        day = scoped_day(itinerary,day)
         activities = day.get("activities",[])
         scope = daily_route_scope(itinerary,day)
-        missing_tickets, missing_routes = [],[]
+        missing_routes = []
         previous = None
         for item in activities:
             start = timestamp(item.get("start"),day["date"])
@@ -306,30 +353,25 @@ def check_itinerary(itinerary: dict, req: dict, stops: dict | None = None) -> di
             if previous and start and travel is not None and (start-previous).total_seconds()/60 < travel:
                 issues.append({"code":"move_gap","message":item["name"]+"前预留的移动时间不足","target":item["id"],"blocking":True})
             if scope["first_leg_required"] and not previous and start and day.get("available_start") is not None and travel is not None and start.hour*60+start.minute < day["available_start"]+travel:
-                issues.append({"code":"move_gap","message":item["name"]+"前未留足从住宿出发的移动时间","target":item["id"],"blocking":True})
+                issues.append({"code":"move_gap","message":item["name"]+"前未留足从"+("住宿" if scope["hotel_location_confirmed"] else "到达车站或机场")+"出发的移动时间","target":item["id"],"blocking":True})
             previous = end
             if item.get("kind") == "visit" and not item.get("evidence"):
                 issues.append({"code":"evidence_missing","message":item["name"]+"缺少攻略依据","target":item["id"],"blocking":True})
             if item.get("kind") == "visit":
                 information_unknown.append(item["name"] + "当前开放时间待确认")
-                ticket = item.get("ticket_quote") or {}
-                if ticket.get("price") == 0 and (ticket.get("assumed_free") or ticket.get("reported_free")):
-                    constraint_notes.append(item["name"]+"："+("接口未返回票价，按你的默认免费规则计为0元" if ticket.get("assumed_free") else "飞猪标记基础参观免费"))
-                elif ticket_policy(item) not in {"free","not_applicable"} and ticket.get("price") is not None and ticket.get("price_date") == day["date"]:
+                ticket = ticket_price_quote(item,item.get("ticket_quote"))
+                if ticket["ticket_status"] == "paid_unpriced":
+                    constraint_notes.append(item["name"]+"："+ticket["note"])
+                    lines.append({"label":day["date"]+" "+item["name"]+"门票", "amount":0, "estimated_amount":0,
+                                  "kind":"tickets", "basis":"assumed_zero"})
+                elif ticket["ticket_status"] == "paid_priced":
                     estimate = money(ticket["price"]) * req["people"]
                     estimated_tickets += estimate
-                    lines.append({"label":day["date"]+" "+item["name"]+"门票参考","amount":None,"estimated_amount":float(estimate),"kind":"tickets","basis":"starting"})
-                    unknown.append(item["name"]+"门票展示价的票种、人数与最终结算待核对")
-                elif ticket_policy(item) == "paid" and not ticket.get("options"):
-                    missing_tickets.append(item["name"])
-                elif ticket.get("options"):
-                    unknown.append(item["name"]+"有多个票种，费用按实际选择另计")
-                elif ticket_query_required(item):
-                    unknown.append(item["name"]+"参观或入园收费与票价待确认，未计入预算；"+(ticket.get("note") or "未取得门票报价，不代表免费"))
+                    lines.append({"label":day["date"]+" "+item["name"]+("门票攻略参考" if ticket.get("price_basis") == "guide_reference" else "门票参考"),
+                                  "amount":None,"estimated_amount":float(estimate),"kind":"tickets","basis":ticket.get("price_basis") or "starting"})
+                    constraint_notes.append(item["name"]+"："+(ticket.get("note") or "门票参考价，实际结算待核对"))
             if item.get("move_before",{}).get("minutes") is None and item.get("move_before"):
                 missing_routes.append(item["name"])
-        if missing_tickets:
-            unknown.append(day["date"]+"购票项目费用尚未计入，按实际票种另计："+"、".join(missing_tickets))
         if missing_routes:
             information_unknown.append(day["date"]+"移动时间待确认："+"、".join(missing_routes))
         visits = [item for item in activities if item.get("kind") == "visit"]
@@ -353,8 +395,10 @@ def check_itinerary(itinerary: dict, req: dict, stops: dict | None = None) -> di
         estimates += meal
         day["transport_transfers"] = transport_access_transfers(itinerary,day)
         movements = daily_movements(itinerary,day)
-        if any(move.get("walking_meters") is not None for move in movements):
+        if any(move.get("walking_meters") is not None for move in [*movements,
+                *[item.get("move_before") or {} for item in original_day.get("activities",[])],original_day.get("return_move") or {}]):
             day["walking_meters"] = sum(move.get("walking_meters") or 0 for move in movements)
+        original_day.update(transport_transfers=day["transport_transfers"],walking_meters=day.get("walking_meters",0))
         limit = walking_limit(req,day["date"])
         if limit is not None and day.get("walking_meters",0) > limit:
             issues.append({"code":"walking_limit","message":day["date"]+"预计步行距离超过每日上限","target":day["date"],"blocking":True})
@@ -400,7 +444,7 @@ def check_itinerary(itinerary: dict, req: dict, stops: dict | None = None) -> di
                 if day["city"] == ctx["origin"] and day["date"] == departure.date().isoformat() and end and end > departure-timedelta(minutes=entry.get("buffer_minutes",60)):
                     issues.append({"code":"departure_conflict","message":item["name"]+"与出发准备时间冲突","target":item["id"],"blocking":True})
     days = itinerary.get("days",[])
-    adopted_hotels = [entry for entry in itinerary.get("hotels",[]) if entry.get("selected_by_user")]
+    adopted_hotels = [entry for entry in itinerary.get("hotels",[]) if entry.get("selected_by_user") and (entry.get("selected") or {}).get("name")]
     for entry in adopted_hotels:
         ctx = entry["context"]
         if ctx["check_out"] <= ctx["check_in"]:

@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import type { InterviewResponse, Pending } from './types'
+import CoordinatorDecisionPanel from './CoordinatorDecisionPanel.vue'
+import type { DecisionOption, InterviewResponse, Pending } from './types'
 
-const props = defineProps<{pending: Pending; disabled: boolean}>()
+const props = defineProps<{pending: Pending; disabled: boolean; stopNames?: Record<string, string>}>()
 const emit = defineEmits<{answer: [value: InterviewResponse]}>()
 const answers = reactive<Record<string,string>>({})
 const note = ref('')
+const isDecision = computed(() => ['decision', 'decision_confirmation'].includes(props.pending.kind))
 const question = computed(() => props.pending.questions?.[0] || null)
+const optionStrings = computed(() => (question.value?.options || []).map((opt: string | DecisionOption) => typeof opt === 'string' ? opt : opt.label))
 const complete = computed(() => !!question.value && !!answers[question.value.id]?.trim())
 watch(() => props.pending.round_id, () => {
   Object.keys(answers).forEach(key => delete answers[key])
@@ -20,21 +23,27 @@ function submit(confirm = false) {
 </script>
 
 <template>
-  <div class="interview-panel">
+  <CoordinatorDecisionPanel
+    v-if="isDecision"
+    :pending="pending"
+    :disabled="disabled"
+    :stop-names="stopNames"
+    @answer="emit('answer', $event)"
+  />
+  <div v-else class="interview-panel">
     <div class="interview-round-heading"><strong>{{ question ? '回答当前问题' : '确认旅行需求' }}</strong><span v-if="question" role="status">第 {{ pending.round || 1 }} 次追问 · 一次一题</span></div>
-    <p v-if="pending.kind === 'decision'" class="info-banner">{{ pending.summary }} 回答后继续当前路线规划。</p>
-    <details v-else-if="question" class="interview-summary"><summary>查看目前已明确的需求</summary><p>{{ pending.summary }}</p></details>
+    <details v-if="question" class="interview-summary"><summary>查看目前已明确的需求</summary><p>{{ pending.summary }}</p></details>
     <div v-else class="interview-summary"><h3>你的旅行需求</h3><p>{{ pending.summary }}</p></div>
     <form @submit.prevent="submit(false)">
       <fieldset :disabled="disabled">
         <article v-if="question" :key="pending.round_id" class="interview-question">
           <div class="question-heading"><h3>{{ question.title }}</h3><span class="question-answer-status">{{ complete ? '已填写' : '待回答' }}</span></div>
           <p class="question-prompt">{{ question.question }}</p>
-          <div v-if="question.options.length" class="interview-options">
-            <button v-for="option in question.options" :key="option" type="button" class="secondary" :class="{chosen:answers[question.id] === option}" :aria-pressed="answers[question.id] === option" @click="answers[question.id] = option">{{ option }}</button>
+          <div v-if="optionStrings.length" class="interview-options">
+            <button v-for="option in optionStrings" :key="option" type="button" class="secondary" :class="{chosen:answers[question.id] === option}" :aria-pressed="answers[question.id] === option" @click="answers[question.id] = option">{{ option }}</button>
           </div>
           <label>你的回答<textarea v-model="answers[question.id]" rows="2" maxlength="2000" placeholder="选择上面的选项，或写下自己的想法；也可以明确让我决定" required></textarea></label>
-          <details class="interview-recommendation"><summary>查看推荐与理由</summary><p>{{ question.recommendation }}</p></details>
+          <details v-if="question.recommendation" class="interview-recommendation"><summary>查看推荐与理由</summary><p>{{ question.recommendation }}</p></details>
         </article>
         <label class="wide-label">{{ question ? '其他补充（可选）' : '需要补充或修正的地方' }}<textarea v-model="note" rows="3" maxlength="4000" placeholder="例如：西湖一定要去，但不希望每天都排满"></textarea></label>
         <p v-if="question" class="subtle">回答并提交这一题后，再根据你的选择确定下一问。</p>

@@ -1,9 +1,10 @@
 """交通、酒店、门票等外部资源查询、补全与过期刷新。"""
+import asyncio
 import copy
 from datetime import date, datetime, timedelta, timezone
 
-from ..adapters import ToolError, default_ticket_price
-from ..rules import resource_cost, ticket_policy, ticket_query_required, timestamp, walking_limit
+from ..adapters import ToolError
+from ..rules import resource_cost, ticket_price_quote, ticket_query_required, timestamp, walking_limit
 from ..store import now
 from ..routing import coordinates, distance
 from ..resource_planning import chosen_hotel, comparison, same_resource, transport_issues
@@ -209,24 +210,28 @@ class ResourceNodes:
                             query_ids.append(exc.evidence_id)
                         break
             options = list({option["id"]:option for option in options}.values())
-            if state.get("change",{}).get("refresh_selected"):
+            adopted = old.get(segment["id"],{})
+            preserve_choice = bool(adopted.get("selected") and adopted.get("selected_by_user") is not False)
+            if state.get("change",{}).get("refresh_selected") or preserve_choice:
                 chosen = old.get(segment["id"],{}).get("selected") or {}
                 options = [option for option in options if same_resource(chosen,option)]
                 for option in options:
                     option["constraint_issues"] = transport_issues(option,ctx,req)
                 selected = next((option for option in options if not option.get("constraint_issues")),None)
+                if selected and preserve_choice:
+                    selected = {**copy.deepcopy(adopted["selected"]),**selected}
                 reason = "保留原班次、站点与时刻，仅更新本次报价依据"
                 if selected is None:
                     failures.append("原班次未在本次查询中得到核实，旧报价不会延长有效期，请调整或重新查询")
             else:
                 options = await self.enrich_transport(state,ctx,options)
                 selected, reason = await self.resource_agent.choose(state,options,segment["label"] + "，" + state.get("change",{}).get("explanation",""))
-            if selected is None and segment["id"] in old and old[segment["id"]].get("selected") and old[segment["id"]].get("context") == ctx:
+            if selected is None and segment["id"] in old and old[segment["id"]].get("selected") and (preserve_choice or old[segment["id"]].get("context") == ctx):
                 kept = copy.deepcopy(old[segment["id"]]); kept["errors"] = failures+["本次未获得替代方案，保留原交通；原报价未重新确认"]
                 kept["evidence_ids"] = list(dict.fromkeys([*kept.get("evidence_ids",[]),*query_ids]))
                 result.append(kept)
             else:
-                result.append({**segment,"options":options,"selected":selected,"reason":reason,"evidence_ids":query_ids,
+                result.append({**segment,"options":options,"selected":selected,"selected_by_user":adopted.get("selected_by_user") if preserve_choice else False,"reason":reason,"evidence_ids":query_ids,
                                "buffer_minutes":station_buffer(req,selected["kind"] if selected else "",segment["context"]["date"]),"errors":list(dict.fromkeys(failures)),
                                "comparison":[comparison(option,req) for option in options]})
             warnings.extend(segment["label"]+"："+failure for failure in failures)
@@ -340,9 +345,10 @@ class ResourceNodes:
         return {"itinerary":itinerary,"warnings":list(dict.fromkeys(warnings))}
 
     async def tickets(self,state):
-        self.emit(state,"tickets","正在整理攻略票种，仅为涉及门票的活动查询参考价")
+        self.emit(state,"tickets","正在查询游览景点门票参考价，攻略明确免费的项目除外")
         itinerary = copy.deepcopy(state["itinerary"])
-        await self.query_ticket_prices(state,itinerary,{day["date"] for day in itinerary["days"]},missing_only=True)
+        dates = set(state.get("assessment_dates",[])) if state.get("repair_only") else {day["date"] for day in itinerary["days"]}
+        await self.query_ticket_prices(state,itinerary,dates,missing_only=True)
         return {"itinerary":itinerary}
 
     async def query_ticket_prices(self,state,itinerary,rebuilt_dates,missing_only=False):
@@ -350,19 +356,16 @@ class ResourceNodes:
         eligible = set()
         targeted = state.get("change",{}).get("resource_ids") or []
         for day in itinerary["days"]:
-            if day["date"] not in rebuilt_dates:
-                continue
             for activity in day["activities"]:
                 if activity["kind"] != "visit":
                     continue
-                policy = ticket_policy(activity)
+                activity["ticket_quote"] = ({**(activity.get("ticket_quote") or {}),"ticket_status":"unknown"} if activity.get("product") else
+                                            ticket_price_quote({**stops.get(activity["id"],{}),**activity},activity.get("ticket_quote")))
                 activity["ticket_query_required"] = ticket_query_required(activity)
+                if day["date"] not in rebuilt_dates:
+                    continue
                 if "ticket:"+activity["id"] in targeted or activity["ticket_query_required"] or activity.get("product"):
                     eligible.add((day["date"],activity["id"]))
-                elif policy in {"free","not_applicable"}:
-                    activity.pop("ticket_quote",None)
-                elif (activity.get("ticket_quote") or {}).get("price") is None and not (activity.get("ticket_quote") or {}).get("options"):
-                    activity.pop("ticket_quote",None)
         if not eligible:
             return
         skip_quotes = set()
@@ -371,48 +374,57 @@ class ResourceNodes:
             for day in itinerary["days"]:
                 for activity in day["activities"]:
                     quote = activity.get("ticket_quote") or {}
-                    if quote and not activity.get("product"):
-                        quote = activity["ticket_quote"] = default_ticket_price(quote)
                     queried = timestamp(quote.get("queried_at"),day["date"])
-                    has_quote = quote.get("price") is not None and not quote.get("assumed_free") or bool(quote.get("options"))
-                    retry_missing = state.get("change",{}).get("refresh_resources") and not has_quote
+                    has_quote = quote.get("ticket_status") in {"paid_priced","free"}
+                    failed = quote.get("status") in {"error","paused","not_configured"}
+                    retry_missing = (failed and (not quote.get("query_run_id") or quote["query_run_id"] != state.get("run_id")) or
+                                     state.get("change",{}).get("refresh_resources") and not has_quote)
                     if not retry_missing and "ticket:"+activity["id"] not in targeted and quote.get("visit_date") == day["date"] and quote.get("status") != "pending_confirmation" and queried and 0 <= (current_time-queried).total_seconds() < 600:
                         skip_quotes.add((day["date"],activity["id"]))
         if self.flyai.availability()["ready"]:
-            ticket_cache, ticket_error = {},None
-            for day in itinerary["days"]:
-                if day["date"] not in rebuilt_dates:
-                    continue
-                for activity in day["activities"]:
-                    if (day["date"],activity["id"]) not in eligible:
-                        continue
-                    if (day["date"],activity["id"]) in skip_quotes:
-                        continue
-                    targeted = state.get("change",{}).get("resource_ids") or []
-                    if targeted and "ticket:"+activity["id"] not in targeted:
-                        previous = next((item for old_day in state.get("old_itinerary",{}).get("days",[]) for item in old_day["activities"] if item["id"] == activity["id"]),{})
-                        if previous.get("ticket_quote"):
-                            activity["ticket_quote"] = copy.deepcopy(previous["ticket_quote"])
-                        continue
-                    if activity.get("product"):
-                        activity["ticket_quote"] = {"price":None,"note":"采用的体验商品费用单独待核对，避免与酒店、交通或门票重复计费","booking_url":activity["product"].get("booking_url")}
-                        continue
+            ticket_cache, ticket_error, network_failures = {},None,0
+            slots, locks = asyncio.Semaphore(2),{}
+            network_codes = {"flyai_network","flyai_timeout","flyai_rate_limit","rate_limit"}
+            configuration_codes = {"flyai_config","flyai_auth","flyai_key","flyai_disabled"}
+            async def query(day,activity):
+                nonlocal ticket_error, network_failures
+                if targeted and "ticket:"+activity["id"] not in targeted:
+                    previous = next((item for old_day in state.get("old_itinerary",{}).get("days",[]) for item in old_day["activities"] if item["id"] == activity["id"]),{})
+                    if previous.get("ticket_quote"):
+                        activity["ticket_quote"] = copy.deepcopy(previous["ticket_quote"])
+                    return
+                if activity.get("product"):
+                    activity["ticket_quote"] = {"price":None,"note":"采用的体验商品费用单独待核对，避免与酒店、交通或门票重复计费","booking_url":activity["product"].get("booking_url")}
+                    return
+                place_name = (activity.get("map_place") or stops.get(activity["id"],{}).get("map_place") or {}).get("name") or activity["name"]
+                key = (day["city"],place_name,day["date"])
+                async with locks.setdefault(key,asyncio.Lock()), slots:
+                    if key in ticket_cache:
+                        activity["ticket_quote"] = copy.deepcopy(ticket_cache[key])
+                        return
                     if ticket_error:
                         activity["ticket_quote"] = {"price":None,"status":"paused","note":ticket_error,"queried_at":now()}
                         self.store.query(state["trip_id"],"flyai",{"kind":"poi","city":day["city"],"name":activity["name"]},
                                          {"status":"paused","message":ticket_error,"queried_at":now()})
-                        continue
+                        return
                     self.emit(state,"tickets","正在查询景点门票参考价："+activity["name"])
-                    place_name = (activity.get("map_place") or stops.get(activity["id"],{}).get("map_place") or {}).get("name") or activity["name"]
-                    key = (day["city"],place_name,day["date"])
-                    try:
-                        if key not in ticket_cache:
-                            ticket_cache[key] = await self.resource_agent.ticket({**state,"itinerary":itinerary},day["city"],place_name,day["date"],fresh=bool(state.get("change",{}).get("refresh_resources") or "ticket:"+activity["id"] in targeted))
-                        activity["ticket_quote"] = copy.deepcopy(ticket_cache[key])
-                    except ToolError as exc:
-                        activity["ticket_quote"] = {"price":None,"status":"error","code":exc.code,"note":str(exc),"queried_at":now()}
-                        if exc.code in {"flyai_config","flyai_failed","flyai_timeout","flyai_auth","flyai_network","flyai_rate_limit","flyai_parameters","flyai_runtime"}:
-                            ticket_error = str(exc)+"；本轮剩余门票查询已暂停，可更新配置后重查"
+                    for attempt in range(3):
+                        try:
+                            ticket_cache[key] = await self.resource_agent.ticket({**state,"itinerary":itinerary},day["city"],place_name,day["date"],fresh=bool(attempt or state.get("change",{}).get("refresh_resources") or "ticket:"+activity["id"] in targeted))
+                            activity["ticket_quote"] = copy.deepcopy(ticket_cache[key])
+                            network_failures = 0
+                            break
+                        except ToolError as exc:
+                            if exc.code in network_codes and attempt < 2:
+                                await asyncio.sleep((2,5)[attempt])
+                                continue
+                            activity["ticket_quote"] = {"price":None,"status":"error","code":exc.code,"note":str(exc),"queried_at":now()}
+                            network_failures = network_failures+1 if exc.code in network_codes else 0
+                            if exc.code in configuration_codes or network_failures >= 3:
+                                ticket_error = str(exc)+("；连续3个景点重试后仍有网络错误" if network_failures >= 3 else "；配置或认证错误")+"，本轮剩余门票查询已暂停，可稍后重查"
+                            break
+            await asyncio.gather(*(query(day,activity) for day in itinerary["days"] if day["date"] in rebuilt_dates
+                                  for activity in day["activities"] if (day["date"],activity["id"]) in eligible-skip_quotes))
         else:
             unavailable = self.flyai.availability().get("message") or "飞猪查询组件尚未就绪"
             for day in itinerary["days"]:
@@ -436,5 +448,9 @@ class ResourceNodes:
                 for activity in day["activities"]:
                     if activity.get("ticket_quote"):
                         if not activity.get("product"):
-                            activity["ticket_quote"] = default_ticket_price(activity["ticket_quote"])
+                            activity["ticket_quote"] = ticket_price_quote({**stops.get(activity["id"],{}),**activity},activity["ticket_quote"])
+                        else:
+                            activity["ticket_quote"]["ticket_status"] = "unknown"
                         activity["ticket_quote"]["visit_date"] = day["date"]
+                        if (day["date"],activity["id"]) in eligible-skip_quotes:
+                            activity["ticket_quote"]["query_run_id"] = state.get("run_id")

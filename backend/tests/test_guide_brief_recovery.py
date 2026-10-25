@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, Mock
 
 from app.adapters import ToolError
 from app.agents.guide import GuideAgent
-from app.models import GuideBrief, PlanningDecision
+from app.models import GuideBrief
 
 
 class GuideBriefRecovery(unittest.IsolatedAsyncioTestCase):
@@ -64,20 +64,20 @@ class GuideBriefRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.agent.ask.await_count,2)
 
     async def test_valid_groups_respect_explicit_exclusions(self):
+        self.state["stop_constraints"] = {"excluded":["source:b"]}
         self.agent.ask.return_value = self.brief([{"city":"广州","stop_ids":["source:a","source:b"]}],excluded_ids=["source:b"])
         result = await self.agent.brief(self.state)
         self.assertEqual([identity for group in result.groups for identity in group.stop_ids],["source:a"])
         self.assertEqual(result.excluded_ids,["source:b"])
 
     async def test_pending_user_decision_survives_group_fallback(self):
-        question = PlanningDecision(id="tradeoff",title="活动取舍",question="你更希望哪种安排？",options=["公园为主","减少游览"],
-            recommendation="公园为主",why_needed="需要用户取舍")
-        bad = GuideBrief(status="needs_decision",summary="合成取舍",question=question,
-            groups=[{"city":"广州","stop_ids":["invented"]}])
+        from app.models import UnmetItem
+        problem = UnmetItem(kind="capacity",refs=[{"type":"stop","id":"source:a"}],detail="待解决的时长缺口")
+        bad = GuideBrief(status="ready",summary="合成缺口",unmet=[problem],groups=[{"city":"广州","stop_ids":["invented"]}])
         self.agent.ask.side_effect = [bad.model_copy(deep=True),bad.model_copy(deep=True)]
         result = await self.agent.brief(self.state)
-        self.assertEqual(result.status,"needs_decision")
-        self.assertEqual(result.question,question)
+        self.assertEqual(result.status,"ready")
+        self.assertEqual(result.unmet,[problem])
 
     async def test_semantically_bad_old_cache_is_not_reused_or_written(self):
         bad = self.brief([{"city":"广州","stop_ids":["invented"]}])

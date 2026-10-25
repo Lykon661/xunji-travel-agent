@@ -18,6 +18,22 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   return data as T
 }
 
+export function changeAssumption(
+  tripId: string,
+  assumptionId: string,
+  payload: {
+    alternative_id: string
+    assumption_revision?: number
+    draft_revision?: number
+    base_version: number
+  },
+): Promise<{run_id: string}> {
+  return api<{run_id: string}>(`/trips/${encodeURIComponent(tripId)}/assumptions/${encodeURIComponent(assumptionId)}/change`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
 export function safeLink(value?: string | null): string | undefined {
   if (!value) return undefined
   try {

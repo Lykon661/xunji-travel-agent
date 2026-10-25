@@ -27,7 +27,7 @@ class TicketDefaultsAndMatching(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["queried_at"],"saved-time")
         self.assertEqual(result["evidence_id"],"query:ticket")
 
-    async def test_supplier_free_flag_and_user_default_remain_distinct(self):
+    async def test_supplier_free_flag_and_system_placeholder_remain_distinct(self):
         flyai = self.client([{"id":"museum","name":"广东省博物馆","freePoiStatus":"FREE","ticketInfo":None}])
         result = await flyai.ticket("trip","广州","广东省博物馆",DATE)
         self.assertEqual(result["price"],0)
@@ -131,7 +131,7 @@ class TicketDefaultsAndMatching(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(rows[0]["assumed_free"])
         self.assertEqual(rows[0]["booking_url"],"https://www.fliggy.com/detail")
 
-    def test_budget_uses_the_disclosed_zero_default_without_marking_ticket_cost_missing(self):
+    def test_missing_ticket_price_counts_as_zero_without_an_unknown_budget_cost(self):
         quote = default_ticket_price({"price":None})
         itinerary = {"transport":[],"hotels":[],"days":[{"city":"广州","date":DATE,"activities":[{
             "id":"museum","name":"合成博物馆","kind":"visit","start":"09:00","end":"10:00",
@@ -141,4 +141,5 @@ class TicketDefaultsAndMatching(unittest.IsolatedAsyncioTestCase):
         result = check_itinerary(itinerary,req)
         self.assertEqual(result["budget"]["estimated_tickets"],0)
         self.assertFalse(any("合成博物馆" in text for text in result["budget"]["unknown"]))
-        self.assertTrue(any("默认免费" in text for text in result["constraint_notes"]))
+        self.assertEqual(result["budget"]["status"],"within")
+        self.assertTrue(any("未查询到门票，预算按0元计算" in text for text in result["constraint_notes"]))

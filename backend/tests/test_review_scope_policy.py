@@ -153,11 +153,18 @@ class ScopePolicy(unittest.TestCase):
         self.assertTrue(review_semantic_errors(report("门票票价仍为null，不能通过"),self.payload))
         self.assertFalse(review_semantic_errors(report("门票已售罄，无法预约"),self.payload))
 
-    def test_user_free_default_is_disclosed_and_cannot_be_reported_as_a_missing_price_blocker(self):
+    def test_system_price_placeholder_is_unknown_without_becoming_a_missing_price_blocker(self):
         self.plan["days"][0]["activities"][0]["ticket_quote"] = {"price":0,"assumed_free":True,"status":"price_unavailable"}
         bad = report("门票未返回价格却按免费0元计入，必须取得票价才能通过",path="/days/0/activities/0")
-        self.assertTrue(any("用户已明确" in text for text in review_semantic_errors(bad,self.payload)))
+        self.assertTrue(any("预算按0元计算" in text and "不使预算不完整" in text for text in review_semantic_errors(bad,self.payload)))
         self.assertFalse(review_semantic_errors(report("门票已售罄，无法预约",path="/days/0/activities/0"),self.payload))
+
+    def test_zero_ticket_placeholder_is_not_a_budget_level_missing_cost_blocker(self):
+        self.plan["days"][0]["activities"][0]["ticket_quote"] = {"price":0,"price_unknown":True,"assumed_free":True}
+        self.plan["budget"]["status"] = "within"
+        errors = review_semantic_errors(report("门票缺价按0元漏计，预算不完整",path="/budget"),self.payload)
+        self.assertTrue(any("预算按0元计算" in item for item in errors))
+        self.assertFalse(review_semantic_errors(report("已知加估算费用超过预算",path="/budget"),self.payload))
 
     def test_explicit_user_booking_prerequisite_is_still_enforced(self):
         booking = Constraint(id="c_booking",source="form",kind="booking_prerequisite",scope={"stop_ids":["guide:a"]},quote="预约成功后才安排参观")
@@ -331,6 +338,26 @@ class ReviewCorrection(unittest.IsolatedAsyncioTestCase):
 
 
 class TransportConnectionFacts(unittest.TestCase):
+    def test_station_buffer_cannot_be_deducted_twice_but_extra_evidence_is_preserved(self):
+        itinerary = plan()
+        day = itinerary["days"][0]
+        day.update(return_end="15:47",return_move={"minutes":47})
+        itinerary["transport"] = [{"label":"广州到武汉","buffer_minutes":60,
+            "context":{"origin":"广州","destination":"武汉","date":DATE},
+            "selected":{"departure":DATE+" 17:03:00","departure_place":"广州南站"}}]
+        payload = {"plan":itinerary,"requirements":REQ}
+        value = report("广州南站进站缓冲不足，需要再次预留60分钟")
+        self.assertTrue(any("重复扣除" in error for error in review_semantic_errors(value,payload)))
+        value.findings[0].evidence_ids.append("query:real-boarding-rule")
+        self.assertFalse(review_semantic_errors(value,payload))
+
+    def test_missing_address_never_blocks_even_when_a_train_is_selected(self):
+        itinerary = plan()
+        itinerary["transport"] = [{"label":"已选班次","context":{"date":DATE,"origin":"广州","destination":"深圳"},
+                                    "selected":{"departure_place":"广州南站","departure":DATE+" 18:00:00"}}]
+        value = report("尚未提供出发地址，无法检查首末段")
+        self.assertTrue(any("没有已选住宿" in error for error in review_semantic_errors(value,{"plan":itinerary,"requirements":REQ})))
+
     def test_departure_slack_already_includes_the_station_buffer(self):
         from app.reviewing import review_scope
         itinerary = {"transport":[{"label":"广州 → 武汉","buffer_minutes":60,"context":{"origin":"广州","destination":"武汉","date":"2026-12-13"},

@@ -2,9 +2,10 @@ import logging
 
 from ..adapters import ToolError
 from ..models import GuideBrief, GuideFeedback, GuideExtraction, GuideGroup
-from .runtime import AgentRuntime
+from .runtime import AgentRuntime, agent_payload, digest
 from .route import resolve_stop_id
 from ..dining import is_dining
+from ..assumptions import ASSUMPTION_NOTE
 
 
 class GuideAgent(AgentRuntime):
@@ -15,26 +16,64 @@ class GuideAgent(AgentRuntime):
         return await self.models.ask(GuideExtraction,"你是攻略 Agent，只负责忠实提取所选资料，不安排真实旅行日期。"+instruction,
                                      payload,images=images,image_indices=indices)
 
+    def model_references(self, state, payload):
+        stops = payload.get("available_stops",{})
+        aliases = {}
+        occupied = set(stops) | {stop.get("name") for stop in stops.values() if isinstance(stop,dict)}
+        for identity in sorted(stops):
+            if len(identity) <= 24:
+                continue
+            alias = f"stop_{len(aliases)+1}"
+            while alias in occupied:
+                alias = "_"+alias
+            occupied.add(alias)
+            aliases[alias] = identity
+        return aliases
+
+    @staticmethod
+    def brief_payload(state):
+        fields = ("id","day","city","name","duration_minutes","opening_claim","ticket_claim","category",
+                  "evidence","source_id","source_title","source_kind","assigned_date","alias_names")
+        stops = {identity:{key:stop[key] for key in fields if key in stop} for identity,stop in state["stops"].items()}
+        return agent_payload(state,{"requirements":state["requirements"],"available_stops":stops,
+                   "allowed_cities":state["requirements"]["cities"],
+                   "decisions":state.get("decision_history",[]),"constraints":state.get("stop_constraints",{})})
+
     async def brief(self, state):
         instruction = (
-            "从所选攻略景点池整理建议区域分组，不把原攻略第几天固定为旅行日期。"
+            ASSUMPTION_NOTE+"从所选攻略景点池整理建议区域分组，不把原攻略第几天固定为旅行日期。"
             "required_ids仅包含用户明确必去的地点，excluded_ids仅包含明确不去的地点，不能把推荐当成用户决定。"
             "普通攻略餐饮仅作推荐，不加入景点分组或required_ids；source_kind=user的咖啡甜品饮品属于必去游览，默认45分钟，须参与分组与required_ids；用户正餐餐厅另按必去用餐处理，不因分店未定位让用户反复回答。"
             "同名分店不直接合并，groups只能引用现有景点stop_ids，说明来源冲突与时长缺口。"
             "groups按城市内的建议区域整理资料，不是每天的游览安排，每组可以超过12个景点；实际每日取舍由行程 Agent 负责。"
             "每组stop_ids必须是available_stops完整ID组成的字符串数组，不能用名称、序号、对象或逗号分隔的字符串。"
             "分组city使用allowed_cities中的城市原值；不同城市的景点分别成组，以available_stops的city为准。"
-            "存在会影响路线而无法由授权的普通取舍解决的用户决策时，question返回一道具体问题和影响日期；"
-            "此时status=needs_decision，其他情况status=ready。"
-            "尤其summary说尚未明确的用户选择必须成为question，不能只放在总结中。"
-            "普通可选景点可以由行程 Agent 取舍；可查的价格、天气、开放时间不是让用户代查的问题。"
-            "公交路线是否可用、场馆是否开放等事实由后续工具查证，不询问用户是否允许查询；已有条件式授权按原条件执行，不再重复确认。"
-            "用餐不需要默认规划，仅可选择攻略明确推荐的餐饮地点；没有门票说明不是必需补齐的资料缺口。"
-            "用户最新明确选择优先于默认规则与历史偏好。已豁免步行上限的日期不能因旧上限再次追问或削减。"
-            "没有重要用户决策时question为null，直接进入协作规划，无需用户再确认总结。")
-        payload = {"requirements":state["requirements"],"available_stops":state["stops"],
-                   "allowed_cities":state["requirements"]["cities"],
-                   "decisions":state.get("decision_history",[]),"constraints":state.get("stop_constraints",{})}
+            "遇到未满足条件或身份歧义时写入结构化unmet，引用现有stop/requirement/constraint及日期。"
+            "不向用户提问；资料缺口说明只用于展示，不能据此改写用户要求。")
+        payload = self.brief_payload(state)
+        config_store = getattr(self.models,"config_store",None)
+        key = "guide_brief:v1:"+digest({"payload":payload,"instruction":instruction,
+            "model":config_store.snapshot().public() if config_store else {},
+            "schema":GuideBrief.model_json_schema(),"source_ids":state.get("selected_source_ids",[]),
+            "source_versions":state.get("sources_snapshot",[])})
+        self.assert_current(state)
+        cached = self.store.agent_result(state["trip_id"],key)
+        if cached:
+            try:
+                result = GuideBrief.model_validate(cached["result"])
+                if not set(result.required_ids+result.excluded_ids) <= set(state["stops"]) or set(result.required_ids) & set(result.excluded_ids):
+                    raise ValueError("cached guide constraints changed")
+                result.groups = self.normalize_groups(state,result.groups)
+                self.assert_current(state)
+                logging.getLogger(__name__).info("Reused validated GuideBrief for trip=%s",state["trip_id"])
+                return result
+            except (KeyError,ValueError,ToolError):
+                pass
+        def validated(result):
+            result = GuideBrief.model_validate(result.model_dump(mode="json"))
+            self.assert_current(state)
+            self.store.save_agent_result(state["trip_id"],key,{"result":result.model_dump(mode="json")})
+            return result
         for attempt in range(2):
             # Runtime schema validation alone cannot establish source membership; do not cache unvalidated briefs.
             result = await self.ask(state,GuideBrief,instruction,payload,cache=False)
@@ -48,10 +87,10 @@ class GuideAgent(AgentRuntime):
                 result.required_ids = [identity for identity in result.required_ids if not is_dining(state["stops"][identity])]
                 try:
                     original_groups = [group.model_dump(mode="json") for group in result.groups]
-                    result.groups = self.normalize_groups(state,result.groups,result.excluded_ids)
+                    result.groups = self.normalize_groups(state,result.groups)
                     if original_groups != [group.model_dump(mode="json") for group in result.groups]:
                         result.summary += "；建议分组已按现有攻略地点校正，实际区域顺序仍需地图核实。"
-                    return GuideBrief.model_validate(result.model_dump(mode="json"))
+                    return validated(result)
                 except ToolError as exc:
                     problem = str(exc)
             logging.getLogger(__name__).warning("Guide brief rejected: attempt=%s issues=%s",attempt+1,problem)
@@ -59,9 +98,9 @@ class GuideAgent(AgentRuntime):
                 if invalid_constraints:
                     raise ToolError("guide_constraints","攻略 Agent 纠正后仍返回无来源或矛盾的必去/排除约束，未采用")
                 # Advisory grouping is optional. Preserve decisions and constraints, replace only unsafe suggestions.
-                result.groups = self.basic_groups(state,result.excluded_ids)
+                result.groups = self.basic_groups(state)
                 result.summary = "区域建议未通过来源校验，已按所选攻略地点的所属城市做基础分组；区域顺序、日期与时段由行程 Agent 结合地图核实。"
-                return GuideBrief.model_validate(result.model_dump(mode="json"))
+                return validated(result)
             payload = {**payload,"previous_brief":result.model_dump(mode="json"),"validation_error":problem}
 
     @staticmethod

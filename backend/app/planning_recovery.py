@@ -25,6 +25,8 @@ def route_moves(plan):
 def regression_reason(previous, current):
     if not previous.get("days"):
         return None
+    if not current.get("days"):
+        return "本轮排程未返回逐日草稿，已保留上一版路线"
     before, after = route_moves(previous),route_moves(current)
     failures = {code for move in after.values() if move.get("minutes") is None for code in (move.get("failure_codes") or [])}
     if "amap_quota_limit" in failures:

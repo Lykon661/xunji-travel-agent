@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from app.adapters import Amap, ToolError
-from app.models import REVIEW_DIMENSIONS, Constraint, Requirements, ReviewRepairResolution
+from app.models import REVIEW_DIMENSIONS, Constraint, Requirements
 from app.planner import Planner
 from app.planning_recovery import previous_round, regression_reason
 from app.reviewing import bind_report, review_basis
@@ -199,64 +199,6 @@ class Parsing(unittest.IsolatedAsyncioTestCase):
 
 
 class Recovery(unittest.IsolatedAsyncioTestCase):
-    async def test_review_rollback_fills_old_missing_legs_without_erasing_successful_evidence(self):
-        original = plan()
-        original["days"][0]["activities"][1]["move_before"] = {
-            "origin":"甲","destination":"乙","minutes":None,"estimate_minutes":45,
-            "allowed_modes":["walking","transit"],"note":"旧公交查询未返回可用路线"}
-        backup = previous_round({"requirements":REQ,"candidates":[candidate(original)],"selected_source_ids":[]})
-        current = copy.deepcopy(original)
-        fresh = {"origin":"甲","destination":"乙","minutes":26,"mode":"transit","summary":"地铁1号线",
-                 "queried_at":"2026-10-15T06:46:00Z","evidence_id":"query:99","provider":"amap"}
-        current["days"][0]["activities"][1]["move_before"] = copy.deepcopy(fresh)
-        planner = Planner.__new__(Planner)
-        planner.emit = Mock()
-        planner.store = Mock()
-        planner.store.review_queries.return_value = []
-        planner.selected_sources = Mock(return_value=[])
-        planner.audit_state = lambda state:state
-        planner.check = AsyncMock(side_effect=lambda state:{"itinerary":copy.deepcopy(state["itinerary"])})
-        planner.update_day_places = Mock()
-        planner.movement = AsyncMock(return_value=(fresh,POINTS["乙"]))
-        planner.repair = AsyncMock(side_effect=lambda state:{"itinerary":copy.deepcopy(state["itinerary"]),
-            "repair_round":state.get("repair_round",0)+1})
-        planner.tickets = AsyncMock(return_value={})
-        planner.route_agent = SimpleNamespace(resolve_review=AsyncMock(return_value=ReviewRepairResolution(
-            status="blocked",explanation="合成诊断：剩余冲突无法在现有授权内自动修复")))
-        findings = [{"code":"new_conflict_"+str(index),"target":"甲","severity":"blocker","action":"repair",
-                     "field_path":"/days/0/activities/0","message":"仍需处理的行程冲突","dates":["2026-11-10"],
-                     "evidence_ids":["requirements"]} for index in range(3)]
-        async def audit(state,itinerary):
-            return bind_report({"status":"revise","summary":"仍有行程冲突","findings":findings,
-                "checks":[{"dimension":dimension,"result":"ok","note":"合成检查"} for dimension in sorted(REVIEW_DIMENSIONS)]},
-                state,itinerary,review_basis(state,itinerary,[],[]),["query:99"])
-        planner.audit = AsyncMock(side_effect=audit)
-        state = {"trip_id":"trip","run_id":"run","generation":"gen","requirements":REQ,"stops":{},"locks":[],
-                 "mode":"modify","selected_source_ids":[],"stop_constraints":{},"round_backup":backup,"draft_revision":1}
-        result = await planner.assess_result(state,candidate(current),current)
-        restored = result["candidates"][0]
-        visits = restored["draft"]["days"][0]["activities"]
-        self.assertEqual([(a["id"],a["start"],a["end"]) for a in visits],
-                         [(a["id"],a["start"],a["end"]) for a in original["days"][0]["activities"]])
-        self.assertEqual(visits[1]["move_before"]["evidence_id"],"query:99")
-        self.assertEqual(visits[1]["move_before"]["minutes"],26)
-        self.assertEqual(visits[2]["move_before"],original["days"][0]["activities"][2]["move_before"])
-        self.assertEqual(planner.movement.await_count,1)
-        self.assertEqual(planner.movement.call_args.args[2:4],("甲","乙"))
-        self.assertIn("补回1条",result["rollback"]["message"])
-        self.assertEqual(restored["review"]["status"],"revise")
-        self.assertTrue(restored["confirmation_blockers"])
-        self.assertEqual(planner.audit.await_count,3)
-        planner.repair.assert_awaited_once()
-
-        # A failed map session must not restart requests just because a rollback occurred.
-        planner.movement.reset_mock()
-        planner.amap = SimpleNamespace(batch_state=SimpleNamespace(get=lambda:{
-            "failed":True,"error":ToolError("amap_quota_limit","日额度耗尽")}))
-        result = await planner.assess_result(state,candidate(current),current)
-        planner.movement.assert_not_awaited()
-        self.assertIsNone(result["candidates"][0]["draft"]["days"][0]["activities"][1]["move_before"]["minutes"])
-        self.assertNotIn("补回",result["rollback"]["message"])
 
     def test_backup_is_detached_and_widespread_failures_trigger_rollback(self):
         original = plan()

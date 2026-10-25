@@ -74,29 +74,8 @@ class DiscoveryQueryScope(unittest.IsolatedAsyncioTestCase):
 
 
 class GuideQuestionRecovery(unittest.IsolatedAsyncioTestCase):
-    async def analyze(self, new_question=None, reopened=False):
-        planner = Planner.__new__(Planner)
-        planner.emit = Mock()
-        previous = question()
-        current = previous if new_question is None else new_question
-        planner.guide_agent = SimpleNamespace(brief=AsyncMock(return_value=GuideBrief(
-            status="needs_decision",summary="有一项取舍",question=current)))
-        state = {"requirements":copy.deepcopy(REQ),"stops":{},"stop_constraints":{},
-                 "guide_brief":{"question":previous},"decision_reopened":reopened,
-                 "decision_history":[{"questions":[previous],"answers":{"choice":"保留"},"note":""}]}
-        return await planner.guide_analysis(state)
 
-    async def test_just_answered_same_question_is_not_asked_again(self):
-        result = await self.analyze()
-        self.assertEqual(result["decision"],{})
-        self.assertEqual(result["guide_brief"]["status"],"ready")
-        self.assertIsNone(result["guide_brief"]["question"])
 
-    async def test_reused_id_different_question_different_day_or_explicit_reopen_is_not_skipped(self):
-        for candidate,reopened in ((question("是否改为打车？"),False),(question(day="2026-11-11"),False),(None,True)):
-            with self.subTest(question=candidate,reopened=reopened):
-                result = await self.analyze(candidate,reopened)
-                self.assertTrue(result["decision"])
 
     def test_guide_group_unique_names_normalize_but_ambiguous_names_remain_rejected(self):
         state = {"requirements":REQ,"stops":{"a":{"id":"a","city":"广州","name":"合成公园"}}}
@@ -111,9 +90,12 @@ class FactGapsAreNotUserChoices(unittest.TestCase):
     def test_unknown_opening_is_kept_as_a_fact_gap_without_an_extra_question(self):
         brief = GuideBrief(status="ready",summary="尚未确定是否开放，需后续核实")
         turn = RouteTurn(status="ready",order=OrderChoice(stop_ids=[],explanation="尚未确定是否开放，保留缺口"))
-        self.assertIsNone(brief.question)
-        self.assertIsNone(turn.question)
+        self.assertEqual(brief.unmet,[])
+        self.assertEqual(turn.unmet,[])
 
-    def test_explicit_unresolved_user_choice_still_requires_a_question(self):
-        with self.assertRaises(ValidationError):
-            GuideBrief(status="ready",summary="需要用户选择保留哪个景点")
+    def test_unresolved_user_choice_is_structured_without_a_question(self):
+        from app.models import UnmetItem
+        problem = UnmetItem(kind="capacity",refs=[{"type":"requirement","id":"constraints"}])
+        brief = GuideBrief(status="ready",summary="有待解决的条件",unmet=[problem])
+        self.assertEqual(brief.unmet,[problem])
+        self.assertNotIn("question",GuideBrief.model_json_schema()["properties"])

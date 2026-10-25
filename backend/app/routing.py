@@ -138,24 +138,8 @@ def _calendar_opening_windows(claim,day_date):
 
 
 def reference_opening(stop,day_date=None):
-    """Use evidenced daily hours or one exact date range; keep unresolved calendars for review."""
-    place = stop.get("map_place") or {}
-    claim = next((place[key] for key in ("opentime2","open_time") if isinstance(place.get(key),str) and place[key].strip()),None)
-    def parse(claim):
-        if re.fullmatch(r"\s*(?:全天不开放|闭馆|闭园|休馆|不营业|暂停开放)\s*",claim):
-            return {"windows":[],"closed":True}
-        windows = _daily_opening_windows(claim)
-        return {"windows":windows} if windows else (_dated_opening_windows(claim,day_date) or _calendar_opening_windows(claim,day_date))
-    if claim and coordinates(place) and str(place.get("evidence_id","")).startswith("query:"):
-        applicable = parse(claim)
-        if applicable:
-            return {**applicable,"claim":claim,"evidence_id":place["evidence_id"],
-                    "kind":"amap_reference","note":"地图参考营业时间，不代表已核实出行当日营业或预约"}
-        # An unresolved calendar must not be replaced by less specific guide hours.
-        return None
-    claim = stop.get("opening_claim")
-    applicable = parse(claim) if isinstance(claim,str) and claim.strip() else None
-    return {**applicable,"claim":claim,"kind":"guide_reference"} if applicable else None
+    from .opening import reference
+    return reference(stop,day_date)
 
 
 def coordinates(place):
@@ -179,6 +163,64 @@ def daily_route_scope(itinerary, day):
     return {"hotel_location_confirmed":bool(hotel_confirmed),
             "first_leg_required":bool(hotel_confirmed or any(entry["context"].get("destination") == day.get("city") for entry in segments)),
             "last_leg_required":bool(hotel_confirmed or any(entry["context"].get("origin") == day.get("city") for entry in segments))}
+
+
+def selected_route_resources(itinerary):
+    return {**itinerary,"transport":[entry for entry in itinerary.get("transport",[]) if entry.get("selected")],
+            "hotels":[entry for entry in itinerary.get("hotels",[]) if entry.get("selected_by_user")
+                      and (entry.get("selected") or {}).get("name")]}
+
+
+def scoped_day(itinerary, day):
+    scope = daily_route_scope(itinerary,day)
+    result = {**day,"activities":[dict(item) for item in day.get("activities",[])]}
+    if not scope["first_leg_required"]:
+        result["start_place"] = None
+        first = next((item for item in result["activities"] if item.get("kind") == "visit"),None)
+        if first:
+            first["move_before"] = {}
+    if not scope["last_leg_required"]:
+        result.update(end_place=None,return_move={},return_start=None,return_end=None,tail_arrival=None)
+    if not scope["hotel_location_confirmed"]:
+        result["transfers"] = [item for item in day.get("transfers",[]) if not re.search(r"住宿|酒店",item.get("label",""))]
+        result["gaps"] = [text for text in day.get("gaps",[]) if not re.search(r"住宿|酒店|出发地址|结束地址",text)]
+        result["end_label"] = "结束当天安排"
+        for entry in itinerary.get("transport",[]):
+            selected,ctx = entry.get("selected") or {},entry.get("context") or {}
+            if not selected or ctx.get("date") != day["date"]:
+                continue
+            if ctx.get("destination") == day.get("city"):
+                result["start_place"] = selected.get("arrival_place")
+                first = next((item for item in result["activities"] if item.get("kind") == "visit"),None)
+                move = (first or {}).get("move_before") or {}
+                if first and result["start_place"] and move.get("origin") and move["origin"] != result["start_place"]:
+                    first["move_before"] = {}
+            if ctx.get("origin") == day.get("city"):
+                result["end_place"] = selected.get("departure_place")
+                result["end_label"] = "前往出发车站或机场"
+                move = result.get("return_move") or {}
+                if result["end_place"] and move.get("destination") and move["destination"] != result["end_place"]:
+                    result.update(return_move={},return_start=None,return_end=None,tail_arrival=None)
+    return result
+
+
+def route_issue_applies(itinerary, issue):
+    days = itinerary.get("days",[])
+    target = issue.get("target")
+    affected = [day for day in days if day["date"] in issue.get("dates",[]) or target == day["date"]
+                or day["date"] in issue.get("message","") or any(target and target in {item.get("id"),item.get("name")}
+                    for item in day.get("activities",[]))]
+    match = re.match(r"^/days/(\d+)(?:/|$)",issue.get("field_path",""))
+    if match and int(match[1]) < len(days):
+        affected.append(days[int(match[1])])
+    affected = affected or days
+    text = issue.get("message","")
+    if affected and re.search(r"住宿|酒店|出发地址|出发点|结束地址|起点地址",text):
+        if all(not daily_route_scope(itinerary,day)["hotel_location_confirmed"] for day in affected):
+            return False
+    if affected and issue.get("code") == "tail_conflict":
+        return any(daily_route_scope(itinerary,day)["last_leg_required"] for day in affected)
+    return True
 
 
 def transport_access_transfers(itinerary,day):
@@ -226,6 +268,7 @@ def transport_access_transfers(itinerary,day):
 
 
 def daily_movements(itinerary,day):
+    day = scoped_day(itinerary,day)
     return ([activity.get("move_before") or {} for activity in day.get("activities",[])]+
             [day.get("return_move") or {}]+[item["move"] for item in day.get("transfers",[])]+
             [item["move"] for item in transport_access_transfers(itinerary,day)])

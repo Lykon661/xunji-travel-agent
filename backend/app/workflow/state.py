@@ -4,8 +4,9 @@ from typing import TypedDict
 
 # 前端进度条按阶段展示；key 为图节点名。
 NODE_STAGES = {"coordinate":"coordinating", "requirements_gate":"coordinating", "guides_gate":"parsing",
-               "prepare_guides":"parsing", "guide_analysis":"parsing", "interview":"interviewing", "interview_gate":"interviewing",
-               "planning_failed":"interviewing", "decision_gate":"decision", "discover":"candidates", "assess":"assessing",
+               "prepare_guides":"parsing", "guide_analysis":"parsing",
+               "planning_failed":"reviewing", "coordinator":"coordinating", "apply_assumption_change":"coordinating",
+               "coordinator_gate":"interviewing", "decision_confirmation_gate":"interviewing", "interpret_answer":"coordinating", "blocked_plan":"reviewing", "discover":"candidates", "assess":"assessing",
                "selection_gate":"reviewing", "review_gate":"reviewing", "review_result":"reviewing", "revise_candidate":"revising_candidate",
                "transport":"transport", "hotels":"hotels", "activities":"activities", "tickets":"tickets", "check":"checking",
                "confirm_route":"saving", "save":"saving"}
@@ -43,13 +44,35 @@ class TripState(TypedDict, total=False):
     assessment: bool
     stop_constraints: dict
     guide_brief: dict
-    decision: dict
-    decision_resume: str
-    decision_reopened: bool
+    guide_suggestions: dict
+    stop_constraint_sources: dict
+    user_inputs: list[str]
+    preferences_original: str
+    temporary_locks: list[str]
+    system_durations: dict
+    system_assumptions: list[dict]
+    system_adjustments: list[dict]
+    unmet: list[dict]
+    available_sources: list[dict]
+    hub_candidates: list[dict]
+    system_free_time: dict
+    coordinator_messages: list[dict]
+    coordinator_confirmation: dict
+    coordinator_batch: dict | None
+    coordinator_answer: dict
+    assumption_change: dict | None
+    coordinator_resume: str
+    coordinator_early: bool
+    coordinator_blocked: bool
+    coordinator_previous_plan: dict | None
+    coordinator_deferred_unmet: list[dict]
+    dialogue_version: int
+    agent_unmet: list[dict]
+    review: dict
+    review_previous: dict | None
+    review_change: dict | None
     decision_history: list[dict]
     place_selection: dict
-    # Code-built options of the pending decision: {question_id, options: {label: action}}.
-    decision_options: dict
     draft_revision: int
     route_confirmed: bool
     factual_refresh_completed: bool
@@ -58,7 +81,7 @@ class TripState(TypedDict, total=False):
     revision_request: str
     revision_reply: str
     revision_selected_ids: list[str]
-    review_feedback: list[dict]
     round_backup: dict
     rollback: dict
     repair_only: bool
+    duplicate_review_generation: str

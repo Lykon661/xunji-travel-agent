@@ -3,7 +3,7 @@ import asyncio
 import copy
 
 from ..adapters import ToolError
-from ..models import PlanningDecision, ResourceChoice, PlaceChoices
+from ..models import UnmetItem, ResourceChoice, PlaceChoices
 from ..routing import coordinates
 from ..agents.runtime import digest
 from ..dining import is_dining
@@ -14,20 +14,14 @@ from ..stop_types import with_visit_defaults
 class LocationNodes:
     @staticmethod
     def place_clarification(stops,identities,days=()):
+        items = []
         for identity in sorted(identities):
             stop = stops.get(identity,{})
-            candidates = list({item["id"]:item for item in stop.get("map_candidates",[]) if item.get("id")}.values())
-            if coordinates(stop.get("map_place")) or stop.get("map_selected_id") or len(candidates) < 2:
+            if coordinates(stop.get("map_place")) or stop.get("map_selected_id") or len(stop.get("map_candidates",[])) < 2:
                 continue
-            options = {f"{index+1}. {item['name']}（{item.get('address') or '地址未返回'}）":item["id"] for index,item in enumerate(candidates[:9])}
-            question_id = "place-"+digest([identity,candidates])[:24]
-            dates = [day["date"] for day in days if identity in day.get("stop_ids",[])]
-            question = PlanningDecision(id=question_id,title="请选择具体地点",
-                question="“"+stop["name"]+"”返回了多个高德候选，现有资料还不能唯一对应。你指的是哪一个？",
-                options=[*options,"以上都不是，我补充地点线索"],recommendation="按你要去的场馆、分店或地址选择；也可补充名称、地址等线索。",
-                why_needed=(stop.get("map_issue") or "候选地点存在歧义")[:1500],affected_dates=dates).model_dump(mode="json")
-            return {"decision":question,"place_selection":{"question_id":question_id,"stop_id":identity,"options":options}}
-        return None
+            items.append(UnmetItem(kind="place_identity",refs=[{"type":"stop","id":identity}],
+                dates=[day["date"] for day in days if identity in day.get("stop_ids",[])],detail="现有地点候选不能唯一对应。").model_dump(mode="json"))
+        return {"unmet":items} if items else None
 
     async def locate_stops(self,state,stops):
         limit = asyncio.Semaphore(3)
@@ -45,8 +39,10 @@ class LocationNodes:
             confirmed = next((entry["place_selection"] for entry in reversed(state.get("decision_history",[]))
                 if entry.get("place_selection",{}).get("stop_id") == identity),{})
             if ((confirmed.get("city"),confirmed.get("name")) == (stop["city"],stop["name"])
-                    and confirmed.get("preferences","") == preferences and confirmed.get("poi_id")):
+                    and confirmed.get("poi_id")):
                 confirmed_choices[identity] = confirmed["poi_id"]
+            if stop.get("map_selected_id") and stop.get("map_selected_by") != "system":
+                confirmed_choices[identity] = stop["map_selected_id"]
             place = stop.get("map_place") or {}
             if not (coordinates(place) and str(place.get("evidence_id","")).startswith("query:")):
                 place = saved.get((identity,stop["city"],stop["name"]))
@@ -190,7 +186,13 @@ class LocationNodes:
         for identity,stop in result.items():
             if identity in candidate_sets:
                 stop["map_candidates"] = candidate_sets[identity]
-                stop["map_selected_id"] = selection_results.get(identity,(None,""))[0]
+                stop["map_selected_id"] = confirmed_choices.get(identity) or selection_results.get(identity,(None,""))[0]
+                if identity not in confirmed_choices:
+                    stop["map_selected_by"] = "system"
+            if identity in confirmed_choices:
+                stop["map_selected_id"] = confirmed_choices[identity]
+                if not stops[identity].get("map_selected_id"):
+                    stop["map_selected_by"] = "user"
             if coordinates(stop.get("map_place")):
                 stop.pop("map_issue",None)
                 stop["query_status"] = "resolved"

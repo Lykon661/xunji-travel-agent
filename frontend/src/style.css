@@ -799,6 +799,209 @@ label small { font-weight: 400; color: var(--text-3); }
 .interview-history section { padding: var(--s4) 0; border-bottom: 1px solid var(--border); }
 .interview-history p { white-space: pre-wrap; }
 
+/* 集中取舍面板（CoordinatorDecisionPanel） */
+.coordinator-decision-panel { display: flex; flex-direction: column; gap: var(--s4); }
+.decision-top-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s3);
+  padding-bottom: var(--s3);
+  border-bottom: 1px solid var(--border);
+}
+.decision-top-info { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2) var(--s3); }
+.decision-top-info strong { color: var(--primary-text); font-size: var(--fs-md); }
+.decision-card {
+  padding: var(--s5);
+  margin-bottom: var(--s4);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.decision-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s3);
+  margin-bottom: var(--s2);
+}
+.decision-title-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2); flex: 1; min-width: 0; }
+.decision-title-row h3 { margin: 0; font-size: var(--fs-lg); }
+.decision-scopes { display: flex; flex-wrap: wrap; gap: 6px; }
+.scope-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  background: var(--surface-sunken);
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+}
+.scope-tag.stop { background: var(--info-soft); color: var(--primary-text); }
+.decision-prompt { font-size: var(--fs-md); line-height: 1.75; white-space: pre-wrap; margin-bottom: var(--s2); color: var(--text); }
+.decision-why { margin-bottom: var(--s3); }
+.decision-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--s3);
+  margin: var(--s4) 0 var(--s3);
+}
+.decision-options.legacy-options {
+  display: flex;
+  flex-wrap: wrap;
+}
+.decision-option-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 6px;
+  min-height: 44px;
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  text-align: left;
+  font-weight: 500;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+}
+.legacy-options .decision-option-btn {
+  flex-direction: row;
+  align-items: center;
+  border-radius: var(--r-pill);
+  padding: 8px 16px;
+}
+.decision-option-btn.chosen,
+.decision-option-btn.chosen:hover:enabled {
+  background: var(--primary-soft);
+  border-color: var(--primary);
+  color: var(--text);
+  box-shadow: 0 0 0 1px var(--primary);
+}
+.decision-option-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--s2);
+  width: 100%;
+}
+.decision-option-label { font-weight: 600; color: var(--text); line-height: 1.45; }
+.decision-option-btn.chosen .decision-option-label { color: var(--primary-text); }
+.decision-option-desc { color: var(--text-2); font-size: var(--fs-xs); line-height: 1.5; font-weight: 400; }
+.decision-option-impacts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.impact-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: var(--r-sm);
+  background: var(--surface-sunken);
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.decision-option-btn.chosen .impact-tag { background: var(--surface); color: var(--primary-text); }
+.decision-custom-area { margin-top: var(--s2); display: flex; flex-direction: column; gap: var(--s2); }
+.decision-custom-label { margin-top: var(--s1); }
+
+/* 二阶段理解确认卡片 */
+.interpretation-confirm-card {
+  padding: var(--s5);
+  background: var(--surface-2);
+  border: 1.5px solid var(--primary-border);
+  border-radius: var(--r-md);
+}
+.interpretation-confirm-card h3 { font-size: var(--fs-xl); margin: var(--s3) 0 var(--s2); color: var(--primary-text); }
+.interpretation-summary { font-size: var(--fs-md); line-height: 1.8; white-space: pre-wrap; color: var(--text); }
+.interpretation-changes {
+  padding: var(--s3) var(--s4);
+  margin: var(--s3) 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.interpretation-changes h4 { font-size: var(--fs-sm); color: var(--text-2); margin-bottom: 6px; }
+.interpretation-changes ul { margin: 0; padding-left: 18px; font-size: var(--fs-sm); }
+.interpretation-relaxed {
+  padding: var(--s3) var(--s4);
+  margin: var(--s3) 0;
+  background: var(--warn-soft);
+  border: 1.5px solid var(--warn-border);
+  border-radius: var(--r-sm);
+  color: var(--warn);
+}
+.interpretation-relaxed h4 { font-size: var(--fs-sm); color: var(--warn); margin-bottom: 6px; }
+.interpretation-relaxed ul { margin: 0; padding-left: 18px; font-size: var(--fs-sm); }
+.interpretation-original { margin: var(--s3) 0; font-size: var(--fs-xs); color: var(--text-3); }
+.interpretation-original p { margin: 4px 0; white-space: pre-wrap; }
+.decision-actions { display: flex; flex-wrap: wrap; gap: var(--s3); margin-top: var(--s4); }
+
+/* 系统替你做的决定（AssumptionsPanel） */
+.assumptions-panel {
+  padding: var(--s4) var(--s5);
+  margin: var(--s4) 0;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.assumptions-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--s3);
+  margin-bottom: var(--s3);
+}
+.assumptions-head h4 { margin: 0 0 2px; font-size: var(--fs-md); color: var(--text); }
+.assumptions-head p { margin: 0; }
+.assumptions-list { display: flex; flex-direction: column; gap: var(--s3); }
+.assumption-card {
+  padding: var(--s3) var(--s4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.assumption-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-bottom: 4px;
+}
+.assumption-title-row strong { font-size: var(--fs-sm); color: var(--text); }
+.assumption-action { font-size: var(--fs-sm); color: var(--text-2); margin: 0 0 4px; }
+.assumption-reason { margin: 0 0 var(--s2); font-size: var(--fs-xs); }
+.assumption-alternatives { display: flex; flex-wrap: wrap; gap: var(--s2); margin-top: var(--s2); }
+.assumption-alt-btn { font-weight: 500; }
+.assumption-alt-desc { color: var(--text-3); font-weight: 400; margin-left: 2px; }
+.assumptions-mobile-toggle { display: none; margin-top: var(--s3); }
+
+/* 主理人消息（Coordinator Messages） */
+.coordinator-messages {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  margin: var(--s3) 0;
+}
+.coordinator-message-item {
+  padding: 10px 14px;
+  background: var(--primary-soft);
+  border: 1px solid var(--primary-border);
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+}
+.coordinator-message-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-bottom: 4px;
+}
+.coordinator-message-meta strong { font-size: var(--fs-xs); color: var(--primary-text); }
+.coordinator-reopen-btn { margin-left: auto; font-size: var(--fs-xs); font-weight: 600; }
+.coordinator-message-item p { margin: 0; white-space: pre-wrap; color: var(--text); font-size: var(--fs-sm); }
+
 /* ==========================================================================
    候选路线
    ========================================================================== */
@@ -1203,6 +1406,10 @@ label small { font-weight: 400; color: var(--text-3); }
   .trip-map-panel { padding: 14px; }
   .amap-preview { height: 300px; }
   .map-mobile-export { grid-template-columns: 1fr; }
+  .decision-options, .decision-options.legacy-options { display: grid; grid-template-columns: 1fr; }
+  .decision-option-btn, .legacy-options .decision-option-btn { min-height: 44px; width: 100%; border-radius: var(--r-md); }
+  .assumption-card.mobile-collapsed { display: none; }
+  .assumptions-mobile-toggle { display: inline-flex; }
 }
 @media (max-width: 480px) {
   .guide-search-fields { grid-template-columns: 1fr; }

@@ -59,12 +59,4 @@ class DiningRecommendations(unittest.TestCase):
 
 
 class QuestionPlacement(unittest.IsolatedAsyncioTestCase):
-    async def test_route_conflict_interrupt_belongs_to_interview(self):
-        planner = Planner.__new__(Planner)
-        state = {"decision":{"id":"choice","question":"保留哪个景点？","why_needed":"当天时间不足"},
-                 "generation":"synthetic","decision_resume":"assess","draft_revision":2}
-        with patch("app.planner.interrupt",side_effect=RuntimeError("interrupt")) as gate:
-            with self.assertRaisesRegex(RuntimeError,"interrupt"):
-                await planner.decision_gate(state)
-        self.assertEqual(gate.call_args.args[0]["origin_step"],"interview")
-        self.assertEqual(gate.call_args.args[0]["draft_revision"],2)
+    pass

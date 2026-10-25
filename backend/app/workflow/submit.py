@@ -10,10 +10,58 @@ from ..store import Conflict, now, dump
 from ..decisions import input_hash
 from ..reviewing import review_repair_dates
 from ..planning_recovery import previous_round
+from ..authority import user_texts
 from .state import NODE_STAGES
+from ..nodes.coordinating import persisted
 
 
 class SubmitWorkflow:
+    async def change_assumption(self,trip_id,assumption_id,alternative_id,assumption_revision,draft_revision,base_version):
+        from .. import actions, assumptions
+        async with self.gate(trip_id):
+            trip = self.active(trip_id)
+            doc = trip["document"]
+            item = next((item for item in doc.get("system_assumptions",[]) if item["id"] == assumption_id),None)
+            if (trip["version"] != base_version or doc.get("draft_revision",0) != draft_revision or not item
+                    or item.get("status","active") != "active" or item["revision"] != assumption_revision):
+                raise Conflict("系统假设或行程版本已变化，请刷新后重新选择。")
+            if (doc.get("pending") or {}).get("kind") not in {None,"selection"}:
+                raise Conflict("请先完成当前主理人批次，再修改系统假设。")
+            candidate = copy.deepcopy(doc.get("selected_route") or (doc.get("candidates") or [{}])[0])
+            plan = copy.deepcopy(candidate.get("draft") or doc.get("itinerary") or {})
+            if not plan.get("days") or not candidate.get("days"):
+                raise Conflict("当前没有可修改的路线草稿，请先生成路线。")
+            thread = f"{trip_id}:{uuid4().hex}"
+            state = {**persisted(doc),"trip_id":trip_id,"generation":thread,"base_version":base_version,
+                "requirements":copy.deepcopy(doc["requirements"]),"old_requirements":copy.deepcopy(doc["requirements"]),
+                "selected_source_ids":doc.get("selected_source_ids",[]),"mode":"modify","change":{},
+                "stops":{**self.source_stops(trip_id,doc.get("selected_source_ids",[])),**doc.get("stops",{})},
+                "candidates":[candidate],"selected_route":{},"itinerary":plan,"old_itinerary":copy.deepcopy(plan),
+                "review":copy.deepcopy(candidate.get("review") or doc.get("review")),"review_previous":None,"review_change":None,
+                "decision_history":copy.deepcopy(doc.get("decision_history",[])),"stop_constraints":doc.get("stop_constraints",{}),
+                "locks":doc.get("locks",[]),"warnings":doc.get("warnings",[]),"coordinator_batch":None,"coordinator_confirmation":None,
+                "coordinator_resume":"review_gate","assumption_change":{"assumption_id":assumption_id,"alternative_id":alternative_id},
+                "user_inputs":user_texts(doc),"preferences_original":doc.get("preferences_original",doc["requirements"].get("preferences",""))}
+            try:
+                proposed,_ = assumptions.replace(state,assumption_id,alternative_id)
+                actions.execute(state,proposed,"user")
+            except ValueError as error:
+                raise Conflict("该系统假设的替代方案已不可用："+str(error)) from error
+            run_id = self.store.start_run(trip_id,base_version,thread,{"request":"修改系统假设",**state["assumption_change"]})
+            state["run_id"] = run_id
+            try:
+                await self.graph.aupdate_state({"configurable":{"thread_id":thread}},state,as_node="coordinate")
+                doc.update(stage="queued",pending=None,workflow_step="routes")
+                self.store.update(trip_id,doc)
+                self.store.event(run_id,"progress","正在切换系统假设并复查相关日期",stage="queued")
+            except Exception:
+                self.store.finish_run(run_id,"failed",{"message":"假设修改提交未完成，原方案已保留"})
+                raise
+            task = asyncio.create_task(self.execute(run_id,None),name=run_id)
+            self.tasks[run_id] = task
+            task.add_done_callback(lambda _:self.tasks.pop(run_id,None))
+            return run_id
+
     def active(self, trip_id: str):
         trip = self.store.trip(trip_id)
         if trip["active_run"] and self.store.run(trip["active_run"])["status"] == "running":
@@ -59,6 +107,11 @@ class SubmitWorkflow:
             if updated_at is not None and trip["updated_at"] != updated_at:
                 raise Conflict("旅行内容已更新，请刷新后重新提交")
             doc = trip["document"]
+            doc.setdefault("preferences_original",doc.get("requirements",{}).get("preferences",""))
+            if doc.get("stage") == "draft" and doc.get("workflow_step") == "guides" and not trip.get("active_thread"):
+                doc["preferences_original"] = doc.get("requirements",{}).get("preferences","")
+            if requirements is not None and "preferences" in requirements:
+                doc["preferences_original"] = requirements["preferences"]
             doc["requirements"] = Requirements.model_validate(doc["requirements"]).model_dump(mode="json")
             backup = previous_round(doc)
             if hotel_area_choice:
@@ -88,6 +141,11 @@ class SubmitWorkflow:
             config = {"configurable":{"thread_id":trip["active_thread"]},"recursion_limit":60}
             snapshot = await self.graph.aget_state(config) if trip["active_thread"] else None
             pending = doc.get("pending") or {}
+            legacy_question = bool(snapshot and (set(snapshot.next) & {"decision_gate","interview_gate","interview"}
+                or pending.get("kind") in {"decision","decision_confirmation"} and not pending.get("batch_id")))
+            if interview_response is not None and legacy_question:
+                raise Conflict("旧问题已切换到主理人批次，旧轮次不能提交；请继续任务，从已保存草稿重新诊断。")
+            migrating = False
             if resource_choice or supplement_choice:
                 choice_input = resource_choice or supplement_choice
                 if choice_input["updated_at"] != trip["updated_at"] or pending or doc.get("itinerary_outdated") or not doc.get("itinerary") or not doc.get("selected_route"):
@@ -132,7 +190,24 @@ class SubmitWorkflow:
                     raise Conflict("要更新的资源已变化或已锁定，请先刷新或解锁")
             elif resource_ids:
                 raise Conflict("指定资源只能用于更新报价")
-            if resume:
+            if legacy_question and (resume or retry) and not selection_changed and req == doc["requirements"]:
+                candidate = copy.deepcopy((doc.get("candidates") or [doc.get("selected_route") or {}])[0])
+                plan = copy.deepcopy(candidate.get("draft") or doc.get("itinerary") or {})
+                if not plan.get("days"):
+                    raise Conflict("旧问题没有可恢复的草稿，请重新生成路线。")
+                if not candidate.get("days"):
+                    candidate.update(id=uuid4().hex,title="恢复的草稿",reason="切换主理人重新诊断",days=[
+                        {"date":day["date"],"city":day["city"],"stop_ids":[item["id"] for item in day.get("activities",[]) if item.get("kind") == "visit"]}
+                        for day in plan["days"]])
+                thread = f"{trip_id}:{uuid4().hex}"
+                invocation = {**persisted(doc),"trip_id":trip_id,"generation":thread,"base_version":base,"requirements":req,
+                    "selected_source_ids":source_ids,"stops":{**self.source_stops(trip_id,source_ids,req),**doc.get("stops",{})},
+                    "candidates":[candidate],"selected_route":candidate,"itinerary":plan,"old_itinerary":copy.deepcopy(plan),
+                    "old_requirements":copy.deepcopy(req),"decision_history":doc.get("decision_history",[]),"locks":doc.get("locks",[]),
+                    "stop_constraints":doc.get("stop_constraints",{}),"warnings":doc.get("warnings",[]),"mode":"modify","change":{},
+                    "coordinator_batch":None,"coordinator_confirmation":None,"coordinator_resume":"review_gate"}
+                migrating = True
+            elif resume:
                 if doc["stage"] not in {"failed", "recoverable"} or not snapshot or not snapshot.next:
                     raise Conflict("本次任务的恢复记录不可用，请重新生成候选路线")
                 if message or selection_changed or req != Requirements.model_validate(snapshot.values.get("requirements",{})).model_dump(mode="json") or source_ids != snapshot.values.get("selected_source_ids", []):
@@ -160,25 +235,21 @@ class SubmitWorkflow:
                 thread, invocation = trip["active_thread"], Command(resume={"route_edit":route_edit})
                 message = route_edit["content"]
             elif interview_response is not None:
-                if pending.get("kind") not in {"interview","interview_confirmation","decision"} or not snapshot or not snapshot.next:
+                if pending.get("kind") not in {"interview","interview_confirmation","decision","decision_confirmation"} or not snapshot or not snapshot.next:
                     raise Conflict("当前没有等待回答的追问，请刷新后重试")
                 if selection_changed or req != Requirements.model_validate(doc["requirements"]).model_dump(mode="json") or interview_response["round_id"] != pending.get("round_id"):
                     raise Conflict("攻略、需求或追问轮次已变化，请重新开始或刷新")
-                # Older checkpoints can contain a batch; only the first unanswered question is active.
-                questions = pending.get("questions",[])[:1]
-                answers = interview_response.get("answers",{})
-                if pending.get("kind") == "decision" and interview_response.get("draft_revision") != pending.get("draft_revision"):
-                    raise Conflict("路线草稿已变化，请刷新后回答当前问题")
-                if questions and (interview_response.get("confirm") or set(answers) != {q["id"] for q in questions} or any(not value.strip() for value in answers.values())):
-                    raise Conflict("请只回答当前这一题；推荐选项需要你主动选择")
-                if not questions and interview_response.get("confirm") and interview_response.get("note","").strip():
-                    raise Conflict("请先提交补充内容，更新需求总结后再确认")
-                if not questions and answers:
-                    raise Conflict("当前等待确认需求总结，请通过补充内容提交修正")
-                if not questions and not interview_response.get("confirm") and not interview_response.get("note","").strip():
-                    raise Conflict("请确认需求，或填写需要补充修改的内容")
+                if pending.get("kind") in {"decision","decision_confirmation"}:
+                    if not pending.get("batch_id") or interview_response["round_id"] != pending["batch_id"]:
+                        raise Conflict("问题批次已变化，请刷新后回答当前主理人批次。")
+                    if not interview_response.get("confirm") and interview_response.get("draft_revision") != pending.get("draft_revision"):
+                        raise Conflict("路线草稿已变化，请刷新后回答当前批次。")
+                    if interview_response.get("confirm") and pending["kind"] != "decision_confirmation":
+                        raise Conflict("当前批次没有待确认的理解。")
+                else:
+                    raise Conflict("旧访谈问题已停用，请继续任务，从保存草稿重新诊断。")
                 thread, invocation = trip["active_thread"], Command(resume=interview_response)
-                message = "\n".join([f"{q['title']}：{answers.get(q['id'],'')}" for q in questions] + [interview_response.get("note","")]).strip() or "确认旅行需求，生成候选路线"
+                message = "\n".join([*interview_response.get("answers",{}).values(),interview_response.get("note","")]).strip()
             elif candidate_id is not None:
                 if pending.get("kind") != "selection":
                     raise Conflict("当前没有等待选择的路线")
@@ -199,8 +270,8 @@ class SubmitWorkflow:
                 except ValueError as exc:
                     raise Conflict("候选路线与当前日期或所选攻略不一致，请重新生成：" + str(exc)) from exc
                 thread, invocation = trip["active_thread"], Command(resume={"candidate_id":candidate_id,"draft_revision":candidate_revision,"plan_hash":candidate_hash})
-            elif pending and snapshot and snapshot.next and not selection_changed and not (retry and pending.get("kind") in {"selection","interview","interview_confirmation","decision"}) and not (pending.get("kind") in {"interview","interview_confirmation","decision"} and req != doc["requirements"]):
-                if pending.get("kind") in {"interview","interview_confirmation","decision"}:
+            elif pending and snapshot and snapshot.next and not selection_changed and req == doc["requirements"] and not (retry and pending.get("kind") in {"selection","interview","interview_confirmation","decision","decision_confirmation"}):
+                if pending.get("kind") in {"interview","interview_confirmation","decision","decision_confirmation"}:
                     raise Conflict("请在需求追问界面回答或确认；修改攻略后可重新开始")
                 if pending.get("kind") == "selection" and not retry:
                     raise Conflict("请先选择候选路线；若要更改条件，请重新生成候选路线")
@@ -214,17 +285,25 @@ class SubmitWorkflow:
                 thread, invocation = trip["active_thread"], None
             else:
                 thread = f"{trip_id}:{uuid4().hex}"
-                old = copy.deepcopy(doc.get("itinerary") or (snapshot.values.get("old_itinerary") if snapshot else {}) or {})
+                original_route = copy.deepcopy(doc.get("selected_route") or (doc.get("candidates") or [{}])[0])
+                old = copy.deepcopy(doc.get("itinerary") or original_route.get("draft") or (snapshot.values.get("old_itinerary") if snapshot else {}) or {})
+                source_stops = self.source_stops(trip_id,source_ids,req)
                 invocation = {"trip_id":trip_id,"generation":thread,"base_version":base,"requirements":req,"message":message,
                     "mode":"modify" if old and not retry else "new", "warnings":[], "candidates":[],
-                    "selected_route":doc.get("selected_route") or {}, "selected_source_ids":source_ids,"old_itinerary":old,"itinerary":copy.deepcopy(old),
-                    "stops":self.source_stops(trip_id, source_ids, req),"change":{},"source_selection_changed":selection_changed,"repair_round":0,"locks":doc.get("locks",[]),
+                    "selected_route":original_route, "selected_source_ids":source_ids,"old_itinerary":old,"itinerary":copy.deepcopy(old),
+                    "stops":{**source_stops,**{key:value for key,value in doc.get("stops",{}).items() if key in source_stops}},
+                    "change":{},"source_selection_changed":selection_changed,
+                    "repair_round":doc.get("repair_round",0) if old and not retry and not selection_changed else 0,"locks":doc.get("locks",[]),
                     "interview":{},"route_edit":{},
                     "stop_constraints":{"required":req.get("required_stop_ids",[]),"excluded":req.get("excluded_stop_ids",[])},
                     "decision_history":doc.get("decision_history",[]) if not selection_changed else [],
                     "draft_revision":doc.get("draft_revision",0),"decision":{},"route_confirmed":False,
                     "previews":{},"preview_ready":False,
                     "old_requirements":copy.deepcopy(doc["requirements"])}
+                if old and not retry and not selection_changed:
+                    invocation.update(candidates=[copy.deepcopy(original_route)] if original_route.get("days") else [],
+                        review_previous=self.review_snapshot({**doc,"trip_id":trip_id},old,doc.get("review") or original_route.get("review")),
+                        review_change=None)
                 if refresh_resources:
                     invocation["change"] = {"scopes":["transport","hotel","activity"],"refresh_resources":True,"explanation":"按当前配置重新查询报价和地图路线，保留活动选择"}
                     if resource_ids:
@@ -248,18 +327,19 @@ class SubmitWorkflow:
                     cities = [entry["city"]] if group == "hotel" else [entry["context"]["origin"],entry["context"]["destination"]]
                     changed_entry = next(item for item in invocation["itinerary"]["hotels" if group == "hotel" else "transport"] if item["id"] == entry["id"])
                     changed_entry["selected"] = copy.deepcopy(option)
-                    if group == "hotel":
-                        changed_entry["selected_by_user"] = True
+                    changed_entry["selected_by_user"] = True
                     changed_entry["reason"] = "你选择的备选；本次查询报价，实际库存需在预订页确认"
                     if group == "transport":
                         changed_entry["buffer_minutes"] = 120 if option["kind"] == "flight" else 60
                     invocation["change"] = {"scopes":[group],"cities":cities,"resource_choice":resource_choice,"user_selected_ids":[entry["id"]],"explanation":"采用你选择的备选，并重算相关日期"}
+                    invocation["change"]["dates"] = [day["date"] for day in old["days"] if day["city"] == entry["city"]] if group == "hotel" else sorted({
+                        value for value in [entry["context"]["date"],str(option.get("arrival") or "")[:10]] if value in {day["date"] for day in old["days"]}})
                 if supplement_choice:
                     product = self.validate_supplement(doc,supplement_choice)
                     stop_id = "product:"+product["id"]
                     place = product["map_place"]
                     stop = {"id":stop_id,"city":supplement_choice["city"],"name":place["name"],"day":1,
-                        "assigned_date":supplement_choice["date"],"duration_minutes":supplement_choice["duration_minutes"],
+                        "assigned_date":supplement_choice["date"],"duration_minutes":supplement_choice["duration_minutes"],"selected_by_user":True,
                         "source_id":stop_id,"source_kind":"flyai","source_title":product["name"],"source_url":product.get("booking_url"),
                         "evidence":{"kind":"text","quote":"飞猪查询商品："+product["name"]},"map_place":place,"product":product}
                     invocation["stops"][stop_id] = stop
@@ -273,7 +353,7 @@ class SubmitWorkflow:
                         "resource_choice":{"supplement":True},"add_stop_ids":[stop_id],"user_selected_ids":[stop_id],"explanation":"采用你确认的体验，并重算当天安排；套餐价格单独列为待核对"}
             if message:
                 doc["messages"].append({"role":"user","content":message,"time":now()})
-            if invocation is not None and candidate_id is None and route_edit is None and interview_response is None and not hotel_area_choice and (retry or selection_changed or req != doc["requirements"]):
+            if invocation is not None and candidate_id is None and route_edit is None and interview_response is None and not hotel_area_choice and (retry or selection_changed or req != doc["requirements"]) and not (isinstance(invocation,dict) and invocation.get("review_previous")):
                 doc["candidates"] = []
                 doc["selected_route"] = {}
                 doc["interview"] = {}
@@ -300,24 +380,22 @@ class SubmitWorkflow:
             try:
                 if isinstance(invocation,dict):
                     invocation["run_id"] = run_id
+                    for key,value in persisted(doc).items():
+                        invocation.setdefault(key,value)
+                    invocation["dialogue_version"] = 2
+                    invocation["system_assumptions"] = copy.deepcopy(doc.get("system_assumptions",[]))
+                    invocation.update(user_inputs=user_texts(doc),preferences_original=doc["preferences_original"])
                     invocation.update(round_backup=copy.deepcopy(backup or {}),rollback={})
+                    if migrating:
+                        await self.graph.aupdate_state({"configurable":{"thread_id":thread}},invocation,as_node="check")
+                        invocation = None
                 elif snapshot:
                     # IDs are runtime metadata, updated outside nodes before resuming their durable checkpoint.
                     metadata = {"run_id":run_id,"base_version":base,"requirements":req,"selected_source_ids":source_ids,"locks":doc.get("locks",[]),
+                                "system_assumptions":copy.deepcopy(doc.get("system_assumptions",[])),
+                                "user_inputs":user_texts(doc),"preferences_original":doc["preferences_original"],
                                 "round_backup":copy.deepcopy(backup or {}),"rollback":{}}
-                    if resume and "planning_failed" in snapshot.next:
-                        candidate = (snapshot.values.get("candidates") or [{}])[0]
-                        dates = review_repair_dates([finding for finding in (candidate.get("review") or {}).get("findings",[])
-                            if finding.get("severity") == "blocker"],candidate.get("draft",{}))
-                        previews = copy.deepcopy(snapshot.values.get("previews",{}))
-                        if candidate.get("draft",{}).get("days"):
-                            previews[candidate["id"]] = {"itinerary":copy.deepcopy(candidate["draft"])}
-                        metadata.update(repair_round=0,keep_current_plan=False,assessment_refresh=False,decision={},repair_only=True,
-                            previews=previews,review_feedback=[],revision_selected_ids=[],
-                            assessment_base=candidate.get("id",""),assessment_dates=dates)
-                        await self.graph.aupdate_state(config,metadata,as_node="revise_candidate")
-                    else:
-                        await self.graph.aupdate_state(config,metadata)
+                    await self.graph.aupdate_state(config,metadata)
                 doc["stage"] = "queued"; doc["pending"] = None
                 self.store.update(trip_id,doc)
                 self.store.event(run_id,"progress","任务已提交",stage="queued")
@@ -352,16 +430,13 @@ class SubmitWorkflow:
                         raise Conflict("候选路线已不符合当前需求，请重新生成") from exc
                 candidates = candidates[:1]
                 resume_node = "assess" if candidates else None
-            elif step == "interview" and interview.get("summary") and source_ids and stops and not Requirements.model_validate(req).missing():
-                interview.setdefault("history",[])
-                interview.update(questions=copy.deepcopy(pending.get("questions",[])[:1]) if pending.get("kind") == "interview" else [],
-                                 round=len(interview["history"])+1,round_id=uuid4().hex,confirmed=False)
-                candidates = []
-                resume_node = "guide_analysis" if pending.get("kind") == "decision" and pending.get("questions") else "interview"
+            elif step == "interview" and source_ids and stops and not Requirements.model_validate(req).missing():
+                resume_node = "prepare_guides"
             threads = self.store.trip_threads(trip_id)
             snapshot = await self.graph.aget_state({"configurable":{"thread_id":trip["active_thread"]}}) if trip["active_thread"] and resume_node else None
             thread = f"{trip_id}:{uuid4().hex}"
             state = {"trip_id":trip_id,"generation":thread,"base_version":base,"requirements":req,"message":"",
+                     "system_assumptions":copy.deepcopy(doc.get("system_assumptions",[])),
                      "mode":"new","change":{},"selected_source_ids":source_ids,"stops":stops,"locks":[],
                      "interview":interview,"candidates":candidates,"selected_route":{},"old_itinerary":{},
                      "itinerary":{},"old_requirements":copy.deepcopy(req),"warnings":[],
@@ -370,9 +445,6 @@ class SubmitWorkflow:
                      "draft_revision":candidates[0].get("draft_revision",0) if candidates else 0,
                      "stop_constraints":doc.get("stop_constraints",{}),"decision_history":doc.get("decision_history",[]),
                      "guide_brief":copy.deepcopy(snapshot.values.get("guide_brief",{})) if snapshot else {}}
-            if resume_node == "guide_analysis":
-                state.update(decision=copy.deepcopy(pending["questions"][0]),
-                             decision_resume="guide_analysis" if pending.get("resume_stage") == "guide_analysis" else "discover")
             if resume_node:
                 await self.graph.aupdate_state({"configurable":{"thread_id":thread}},state,as_node=resume_node)
             try:
@@ -414,31 +486,29 @@ class SubmitWorkflow:
                 raise Conflict("旅行已变化，请刷新后再修改回答")
             doc = trip["document"]
             history = doc.get("decision_history",[])
-            if index >= len(history) or not history[index].get("questions"):
-                raise Conflict("该回答记录不可用")
-            candidate = copy.deepcopy((doc.get("candidates") or [doc.get("selected_route")])[0])
-            if not candidate or not candidate.get("draft"):
+            if index < 0 or index >= len(history) or not history[index].get("batch"):
+                raise Conflict("该记录不是可重开的主理人批次，请从当前草稿重新诊断。")
+            candidate = copy.deepcopy((doc.get("candidates") or [doc.get("selected_route") or {}])[0])
+            if not candidate.get("draft"):
                 raise Conflict("请先完成路线草稿，再修改已有回答")
-            question = copy.deepcopy(history[index]["questions"][0])
-            question.setdefault("why_needed",history[index].get("summary") or "修改这项选择会影响路线安排")
-            question["affected_dates"] = question.get("affected_dates") or [day["date"] for day in candidate["days"]]
+            batch = copy.deepcopy(history[index]["batch"])
+            batch.update(batch_id=uuid4().hex,draft_revision=doc.get("draft_revision",0))
             thread = f"{trip_id}:{uuid4().hex}"
-            state = {"trip_id":trip_id,"generation":thread,"base_version":base,"requirements":doc["requirements"],
-                     "selected_source_ids":doc.get("selected_source_ids",[]),"stops":self.source_stops(trip_id,doc.get("selected_source_ids",[])),
-                     "mode":"modify","change":{},"message":"修改已有回答","locks":doc.get("locks",[]),"warnings":[],
-                     "candidates":[candidate],"selected_route":{},"old_itinerary":copy.deepcopy(doc.get("itinerary") or {}),
-                     "old_requirements":doc["requirements"],"itinerary":copy.deepcopy(candidate["draft"]),
-                     "previews":{candidate["id"]:{"itinerary":copy.deepcopy(candidate["draft"]),"queried_at":now()}},
-                     "decision":question,"decision_reopened":True,"decision_resume":"assess","decision_history":history,"stop_constraints":doc.get("stop_constraints",{}),
-                     "draft_revision":doc.get("draft_revision",0)+1,"route_confirmed":False,"route_edit":{},"repair_round":0}
+            state = {**persisted(doc),"trip_id":trip_id,"generation":thread,"base_version":base,"requirements":doc["requirements"],
+                "selected_source_ids":doc.get("selected_source_ids",[]),"stops":{**self.source_stops(trip_id,doc.get("selected_source_ids",[])),**doc.get("stops",{})},
+                "mode":"modify","change":{},"locks":doc.get("locks",[]),"warnings":doc.get("warnings",[]),
+                "candidates":[candidate],"selected_route":{},"old_itinerary":copy.deepcopy(candidate["draft"]),
+                "old_requirements":copy.deepcopy(doc["requirements"]),"itinerary":copy.deepcopy(candidate["draft"]),
+                "decision_history":copy.deepcopy(history),"stop_constraints":doc.get("stop_constraints",{}),
+                "coordinator_batch":batch,"coordinator_confirmation":None,"coordinator_blocked":False,"coordinator_resume":"review_gate"}
             run_id = self.store.start_run(trip_id,base,thread,{"request":"重新回答已有选择","history_index":index})
             state["run_id"] = run_id
             try:
-                await self.graph.aupdate_state({"configurable":{"thread_id":thread}},state,as_node="guide_analysis")
+                await self.graph.aupdate_state({"configurable":{"thread_id":thread}},state,as_node="coordinator")
                 doc.update(stage="queued",pending=None,workflow_step="interview")
                 self.store.update(trip_id,doc)
             except Exception:
-                self.store.finish_run(run_id,"failed",{"message":"问题恢复失败，原记录已保留"})
+                self.store.finish_run(run_id,"failed",{"message":"批次恢复失败，原记录已保留"})
                 raise
             task = asyncio.create_task(self.execute(run_id,None),name=run_id)
             self.tasks[run_id] = task

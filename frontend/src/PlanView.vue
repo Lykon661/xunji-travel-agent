@@ -112,14 +112,16 @@ function evidenceKind(activity: Itinerary['days'][number]['activities'][number])
             高德查询于 {{ new Date(activity.move_before.queried_at).toLocaleString() }}；耗时为查询时参考。<span v-if="activity.move_before.evidence_id">依据 {{ activity.move_before.evidence_id }}</span>
           </p>
           <p v-if="activity.category !== 'dining' && activity.ticket_claim" class="ticket-price">攻略门票信息：{{ activity.ticket_claim }}</p>
-          <p v-if="activity.ticket_query_required && !activity.ticket_quote" class="ticket-price">门票：默认免费（0元）。未返回价格，按你的默认规则处理。</p>
-          <p v-if="activity.category !== 'dining' && activity.ticket_quote && !activity.ticket_quote.options?.length" class="ticket-price">
-            <template v-if="activity.ticket_quote.assumed_free || activity.ticket_quote.price == null">门票：<strong>默认免费（0元）</strong></template>
-            <template v-else-if="activity.ticket_quote.reported_free">基础参观：<strong>免费（0元）</strong></template>
-            <template v-else>飞猪门票参考价：<strong>{{ money(activity.ticket_quote.price) }}</strong></template>
-            <span v-if="activity.ticket_quote?.ticket_name"> · {{ activity.ticket_quote.ticket_name }}</span>
-            <span v-if="activity.ticket_quote?.price_date"> · 适用日期 {{ activity.ticket_quote.price_date }}</span>
-            <br>{{ activity.ticket_quote.note }}
+          <p v-if="activity.category !== 'dining' && activity.ticket_quote && !activity.ticket_quote.options?.length && (activity.ticket_quote.ticket_status === 'paid_priced' || activity.ticket_quote.ticket_status === 'paid_unpriced')" class="ticket-price">
+            <template v-if="activity.ticket_quote.ticket_status === 'paid_priced'">
+              门票参考价：<strong>{{ money(activity.ticket_quote.price) }}</strong>
+              <span v-if="activity.ticket_quote?.ticket_name"> · {{ activity.ticket_quote.ticket_name }}</span>
+              <span v-if="activity.ticket_quote?.price_date"> · 适用日期 {{ activity.ticket_quote.price_date }}</span>
+              <template v-if="activity.ticket_quote.note"><br>{{ activity.ticket_quote.note }}</template>
+            </template>
+            <template v-else>
+              门票：<strong>收费，未查询到价格（预算按0元计算）</strong>
+            </template>
             <a v-if="safeLink(activity.ticket_quote?.booking_url)" :href="safeLink(activity.ticket_quote?.booking_url)" target="_blank" rel="noopener noreferrer">查看票种与预订页</a>
           </p>
           <div v-if="activity.category !== 'dining' && activity.ticket_quote?.options?.length" class="ticket-candidates">

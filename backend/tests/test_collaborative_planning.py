@@ -58,11 +58,11 @@ class PlanningInvariants(unittest.TestCase):
     def test_missing_required_stop_blocks_confirmation(self):
         self.assertTrue(confirmation_blockers(complete_draft(),{"required":["source:missing"]}))
 
-    def test_unresolved_summary_cannot_silently_finish(self):
-        with self.assertRaises(ValidationError):
-            GuideBrief(status="ready",summary="当前尚未明确的是是否安排长隆",question=None)
-        with self.assertRaises(ValidationError):
-            GuideBrief(status="needs_decision",summary="需要选择",question=None)
+    def test_unresolved_conditions_use_structured_items(self):
+        from app.models import UnmetItem
+        item = UnmetItem(kind="budget",refs=[{"type":"requirement","id":"budget"}],numbers={"excess_amount":100})
+        value = RouteTurn(status="ready",order=OrderChoice(stop_ids=[]),unmet=[item])
+        self.assertEqual(value.unmet,[item])
 
     def test_same_poi_from_two_guides_is_not_two_visits(self):
         plan = complete_draft()

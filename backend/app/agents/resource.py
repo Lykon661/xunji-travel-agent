@@ -49,7 +49,6 @@ class ResourceAgent(AgentRuntime):
                 "不安排游览、不修改日期和需求。未知费用不能当便宜，不把展示价或床型当最终总价或库存保证。"
                 "必须返回selected_id，没有合适资源返回null，并用reason说明。",
                 {"requirements":state["requirements"],"task":request,
-                 "review_feedback":state.get("review_feedback",[]),
                  "options":[{k:v for k,v in option.items() if k != "raw"} for option in options]})
         except ToolError as exc:
             if exc.code != "model_format":

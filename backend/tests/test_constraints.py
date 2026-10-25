@@ -214,20 +214,24 @@ class WalkingAndTransit(unittest.TestCase):
         rule = draft(kind="transit_rule",rule="public_only",quote="只坐公交地铁")
         req = {**REQ,"constraints":merge([],[rule],"form")}
         self.assertTrue(public_only(req))
+        first = visit("guide:xh","09:00","09:30")
         driven = visit("guide:ly","10:00","11:00",move_before={"mode":"driving","minutes":12})
-        self.assertEqual(len(constraint_issues(self.day(0,driven),req)[0]),1)
+        self.assertEqual(len(constraint_issues(self.day(0,first,driven),req)[0]),1)
+        self.assertEqual(constraint_issues(self.day(0,driven),req)[0],[])
         dated = {**REQ,"constraints":merge([],[{**rule,"scope":{**rule["scope"],"dates":["2026-11-11"]}}],"form")}
         self.assertFalse(public_only(dated))
-        self.assertEqual(constraint_issues(self.day(0,driven),dated)[0],[])
+        self.assertEqual(constraint_issues(self.day(0,first,driven),dated)[0],[])
 
     def test_stop_without_a_transit_route_is_marked_for_removal(self):
         req = {**REQ,"constraints":merge([],[draft(kind="transit_rule",rule="auto_by_transit",scope={"stop_ids":["guide:ly"]},
                                                      quote="公交到不了就不去灵隐寺")],"form")}
         missing = visit("guide:ly","10:00","11:00",move_before={"mode":"transit","minutes":None})
-        [issue] = constraint_issues(self.day(0,missing),req)[0]
+        first = visit("guide:xh","09:00","09:30")
+        [issue] = constraint_issues(self.day(0,first,missing),req)[0]
         self.assertEqual((issue["target"],issue["repair"],issue["blocking"]),("guide:ly","drop",True))
+        self.assertEqual(constraint_issues(self.day(0,missing),req)[0],[])
         reached = visit("guide:ly","10:00","11:00",move_before={"mode":"transit","minutes":25})
-        self.assertEqual(constraint_issues(self.day(0,reached),req)[0],[])
+        self.assertEqual(constraint_issues(self.day(0,first,reached),req)[0],[])
 
 
 class FormExtraction(unittest.IsolatedAsyncioTestCase):

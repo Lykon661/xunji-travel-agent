@@ -132,10 +132,20 @@ FEWER_WALKING_METERS = 5000
 
 
 def walking_target(req, date=None):
-    """Soft daily walking target from fewer_walking constraints without a hard meter cap; None when there is none."""
-    targets = [item["meters"] or FEWER_WALKING_METERS for item in active(req,"fewer_walking",date=date)
-               if not item["meters"] or item["strength"] == "soft"]
+    """Daily target from a dated decision or soft fewer_walking constraints."""
+    override = dated_walking_limit(req, date)
+    if override is not None:
+        return override
+    targets = [item["meters"] if item.get("meters") is not None else FEWER_WALKING_METERS for item in active(req,"fewer_walking",date=date)
+               if item.get("meters") is None or item["strength"] == "soft"]
     return min(targets) if targets else None
+
+
+def dated_walking_limit(req, date=None):
+    return next((item["meters"] for item in reversed(active(req,"fewer_walking",date=date))
+                 if date is not None and item.get("source") == "decision" and item["scope"]["dates"]
+                 and not item["scope"].get("stop_ids") and not item["scope"].get("cities")
+                 and item.get("meters") is not None and item["strength"] == "hard"), None)
 
 
 def public_only(req):

@@ -22,7 +22,8 @@ from .llm import worker as model_worker
 from .crawler_control import CrawlerControl, router as crawler_router
 from .models import (AmapKeyInput, CandidateRevisionInput, CreateTrip, FlyAIKeyInput, GuideSearchInput, RequirementsSaveInput,
                      ItinerarySaveInput, LockInput, MessageInput, SelectionInput, ResourceSelectionInput,
-                     ProductSearchInput, ProductSelectionInput, TaxiInput, WorkflowBackInput, HotelAreaInput, DecisionReopenInput)
+                     ProductSearchInput, ProductSelectionInput, TaxiInput, WorkflowBackInput, HotelAreaInput, DecisionReopenInput,
+                     AssumptionChangeInput)
 from .model_oauth import ModelOAuthManager
 from .model_routes import router as model_router
 from .map_preview import MapPreviewConfig, router as map_router
@@ -203,7 +204,10 @@ async def trip(trip_id: str):
     result = app.state.store.trip(trip_id)
     if result["active_run"]:
         result["run"] = app.state.store.run(result["active_run"])
-    return app.state.planner.refresh_review_status(result)
+    from .nodes.coordinating import public_document
+    result = app.state.planner.refresh_review_status(result)
+    result["document"] = public_document(result["document"])
+    return result
 
 
 @app.patch("/api/trips/{trip_id}/requirements")
@@ -312,6 +316,12 @@ async def selection(trip_id: str,body: SelectionInput):
 @app.post("/api/trips/{trip_id}/decisions/reopen",status_code=202)
 async def reopen_decision(trip_id: str,body: DecisionReopenInput):
     run_id = await app.state.planner.reopen_decision(trip_id,body.base_version,body.updated_at,body.history_index)
+    return {"run_id":run_id}
+
+
+@app.post("/api/trips/{trip_id}/assumptions/{assumption_id}/change",status_code=202)
+async def change_assumption(trip_id: str,assumption_id: str,body: AssumptionChangeInput):
+    run_id = await app.state.planner.change_assumption(trip_id,assumption_id,**body.model_dump())
     return {"run_id":run_id}
 
 
@@ -597,13 +607,17 @@ async def delete_itinerary(trip_id: str,base_version: int = Query(ge=0),updated_
 @app.get("/api/trips/{trip_id}/versions")
 async def versions(trip_id: str,include_documents: bool = True):
     app.state.store.trip(trip_id)
-    return app.state.store.versions(trip_id,include_documents=include_documents)
+    from .nodes.coordinating import public_document
+    rows = app.state.store.versions(trip_id,include_documents=include_documents)
+    return [{**row,"document":public_document(row["document"])} if "document" in row else row for row in rows]
 
 
 @app.get("/api/trips/{trip_id}/versions/{version}")
 async def saved_version(trip_id: str,version: int):
     app.state.store.trip(trip_id)
-    return app.state.store.version(trip_id,version)
+    from .nodes.coordinating import public_document
+    result = app.state.store.version(trip_id,version)
+    return {**result,"document":public_document(result["document"])}
 
 
 @app.get("/api/runs/{run_id}/events")

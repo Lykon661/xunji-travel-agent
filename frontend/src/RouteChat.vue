@@ -1,9 +1,20 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import type { Candidate, RouteChatMessage } from './types'
+import CoordinatorMessages from './CoordinatorMessages.vue'
+import type { Candidate, CoordinatorMessage, RouteChatMessage } from './types'
 
-const props = defineProps<{days:Candidate['days'];messages:RouteChatMessage[];disabled:boolean;selectedActivities:{id:string;name:string;date:string}[]}>()
-const emit = defineEmits<{revise:[request:{dates:string[];content:string;selected_stop_ids:string[]}];unselect:[id:string]}>()
+const props = defineProps<{
+  days:Candidate['days']
+  messages:RouteChatMessage[]
+  coordinatorMessages?:CoordinatorMessage[]
+  disabled:boolean
+  selectedActivities:{id:string;name:string;date:string}[]
+}>()
+const emit = defineEmits<{
+  revise:[request:{dates:string[];content:string;selected_stop_ids:string[]}]
+  unselect:[id:string]
+  reopen:[index:number]
+}>()
 const content = ref(''), dates = ref<string[]>([]), history = ref<HTMLElement | null>(null)
 const input = ref<HTMLTextAreaElement | null>(null)
 const allDates = computed(() => props.days.map(day => day.date))
@@ -32,6 +43,7 @@ defineExpose({editDates})
 <template>
   <section class="route-chat" aria-label="行程调整对话">
     <header><h2>调整行程</h2><p>在左侧选择行程项，再告诉我想怎么调整。</p></header>
+    <CoordinatorMessages :messages="coordinatorMessages" :disabled="disabled" @reopen="index => emit('reopen', index)" />
     <div v-if="selectedActivities.length" class="route-chat-selection"><strong>已选择 {{ selectedActivities.length }} 项</strong><ul><li v-for="activity in selectedActivities" :key="activity.id"><span>{{ activity.date.slice(5) }} · {{ activity.name }}</span><button type="button" class="text-button" :disabled="disabled" :aria-label="`取消选择：${activity.name}`" @click="emit('unselect',activity.id)">取消</button></li></ul></div>
     <div ref="history" class="route-chat-history" role="log" aria-live="polite" aria-relevant="additions text">
       <p v-if="!messages.length" class="subtle">例如：“第二天减少一个景点，留更多时间逛老街。”</p>

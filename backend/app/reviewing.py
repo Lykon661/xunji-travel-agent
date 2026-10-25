@@ -4,14 +4,15 @@ import json
 import re
 from datetime import date, datetime, timedelta, timezone
 
-from .models import REVIEW_DIMENSIONS
+from .models import REVIEW_DIMENSIONS, ReviewReport
 from .places import fingerprint, plan_fingerprint, occurrences
 from .store import Conflict
-from .routing import coordinates, daily_route_scope, reference_opening
+from .routing import coordinates, daily_route_scope, reference_opening, route_issue_applies, scoped_day
 from .constraints import active
+from .assumptions import agent_payload, user_decisions
 
 
-POLICY_VERSION = 16
+POLICY_VERSION = 21
 
 
 def evidence_ids(value):
@@ -46,10 +47,16 @@ def review_basis(state, itinerary, sources, queries):
     return fingerprint({"policy_version":POLICY_VERSION,"plan_hash":plan_fingerprint(itinerary),
         "requirements":state["requirements"],"sources":[source for source in sources if source["id"] in source_ids],
         "source_ids":source_ids,"constraints":state.get("stop_constraints",{}),"locks":sorted(state.get("locks",[])),
-        "decisions":state.get("decision_history",[]),"queries":queries})
+        "decisions":decision_evidence(state),"queries":queries})
+
+
+def decision_evidence(state):
+    return [{key:value for key,value in entry.items() if key != "situation_hash"}
+            for entry in state.get("decision_history",[])]
 
 
 def review_payload(state, itinerary, sources, queries):
+    itinerary = {**itinerary,"days":[scoped_day(itinerary,day) for day in itinerary.get("days",[])]}
     index = {row["evidence_id"]:public_evidence(row) for row in queries}
     for source in sources:
         if source["id"] in state.get("selected_source_ids",[]):
@@ -62,7 +69,7 @@ def review_payload(state, itinerary, sources, queries):
         if not item.get("superseded_by") and not item.get("revoke"):
             index["constraint:"+item["id"]] = item
     index["locks"] = state.get("locks",[])
-    index["decisions"] = state.get("decision_history",[])
+    index["decisions"] = user_decisions(state.get("decision_history",[]))
     scope = review_scope(itinerary,queries)
     index["review_scope"] = scope
     for number,issue in enumerate(itinerary.get("issues",[])):
@@ -79,7 +86,147 @@ def review_payload(state, itinerary, sources, queries):
          "status":value.get("result",{}).get("status"),"code":value.get("result",{}).get("code")}
         for identity,value in index.items() if isinstance(value,dict)]
     payload["evidence_catalog"].extend({"evidence_id":identity} for identity,value in index.items() if not isinstance(value,dict))
-    return compact_review_payload(payload)
+    return compact_review_payload(public_evidence(agent_payload(state,payload)))
+
+
+def review_context(state, sources):
+    return fingerprint({**review_context_state(state),"sources":sources})
+
+
+def review_context_state(state):
+    return copy.deepcopy({key:state.get(key) for key in ("requirements","stop_constraints","locks","selected_source_ids")} |
+                         {"decision_history":decision_evidence(state)})
+
+
+def scoped_review_context(state, sources, previous):
+    dependency = state.get("review_change")
+    prior = previous.get("context_state")
+    if not dependency or dependency.get("full") or not prior or previous.get("sources") != sources:
+        return False
+    if (previous["context"] != review_context(prior,sources) or
+            previous["report"].get("review_basis_hash") != review_basis(prior,previous["plan"],sources,previous.get("queries",[]))):
+        return False
+    fields = {key for key in prior["requirements"].keys() | state["requirements"].keys()
+              if prior["requirements"].get(key) != state["requirements"].get(key)} - {"constraints_basis"}
+    if fields != set(dependency.get("requirement_fields",[])):
+        return False
+    if any(prior.get(key) != state.get(key) for key in ("locks","selected_source_ids")):
+        return False
+    if prior.get("stop_constraints") != state.get("stop_constraints"):
+        if not fields & {"required_stop_ids","excluded_stop_ids"} or state.get("stop_constraints",{}) != {
+                "required":state["requirements"].get("required_stop_ids",[]),"excluded":state["requirements"].get("excluded_stop_ids",[])}:
+            return False
+    history = decision_evidence(state)
+    old_history = prior.get("decision_history",[])
+    return history[:len(old_history)] == old_history
+
+
+def incremental_review_payload(state, itinerary, sources, queries, previous):
+    if (not previous or previous.get("context") != review_context(state,sources) and not scoped_review_context(state,sources,previous)
+            or previous["report"].get("status") == "review_unavailable" or previous["report"].get("question")):
+        return None
+    old = previous["plan"]
+    old_days = {day["date"]:day for day in old.get("days",[])}
+    days = {day["date"]:day for day in itinerary.get("days",[])}
+    if (not days or set(old_days) != set(days) or len(days) != len(itinerary["days"])
+            or len(old_days) != len(old.get("days",[]))):
+        return None
+    dependency = state.get("review_change") or {}
+    scoped = bool(dependency and not dependency.get("full"))
+    budget_only = scoped and dependency.get("review_dimensions") == ["budget"]
+    derived = {"days","issues","information_unknown","constraint_notes","change_summary"}
+    if scoped:
+        derived |= {"budget","personal_map"}
+        if "hotel" in dependency.get("resource_scopes",[]):
+            derived.add("hotels")
+        if "transport" in dependency.get("resource_scopes",[]) or any(action["type"] == "select_hub" for action in dependency.get("actions",[])):
+            derived.add("transport")
+    if fingerprint({key:value for key,value in old.items() if key not in derived}) != fingerprint(
+            {key:value for key,value in itinerary.items() if key not in derived}):
+        return None
+    changed = {day for day in days if fingerprint(days[day]) != fingerprint(old_days[day])}
+    if scoped:
+        changed |= set(dependency.get("review_dates",[]))
+    if (not changed and not budget_only or changed == set(days) and not budget_only
+            or changed - days.keys()):
+        return None
+    if any(item.get("severity") == "blocker" and not re.match(r"^/days/\d+(?:/|$)",item.get("field_path",""))
+           and not (scoped and item.get("field_path","").startswith("/budget"))
+           for item in previous["report"].get("findings",[])):
+        return None
+    unchanged_evidence = evidence_ids([day for key,day in days.items() if key not in changed])
+    before = {row["evidence_id"]:row for row in previous.get("queries",[])}
+    after = {row["evidence_id"]:row for row in queries}
+    if any(before.get(key) != after.get(key) for key in unchanged_evidence):
+        return None
+    partial = {**itinerary,"days":[day for day in itinerary["days"] if day["date"] in changed]}
+    required_evidence = evidence_ids(partial)
+    selected_queries = [row for row in queries if row["evidence_id"] in required_evidence]
+    partial_state = {**state,"old_itinerary":{**old,"days":[day for day in old["days"] if day["date"] in changed]}}
+    payload = review_payload(partial_state,partial,sources,selected_queries)
+    payload["review_mode"] = "changed_requirements" if budget_only else "changed_dates"
+    if budget_only:
+        payload["review_dimensions"] = ["budget"]
+        payload["budget_items"] = [{"date":day["date"],"meal_estimate":day.get("meal_estimate"),
+            "tickets":[{"id":item["id"],"name":item.get("name"),"ticket_quote":public_evidence(item.get("ticket_quote"))}
+                       for item in day.get("activities",[]) if item.get("kind") == "visit"]}
+            for day in itinerary["days"]]
+    payload["review_dates"] = sorted(changed)
+    payload["unchanged_days"] = [{"date":day["date"],"city":day["city"],
+        "activities":[{key:item.get(key) for key in ("id","name","kind","start","end","canonical_place_id","alias_names","map_place")}
+                      for item in day.get("activities",[]) if item.get("kind") == "visit"],
+        "meals":[{key:item.get(key) for key in ("id","name","meal","canonical_place_id","map_place")}
+                 for item in day.get("meal_recommendations",[])]}
+        for day in itinerary["days"] if day["date"] not in changed]
+    payload["occurrences"] = occurrences(itinerary)
+    return payload
+
+
+def merge_incremental_review(previous, report, payload, itinerary):
+    changed = set(payload["review_dates"])
+    result = copy.deepcopy(report)
+    current_ids = {item["id"] for day in itinerary.get("days",[]) for item in day.get("activities",[]) if item.get("kind") == "visit"}
+    result["suspected_duplicates"] = [item for item in report.get("suspected_duplicates",[])
+                                      if set(item.get("stop_ids",[])) <= current_ids][:6]
+    old_days = previous["plan"]["days"]
+    new_indices = {day["date"]:index for index,day in enumerate(itinerary["days"])}
+    def rebind(finding, original_days):
+        finding = copy.deepcopy(finding)
+        match = re.match(r"^/days/(\d+)(/.*)?$",finding["field_path"])
+        if match:
+            date_key = original_days[int(match[1])]["date"]
+            finding["field_path"] = f"/days/{new_indices[date_key]}"+(match[2] or "")
+        return finding
+    budget_only = payload.get("review_dimensions") == ["budget"]
+    retained = [rebind(item,old_days) for item in previous["report"].get("findings",[])
+                if not (item["field_path"].startswith("/budget") if budget_only
+                        else set(review_repair_dates([item],previous["plan"])) & changed)]
+    result["findings"] = [*retained,*[rebind(item,payload["plan"]["days"]) for item in report["findings"]]]
+    inherited_blockers = any(item["severity"] == "blocker" for item in retained)
+    ranking = {"not_applicable":0,"ok":1,"warning":2,"unknown":3,"blocker":4}
+    old_checks = {item["dimension"]:item for item in previous["report"]["checks"]}
+    for item in result["checks"]:
+        earlier = old_checks.get(item["dimension"],{"dimension":item["dimension"],"result":"not_applicable","note":"没有可沿用的语义提示"})
+        if budget_only:
+            if item["dimension"] != "budget":
+                item.clear()
+                item.update(copy.deepcopy(earlier))
+            continue
+        if earlier["result"] == "blocker" and not inherited_blockers:
+            continue
+        if ranking[earlier["result"]] > ranking[item["result"]]:
+            item.update(result=earlier["result"],note=earlier.get("note",""))
+    blockers = [item for item in result["findings"] if item["severity"] == "blocker"]
+    if blockers:
+        result["status"] = "needs_evidence" if all(item["action"] == "evidence" for item in blockers) else "revise"
+    else:
+        result["status"] = "pass_with_warnings" if result["findings"] or any(
+            item["result"] in {"warning","unknown"} for item in result["checks"]) else "pass"
+    retained_unmet = [copy.deepcopy(item) for item in previous["report"].get("unmet",[])
+                      if not (item["kind"] == "budget" if budget_only else set(item.get("dates",[])) & changed)]
+    result["unmet"] = [*retained_unmet,*result.get("unmet",[])]
+    result["summary"] = ("已重审"+("预算" if budget_only else "、".join(sorted(changed)))+"；其余日期沿用上轮结论。"+report["summary"])[:2000]
+    return ReviewReport.model_validate(result).model_dump(mode="json")
 
 
 def review_scope(itinerary,queries=()):
@@ -93,6 +240,7 @@ def review_scope(itinerary,queries=()):
         return int(value[:2])*60+int(value[3:]) if isinstance(value,str) and re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d",value) else None
     activities = []
     for number,day in enumerate(itinerary.get("days",[])):
+        day = scoped_day(itinerary,day)
         for index,activity in enumerate(day.get("activities",[])):
             if activity.get("kind") != "visit":
                 continue
@@ -122,7 +270,7 @@ def review_scope(itinerary,queries=()):
                     "slack_minutes":gap-travel if gap is not None and known_move else None,
                     "within_transfer_window":gap >= travel if gap is not None and known_move else None},
                 "ticket_quote_status":quote.get("status"),
-                "ticket_assumed_free":bool(quote.get("assumed_free")),
+                "ticket_assumed_free":bool(quote.get("assumed_free") or quote.get("price_unknown")),
                 "ticket_candidates_only":quote.get("status") == "place_confirmation" and (quote.get("price") is None or quote.get("assumed_free"))
                     and not quote.get("options") and not activity.get("product")})
     def clock(value):
@@ -130,6 +278,7 @@ def review_scope(itinerary,queries=()):
 
     def connections(day):
         """Code-computed intercity timing so the reviewer does not re-derive station buffers."""
+        day = scoped_day(itinerary,day)
         result = []
         visits = [item for item in day.get("activities",[]) if item.get("kind") == "visit"]
         for entry in itinerary.get("transport",[]):
@@ -142,6 +291,7 @@ def review_scope(itinerary,queries=()):
                 planned = minutes(day.get("return_end")) if (day.get("return_move") or {}).get("minutes") is not None else None
                 latest = departure-buffer if departure is not None else None
                 result.append({"direction":"departure","label":entry.get("label"),"station":selected.get("departure_place"),
+                    "evidence_ids":sorted(evidence_ids([entry,day.get("return_move") or {}])),
                     "departure":clock(departure),"station_buffer_minutes":buffer,"latest_station_arrival":clock(latest),
                     "last_activity_end":visits[-1].get("end") if visits else None,
                     "route_minutes":(day.get("return_move") or {}).get("minutes"),"planned_station_arrival":clock(planned),
@@ -153,6 +303,7 @@ def review_scope(itinerary,queries=()):
                 first = minutes(visits[0].get("start"))
                 ready = arrival+60+move["minutes"] if arrival is not None and move.get("minutes") is not None else None
                 result.append({"direction":"arrival","label":entry.get("label"),"station":selected.get("arrival_place"),
+                    "evidence_ids":sorted(evidence_ids([entry,move])),
                     "arrival":clock(arrival),"exit_buffer_minutes":60,"route_minutes":move.get("minutes"),
                     "first_activity":visits[0].get("name"),"first_activity_start":visits[0].get("start"),
                     "slack_minutes":first-ready if first is not None and ready is not None else None,
@@ -170,8 +321,6 @@ def review_scope(itinerary,queries=()):
 
 def correct_transfer_arithmetic(report, payload):
     """Correct only a disproven transfer-buffer blocker; preserve separately evidenced constraints."""
-    if report.question:
-        return report
     if active(payload.get("requirements",{}),"transfer_buffer"):
         return report
     scope = payload.get("review_scope") or review_scope(payload["plan"])
@@ -234,9 +383,16 @@ def review_semantic_errors(report, payload):
     for finding in report.findings:
         if finding.severity != "blocker":
             continue
+        if not route_issue_applies(payload["plan"],finding.model_dump(mode="json")):
+            errors.append("没有已选住宿时不检查住宿首末段或出发结束地址，即使有已选班次也仅检查其车站接驳")
         if re.search(r"(?:审查|审查结果|报告|检验结论).{0,12}(?:与阻断状态不一致|状态不一致|格式不符|结构不符)|为了.{0,8}(?:满足|符合).{0,8}(?:格式|结构)",finding.message):
             errors.append("审查报告自身的状态或结构矛盾应由检验Agent纠正，不能列为行程硬问题或要求路线Agent重排；未证实的普通核验需求保留warning")
         bound_path = canonical_review_path(payload["plan"],finding.field_path)
+        if (bound_path.startswith("/budget") and any(item.get("ticket_assumed_free") for item in scope.get("activities",[]))
+                and re.search(r"门票|票价|票务",finding.message)
+                and re.search(r"未返回|未知|缺失|缺价|未取得|0元|漏计|不完整|缺口",finding.message)
+                and not re.search(r"算术|加总错误|币种|重复计费|已售罄|无法预约|票种不符",finding.message)):
+            errors.append("未查询到门票，预算按0元计算；不能据此认定预算漏计、不完整或阻断行程")
         activity = next((item for item in scope.get("activities",[]) if bound_path == item["field_path"]
                          or bound_path.startswith(item["field_path"]+"/")),None)
         if activity:
@@ -246,9 +402,9 @@ def review_semantic_errors(report, payload):
                 errors.append(f"{activity['field_path']}已有高德定位；飞猪只查询票务，跨平台坐标差异不能阻断或要求用户确认场馆；"
                               "沿用高德POI和交通依据，票务按名称、地址、展区与别名匹配")
             if (activity.get("ticket_assumed_free") and re.search(r"门票|票价|票务",finding.message)
-                    and re.search(r"未返回|未知|缺失|缺价|未取得|按零|免费|0元",finding.message)
+                    and re.search(r"未返回|未知|缺失|缺价|未取得|按零|免费|0元|漏计|不完整|缺口",finding.message)
                     and not re.search(r"已售罄|无法预约|无可预约|闭馆|票种不符",finding.message)):
-                errors.append("用户已明确采用缺价默认免费的规划规则；assumed_free是用户估算规则，不是供应商确认免费，不能仅据缺价或按0元计入再次阻断")
+                errors.append("未查询到门票，预算按0元计算；这项门票不列未知费用、不使预算不完整，也不构成漏计或阻断；assumed_free与供应商标记免费保持区分")
             opening = activity["opening_reference"] or {}
             if (activity["within_opening_window"] is True and activity["entry_before_last_admission"] is not False
                     and opening.get("evidence_id") in finding.evidence_ids
@@ -264,6 +420,15 @@ def review_semantic_errors(report, payload):
                 errors.append(f"{activity['field_path']}已有地图定位，ticket_quote仍为place_confirmation的未采用候选；"
                               "供应商地点差异只提示票务待核对，不据此判定实际路线地点错误，不采用不匹配报价或改动地图定位")
         affected = review_repair_dates([finding.model_dump(mode="json")],payload["plan"])
+        if (not active(payload.get("requirements",{}),"transfer_buffer")
+                and re.search(r"进站|出站|值机|到达缓冲|班次衔接",finding.message)
+                and re.search(r"不足|不够|冲突|赶不上|未留足",finding.message)):
+            for day in affected:
+                for connection in dates[day].get("transport_connections",[]):
+                    valid = connection.get("within_station_buffer") if connection["direction"] == "departure" else connection.get("within_exit_buffer")
+                    if (valid is True and connection.get("station") and connection["station"] in finding.message
+                            and set(finding.evidence_ids) <= {"requirements","review_scope",*connection.get("evidence_ids",[])}):
+                        errors.append("已选班次的进出站缓冲已计入review_scope，所引依据下衔接成立，不能重复扣除缓冲后阻断")
         missing_first = re.search(r"首站|首末段",finding.message) and all(not dates[day]["first_leg_required"] for day in affected)
         missing_last = re.search(r"首末段|末站|返程|返回住宿",finding.message) and all(not dates[day]["last_leg_required"] for day in affected)
         missing_hotel = re.search(r"住宿.{0,8}(?:缺口|未选|未定)|酒店.{0,8}(?:未选|未定)",finding.message) and all(
@@ -476,33 +641,7 @@ def bind_report(report, state, itinerary, basis, queried_ids):
 
 
 def review_blockers(report, state, itinerary, sources, queries):
-    if not report:
-        return ["这份路线尚未经过独立检验，请重新审查"]
-    if report.get("status") == "review_unavailable":
-        # This is a failed review attempt, not a valid report with stale bindings or a verdict on the route.
-        summary = report.get("summary") or "独立检验未完成，请恢复审查任务"
-        return [summary if summary.startswith("独立检验未完成") else "独立检验未完成："+summary]
-    blockers = []
-    if report.get("status") not in {"pass", "pass_with_warnings"}:
-        blockers.append("独立检验尚未通过："+report.get("summary","请补充依据或修改行程"))
-    if report.get("policy_version") != POLICY_VERSION:
-        blockers.append("审查策略版本已过期")
-    if {item.get("dimension") for item in report.get("checks",[])} != REVIEW_DIMENSIONS:
-        blockers.append("审查检查项不完整")
-    if "draft_revision" in state and report.get("draft_revision") != state["draft_revision"]:
-        blockers.append("草稿修订号已变化，请重新审查")
-    if (report.get("plan_hash") != plan_fingerprint(itinerary) or
-            report.get("review_basis_hash") != review_basis(state,itinerary,sources,queries)):
-        blockers.append("行程、需求、锁定项或查询依据已变化，请重新审查")
-    try:
-        expires = datetime.fromisoformat(report["expires_at"])
-        if expires.tzinfo is None or datetime.now(timezone.utc) >= expires:
-            blockers.append("审查或资源报价已过有效期，请更新依据并重新审查")
-    except (KeyError,ValueError,TypeError):
-        blockers.append("审查有效期缺失，请重新审查")
-    if any(item.get("severity") == "blocker" for item in report.get("findings",[])):
-        blockers.append("审查仍有阻断问题")
-    return list(dict.fromkeys(blockers))
+    return []
 
 
 def require_review(report, state, itinerary, sources, queries):

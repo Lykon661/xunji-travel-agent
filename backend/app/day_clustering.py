@@ -2,28 +2,31 @@ from fractions import Fraction
 from itertools import product
 
 from .conflicts import (DEFAULT_MOVE_MINUTES, FULL_DAY_MINUTES, LUNCH_MINUTES,
-                        _full_day as is_full_day, _minimum as daily_minimum, visit_minutes)
+                        _minimum as daily_minimum, visit_minutes)
 from .constraints import active, trip_dates
 from .dining import is_dining, visit_required_ids, plan_meal_wishes
-from .models import Candidate, Requirements
+from .models import Candidate, CandidateDay, Requirements
 from .places import canonical_key, repeat_allowed, represented_ids
 from .routing import coordinates, daily_route_scope, distance, reference_opening
 from .rules import merge_candidate_duplicates, validate_candidate
+from .scheduler import fixed_dates, full_day as is_full_day
+from .planning_repairs import protected_stops
 
 ORDINARY_LOCATION_LIMIT = 48
 MAX_LOCAL_PASSES = 20
 
 
-def _minutes(stop, req, day):
-    return max(visit_minutes(stop,req,day),FULL_DAY_MINUTES if is_full_day(stop) else 0)
+def _minutes(stop, req, day, durations=None):
+    estimate = stop.get("duration_minutes") or (durations or {}).get(stop.get("id"))
+    return max(visit_minutes(stop,req,day,estimate),FULL_DAY_MINUTES if is_full_day(stop) else 0)
 
 
 def _floor(req, day, city):
     return daily_minimum(req,day,city)
 
 
-def _load(ids, stops, req, day, budget):
-    return sum(_minutes(stops[i],req,day) for i in ids)+(budget["lunch"] if ids else 0)+max(0,len(ids)-1)*(DEFAULT_MOVE_MINUTES+20)
+def _load(ids, stops, req, day, budget, durations=None):
+    return sum(_minutes(stops[i],req,day,durations) for i in ids)+(budget["lunch"] if ids else 0)+max(0,len(ids)-1)*(DEFAULT_MOVE_MINUTES+20)
 
 
 def _default_budget(req, day, city, old):
@@ -33,7 +36,7 @@ def _default_budget(req, day, city, old):
             "minimum":_floor(req,day,city),"load":0,"basis":"default_estimate"}
 
 
-def spatial_errors(plan: dict, candidate: dict, stops: dict[str, dict], requirements: dict) -> list[str]:
+def spatial_errors(plan: dict, candidate: dict, stops: dict[str, dict], requirements: dict, durations=None) -> list[str]:
     errors, days = [],candidate.get("days",[])
     if plan.get("status") == "ready" and [(d["date"],d["city"]) for d in days] != [(d["date"],d["city"]) for d in plan["days"]]:
         errors.append("城市日期段必须与空间分日计划一致")
@@ -61,7 +64,7 @@ def spatial_errors(plan: dict, candidate: dict, stops: dict[str, dict], requirem
         budget = plan["day_budgets"].get(date)
         if budget and budget.get("city",city) != city:
             budget = plan.get("default_day_budgets",{}).get(date,{}).get(city) or _default_budget(requirements,date,city,{})
-        if budget and _load(ids,stops,requirements,date,budget) > max(0,budget["end"]-budget["start"]):
+        if budget and _load(ids,stops,requirements,date,budget,durations) > max(0,budget["end"]-budget["start"]):
             errors.append(f"{date} 超出每日估计时间容量")
         if len(ids) > 12 or len(ids) < _floor(requirements,date,city):
             errors.append(f"{date} 景点数量不满足每日要求")
@@ -127,7 +130,7 @@ def cluster_deviation(initial: dict, candidate: dict, stops: dict[str, dict], re
                 (ratio > initial["policy"]["max_deviation"] or addition > initial["policy"]["max_addition"]))}
 
 
-def build_spatial_plan(state: dict, stops: dict[str, dict]) -> dict:
+def build_spatial_plan(state: dict, stops: dict[str, dict], days=None, durations=None, priorities=None) -> dict:
     req, constraints = state["requirements"],state.get("stop_constraints") or {}
     dates,cities = trip_dates(req),req["cities"]
     required = set(constraints.get("required",[])) | set(req.get("required_stop_ids",[]))
@@ -135,6 +138,9 @@ def build_spatial_plan(state: dict, stops: dict[str, dict]) -> dict:
     excluded = set(constraints.get("excluded",[])) | set(req.get("excluded_stop_ids",[]))
     locks,old = set(state.get("locks",[])),state.get("old_itinerary") or {}
     required |= {i for i,s in state.get("stops",stops).items() if i in locks and not is_dining(s)}
+    all_stops = {**state.get("stops",{}),**stops}
+    required |= protected_stops({**state,"stops":all_stops}) & stops.keys()
+    allowed_dates = fixed_dates({**state,"stops":all_stops})
     fixed,groups,pool,issues = {},{},{},[]
     plan = {"version":1,"status":"partial","policy":{"max_deviation":0.25,"max_addition":0.25,"small_trip_max":4},
             "days":[],"day_budgets":{},"default_day_budgets":{},"city_days":{},"required_ids":[],"fixed_dates":fixed,"visit_minutes":{},
@@ -143,18 +149,27 @@ def build_spatial_plan(state: dict, stops: dict[str, dict]) -> dict:
         if is_dining(stop) or stop.get("city") not in cities or represented_ids([stop]) & excluded:
             continue
         refs = represented_ids([stop]) | {i}
+        inherited_dates = [values for identity,values in allowed_dates.items() if identity in refs]
+        if inherited_dates:
+            allowed_dates[i] = set().union(*inherited_dates)
         locked = i in locks or bool((refs & locks)-stops.keys())
         recovered = sorted({d["date"] for d in old.get("days",[]) for a in d.get("activities",[])
                             if a.get("kind") == "visit" and (a.get("id") in refs or canonical_key(a,d.get("city","")) == canonical_key(stop))}) if locked else []
         direct = sorted({d["date"] for d in old.get("days",[]) for a in d.get("activities",[]) if a.get("kind") == "visit" and a.get("id") == i}) if locked else []
         recovered = direct or recovered
+        if locked and not recovered and days:
+            recovered = [day["date"] for day in days if i in day.get("stop_ids",[])]
         assigned = stop.get("assigned_date")
         if assigned and recovered and any(day != assigned for day in recovered):
             issues.append(f"固定地点 {i} 的采用日期 {assigned} 与锁定日期 {recovered} 冲突")
             plan["status"] = "conflict"
         if locked and len(recovered) != 1:
             issues.append(f"锁定地点 {i} 无法恢复唯一日期：{recovered}")
-        day = assigned or (recovered[0] if len(recovered) == 1 else None)
+        allowed = allowed_dates.get(i,set())
+        original = next((day["date"] for day in days or [] if i in day.get("stop_ids",[])),None)
+        day = assigned or (recovered[0] if len(recovered) == 1 else None) or (next(iter(allowed)) if len(allowed) == 1 else None)
+        if not coordinates(stop.get("map_place")) and original and not day:
+            day = original
         if day:
             fixed[i] = day
         groups.setdefault(canonical_key(stop),[]).append((i,bool(day or locked),i in required or bool((refs & required)-stops.keys())))
@@ -173,7 +188,7 @@ def build_spatial_plan(state: dict, stops: dict[str, dict]) -> dict:
     if any(day not in dates for day in fixed.values()):
         issues.extend(f"固定地点 {i} 日期 {day} 超出旅行范围" for i,day in fixed.items() if day not in dates)
         plan["status"] = "conflict"
-    weights = [sum(max((_minutes(s,req,d) for d in dates),default=0) for s in pool.values() if s["city"] == city) for city in cities]
+    weights = [sum(max((_minutes(s,req,d,durations) for d in dates),default=0) for s in pool.values() if s["city"] == city) for city in cities]
     weights = weights if sum(weights) else [1]*len(cities)
     minimum_days = [max(1,sum(is_full_day(pool[i]) for i in plan["required_ids"] if i in pool and pool[i]["city"] == city))
                     for city in cities]
@@ -189,12 +204,16 @@ def build_spatial_plan(state: dict, stops: dict[str, dict]) -> dict:
                 if used+n not in next_dp or value < next_dp[used+n]:
                     next_dp[used+n] = value
         dp = next_dp
-    if len(dates) not in dp or plan["status"] == "conflict":
+    if days:
+        day_cities = [day["city"] for day in days]
+        plan["city_days"] = {city:day_cities.count(city) for city in cities}
+    elif len(dates) not in dp or plan["status"] == "conflict":
         plan["status"] = "conflict"
         issues.append("固定日期与城市连续日期段冲突："+"、".join(f"{i} {d}" for i,d in fixed.items()))
         return plan
-    plan["city_days"] = dict(zip(cities,(-n for n in dp[len(dates)][1])))
-    day_cities = [city for city,n in plan["city_days"].items() for _ in range(n)]
+    else:
+        plan["city_days"] = dict(zip(cities,(-n for n in dp[len(dates)][1])))
+        day_cities = [city for city,n in plan["city_days"].items() for _ in range(n)]
     budgets = plan["day_budgets"]
     for day,city in zip(dates,day_cities):
         plan["default_day_budgets"][day] = {c:_default_budget(req,day,c,old) for c in cities}
@@ -221,10 +240,16 @@ def build_spatial_plan(state: dict, stops: dict[str, dict]) -> dict:
         return (len(ids) <= 12 and (not minimum or len(ids) >= budgets[day]["minimum"])
                 and not (len(ids) > 1 and any(is_full_day(pool[i]) for i in ids))
                 and all(pool[i]["city"] == day_cities[k] and fixed.get(i,day) == day
+                        and (i not in allowed_dates or day in allowed_dates[i])
                         and (reference_opening(pool[i],day) or {}).get("closed") is not True for i in ids)
-                and _load(ids,pool,req,day,budgets[day]) <= max(0,budgets[day]["end"]-budgets[day]["start"]))
-    allocation = [[i for i in sorted(fixed,key=lambda i:(not is_full_day(pool[i]),i)) if fixed[i] == day] for day in dates]
-    used = set(fixed)
+                and _load(ids,pool,req,day,budgets[day],durations) <= max(0,budgets[day]["end"]-budgets[day]["start"]))
+    allocation = [[] for day in dates]
+    used = set()
+    for k,day in enumerate(dates):
+        for i in sorted(fixed,key=lambda i:(not is_full_day(pool[i]),i)):
+            if fixed[i] == day and valid(k,[*allocation[k],i]):
+                allocation[k].append(i)
+                used.add(i)
     seeds = {}
     for k,ids in enumerate(allocation):
         center = medoid(ids)
@@ -243,7 +268,7 @@ def build_spatial_plan(state: dict, stops: dict[str, dict]) -> dict:
             penalty = 4*distances[i,seeds[k]] if i in points and seeds[k] and not medoid(ids) else 0
             budget = budgets[dates[k]]
             choices.append((len(ids) >= targets[dates[k]],objective(proposal)-base+penalty,
-                            Fraction(_load([*ids,i],pool,req,dates[k],budget),max(1,budget["end"]-budget["start"])),k))
+                            Fraction(_load([*ids,i],pool,req,dates[k],budget,durations),max(1,budget["end"]-budget["start"])),k))
         if choices:
             k = min(choices)[-1]
             allocation[k].append(i)
@@ -251,7 +276,7 @@ def build_spatial_plan(state: dict, stops: dict[str, dict]) -> dict:
         return bool(choices)
     mandatory = [i for i in plan["required_ids"] if i in points and i not in used]
     mandatory.sort(key=lambda i:(not is_full_day(pool[i]),sum(valid(k,[*ids,i]) for k,ids in enumerate(allocation)),
-                                 -max(_minutes(pool[i],req,d) for d in dates),i))
+                                 -max(_minutes(pool[i],req,d,durations) for d in dates),i))
     for i in mandatory:
         if is_full_day(pool[i]):
             empty = next((k for k,ids in enumerate(allocation) if not ids and valid(k,[i])),None)
@@ -268,7 +293,7 @@ def build_spatial_plan(state: dict, stops: dict[str, dict]) -> dict:
         _,k,options = min(gaps)
         place(min(options,key=lambda i:(objective([v if j != k else [*v,i] for j,v in enumerate(allocation)])+
               (4*distances[i,seeds[k]] if seeds[k] and not medoid(allocation[k]) else 0),i)),k)
-    for i in sorted(points):
+    for i in sorted(points,key=lambda i:((priorities or {}).get(i) in {"optional","avoid"},i)):
         if i not in used and (not is_full_day(pool[i]) or any(budgets[d]["minimum"] <= 1 and not allocation[k] for k,d in enumerate(dates))):
             place(i)
     def accept(proposal, affected):
@@ -332,13 +357,46 @@ def build_spatial_plan(state: dict, stops: dict[str, dict]) -> dict:
     except ValueError as error:
         issues.append(str(error))
     chosen = {i for d in plan["days"] for i in d["stop_ids"]}
-    plan["visit_minutes"] = {i:_minutes(stops[i],req,d["date"]) for d in plan["days"] for i in d["stop_ids"]}
+    plan["visit_minutes"] = {i:_minutes(stops[i],req,d["date"],durations) for d in plan["days"] for i in d["stop_ids"]}
     plan["reserve_stop_ids"] = sorted(points.keys()-chosen)
     for day in plan["days"]:
-        budgets[day["date"]]["load"] = _load(day["stop_ids"],stops,req,day["date"],budgets[day["date"]])
-    issues.extend(spatial_errors(plan,{"days":plan["days"]},stops,{**req,"excluded_stop_ids":sorted(excluded)}))
+        budgets[day["date"]]["load"] = _load(day["stop_ids"],stops,req,day["date"],budgets[day["date"]],durations)
+    issues.extend(spatial_errors(plan,{"days":plan["days"]},stops,{**req,"excluded_stop_ids":sorted(excluded)},durations))
     plan["status"] = "partial" if issues else "ready"
     plan["meal_wishes"] = plan_meal_wishes(plan["days"],{**state.get("stops",{}),**stops},req)
     issues.extend(f"{day['date']} {day['city']}："+day["adjustment"].removeprefix("空间分日：")
                   for day in plan["days"] if not day["stop_ids"] or "低于已接受不足的参考数量" in day["adjustment"])
     return plan
+
+
+def recluster_candidate(state, candidate, stops):
+    days = [day.model_dump(mode="json") for day in candidate.days]
+    selected = {identity for day in days for identity in day["stop_ids"]}
+    all_stops = {**state.get("stops",{}),**stops}
+    protected = protected_stops({**state,"stops":all_stops}) | {i for i,s in stops.items() if s.get("assigned_date")}
+    selected.update(identity for identity in protected if identity in stops and not is_dining(stops[identity]))
+    pool = {identity:stops[identity] for identity in selected if identity in stops}
+    estimates = candidate.feasibility.get("durations",{})
+    estimates = {identity:value for identity,value in estimates.items() if identity in stops and isinstance(value,int)
+                 and not isinstance(value,bool) and 10 <= value <= 720} if isinstance(estimates,dict) else {}
+    priorities = candidate.feasibility.get("priorities",{})
+    priorities = {identity:value for identity,value in priorities.items() if identity in stops and isinstance(value,str)
+                  and value in {"recommended","optional","avoid"}} if isinstance(priorities,dict) else {}
+    plan = build_spatial_plan({**state,"stops":all_stops},pool,days=days,durations=estimates,priorities=priorities)
+    assigned = {identity for day in plan["days"] for identity in day["stop_ids"]}
+    covered = {canonical_key(stops[identity]) for identity in assigned}
+    original = {identity:day["date"] for day in days for identity in day["stop_ids"]}
+    fixed = fixed_dates({**state,"stops":stops})
+    pending = []
+    for identity in sorted(selected-assigned):
+        stop = stops[identity]
+        if canonical_key(stop) in covered and not repeat_allowed(stop,{"date":original.get(identity)},"visit",state["requirements"]):
+            continue
+        choices = [day for day in days if day["city"] == stop["city"] and (identity not in fixed or day["date"] in fixed[identity])]
+        day = next((day["date"] for day in choices if day["date"] == original.get(identity)),None) or next(
+            (day["date"] for day in choices),original.get(identity))
+        if day:
+            pending.append({"id":identity,"date":day})
+    return candidate.model_copy(update={"days":[CandidateDay.model_validate(day) for day in plan["days"]],
+        "feasibility":{"durations":estimates,"priorities":priorities,"spatial_unplaced":pending,
+                       "meal_wishes":plan_meal_wishes(plan["days"],state.get("stops",stops),state["requirements"])}})

@@ -31,7 +31,7 @@ from .llm import (ModelClient, ModelImageNotSupported, ModelRuntimeError,
                   StructuredOutputError, model_failure_message, parse_json)
 from .model_registry import ModelConfigStore
 from .store import dump, now
-from .routing import coordinates
+from .routing import coordinates, distance
 from .cache import AdapterCache
 
 
@@ -114,12 +114,13 @@ class Models:
                         "review_blocker_status":"findings或checks存在blocker时，status不能为pass或pass_with_warnings；保留阻断并修正结论",
                         "review_pass_warnings":"status=pass时不能带发现或warning/unknown检查项；存在非阻断提示应为pass_with_warnings",
                         "review_missing_blocker":"未通过状态需要具体、已证实的行程阻断；若findings只有普通待核实提示，应将status改为pass_with_warnings并纠正误标的checks；不得为保留失败状态编造阻断",
-                        "review_question_missing":"status=needs_decision时必须返回一道真实取舍question，不能为null",
-                        "review_question_unexpected":"仅status=needs_decision允许question；其他状态question必须为null"}
+                        }
         issues = []
         for item in error.errors(include_url=False, include_input=False)[:5]:
             field = ".".join(str(part)[:80] for part in item["loc"]) or ("审查报告" if item["type"].startswith("review_") else "根对象")
             description = descriptions.get(item["type"], "不符合字段约束")
+            if item["type"] == "value_error":
+                description += "（"+str(item.get("msg","")).removeprefix("Value error, ")[:200]+"）"
             context = item.get("ctx") or {}
             if item["type"] in {"too_long", "too_short", "string_too_long", "string_too_short"}:
                 bound = "max_length" if item["type"].endswith("too_long") else "min_length"
@@ -144,6 +145,10 @@ class Models:
                   "不要补出不存在的来源、报价、开放时间或预订链接。返回严格 JSON，不要 Markdown。\n"
                   + instruction + "\n输出字段约束（JSON Schema，仅用于校验，不是要原样返回的内容）：" + schema_text
                   + "\n请返回这些字段对应的实际结果值，不要返回type、properties、$defs等结构定义。")
+        input_limit = {"DecisionWording":30000,"DecisionInterpretation":30000,
+                       "RouteTurn":40000,"RouteCompletion":40000,"DailyRouteCompletion":40000,
+                       "SemanticReviewReport":40000,"ReviewReport":40000}.get(schema.__name__)
+        hard_limit = 120000
         content = [{"type":"text", "text":payload_text}]
         for index, data in zip(image_indices or list(range(1,len(images or [])+1)), images or []):
             content.append({"type":"text", "text":f"以下是攻略图片 {index}，证据使用此序号。"})
@@ -151,11 +156,30 @@ class Models:
             content.append({"type":"image", "data":encoded, "mimeType":header.split(";", 1)[0].removeprefix("data:")})
         messages = [{"role":"system","content":system},{"role":"user","content":content if vision else payload_text}]
         logger = logging.getLogger("uvicorn.error")
+        def text_chars():
+            return sum(len(message["content"]) if isinstance(message["content"],str) else
+                sum(len(block.get("text","")) for block in message["content"] if block.get("type") == "text") for message in messages)
         retained_review_blockers = []
         try:
             for attempt in range(2):
-                input_chars = sum(len(message["content"]) if isinstance(message["content"],str) else
-                    sum(len(block.get("text","")) for block in message["content"] if block.get("type") == "text") for message in messages)
+                input_chars = text_chars()
+                target = input_limit or hard_limit
+                if input_chars > target:
+                    from .views import fit_payload
+                    payload = fit_payload(payload,len(payload_text)-(input_chars-target))
+                    payload_text = json.dumps(payload,ensure_ascii=False,separators=(",",":"),default=str)
+                    if vision:
+                        messages[1]["content"][0]["text"] = payload_text
+                    else:
+                        messages[1]["content"] = payload_text
+                    input_chars = text_chars()
+                if input_chars > hard_limit:
+                    logger.warning("Model input hard limit exceeded: schema=%s input_text_chars=%s limit=%s",
+                                   schema.__name__,input_chars,hard_limit)
+                    raise ToolError("model_input_limit",f"模型输入共{input_chars}字，超过{hard_limit}字硬上限")
+                if input_limit and input_chars > input_limit:
+                    logger.warning("Model input soft limit exceeded: schema=%s input_text_chars=%s limit=%s; sending required fields",
+                                   schema.__name__,input_chars,input_limit)
                 started = monotonic()
                 logger.info("Model request started: schema=%s attempt=%s model=%s timeout_seconds=%s input_text_chars=%s images=%s",
                     schema.__name__,attempt+1,getattr(config,"model","unknown"),getattr(config,"timeout_seconds",None),input_chars,len(images or []))
@@ -505,13 +529,9 @@ def normalize_resources(payload, kind: str, context: dict) -> list[dict]:
 
 
 def default_ticket_price(quote):
-    """Apply the user's missing-price rule without presenting it as a supplier quote."""
-    if quote.get("price") is not None or quote.get("options"):
-        return quote
-    reported_free = bool(quote.get("reported_free"))
-    return {**quote,"price":0,"assumed_free":not reported_free,
-            "note":("飞猪标记基础参观免费，预约及特别项目以场馆说明为准" if reported_free else
-                    "接口未返回价格，按你的默认免费规则计为0元")+("；"+quote["note"] if quote.get("note") else "")}
+    """Retain an unknown-price placeholder separately from confirmed free entry."""
+    from .rules import ticket_price_quote
+    return ticket_price_quote({},quote)
 
 
 def normalize_pois(payload, context: dict) -> list[dict]:
@@ -531,9 +551,10 @@ def normalize_pois(payload, context: dict) -> list[dict]:
             option = options[0]
             if info:
                 option["id"] += ":"+hashlib.sha256(dump(info).encode()).hexdigest()[:12]
-            option.update(kind="ticket",price=price,price_basis="starting",
+            option.update(kind="ticket",price=0 if row.get("freePoiStatus") == "FREE" else price,price_basis="starting",
                           price_date=info.get("priceDate"),ticket_name=info.get("ticketName"),
-                          reported_free=row.get("freePoiStatus") == "FREE" and price is None,
+                          reported_free=row.get("freePoiStatus") == "FREE",reported_paid=row.get("freePoiStatus") == "NOT_FREE",
+                          free_poi_status=row.get("freePoiStatus"),
                           price_note="展示参考价，票种、人数和游览日期需在飞猪核对" if price is not None else "")
             option = default_ticket_price(option)
             if option.get("note"):
@@ -542,6 +563,33 @@ def normalize_pois(payload, context: dict) -> list[dict]:
         if len(result) >= 12:
             break
     return list({option["id"]:option for option in result}.values())
+
+
+def normalize_ticket_products(payload, context):
+    def venue(value):
+        text = re.sub(r"[\s·・（）()\[\]]","",str(value or "")).replace("博物院","博物馆")
+        prefix = str(context.get("city") or "").removesuffix("市")
+        return text[len(prefix):].removeprefix("市") if prefix and text.startswith(prefix) else text
+    records = [row for row in walk_records(payload) if isinstance(row.get("pk"),str) and isinstance(row.get("title"),str)]
+    poi = next((row for row in records if row["pk"] == "poi_"+str(context.get("poi_id"))),None)
+    if not poi:
+        return []
+    names = {venue(value) for value in [poi["title"],context.get("name"),*context.get("aliases",[])] if value}
+    result = {}
+    for row in records:
+        title = row["title"]
+        matched = re.match(r"^\[([^\]]+)-(?:大门票|门票)\]",title)
+        price = amount(row.get("price"))
+        if (not row["pk"].startswith("vacation_") or not matched or venue(matched[1]) not in names or not price
+                or re.search(r"导览|讲解|手册|接送|私家|研学|套餐|一日游|多日游|儿童|学生|老人|亲子|双人|家庭|不含门票|预约服务|代预约",title)):
+            continue
+        identity = hashlib.sha256(dump([row["pk"],context.get("poi_id")]).encode()).hexdigest()[:20]
+        result[identity] = default_ticket_price({"id":identity,"kind":"ticket","name":title,"price":price,
+            "price_basis":"starting","currency":"CNY","ticket_name":title,"supplier_id":row["pk"],
+            "poi_supplier_id":context.get("poi_id"),"provider":"flyai","price_date":None,
+            "reported_paid":True,"free_poi_status":"NOT_FREE","booking_url":web_url(row.get("jumpUrl")),
+            "image_url":web_url(row.get("picUrl")),"note":"飞猪门票商品参考价；无报价日期，按商品展示起价估算，适用票种与最终结算待核对"})
+    return list(result.values())
 
 
 def resource_status(payload, options) -> str:
@@ -669,7 +717,7 @@ class FlyAI:
             return record({"options":[],"raw":{},"status":"not_configured","code":"flyai_disabled","message":"飞猪查询未启用","queried_at":now()})
         if not self.api_key:
             return record({"options":[],"raw":{},"status":"not_configured","code":"flyai_key","message":"请在页面右上角“飞猪配置”中填写 API Key","queried_at":now()})
-        commands = {"flight":"search-flight","train":"search-train","hotel":"search-hotel","poi":"search-poi"}
+        commands = {"flight":"search-flight","train":"search-train","hotel":"search-hotel","poi":"search-poi","ticket":"keyword-search"}
         if kind not in commands:
             raise ToolError("flyai_tool", "不支持的飞猪查询类型")
         cache_key = dump([trip_id,kind,context,flags])
@@ -714,8 +762,8 @@ class FlyAI:
             error_code, message = flyai_failure(dump(payload))
             record({"status":"error","code":error_code,"message":message,"diagnostic":diagnostic,"queried_at":now()})
             raise ToolError(error_code,message + "；诊断："+diagnostic[:500])
-        if kind == "poi":
-            options = normalize_pois(payload,context)
+        if kind in {"poi","ticket"}:
+            options = normalize_pois(payload,context) if kind == "poi" else normalize_ticket_products(payload,context)
             status = resource_status(payload,options)
             result = record({"raw":payload,"options":options,"status":status,"message":"" if options else "未找到景点候选，请调整城市或景点名称" if status == "empty" else "景点返回字段尚未识别，价格待确认","queried_at":now()})
             if status in {"ok","empty"}:
@@ -737,7 +785,8 @@ class FlyAI:
         def normalized(value):
             text = re.sub(r"[\s·・（）()]", "",query_name(value)).replace("博物院","博物馆").replace("野生动物世界","野生动物园")
             prefix = city.removesuffix("市")
-            return text[len(prefix):].removeprefix("市") if prefix and text.startswith(prefix) else text
+            text = text[len(prefix):].removeprefix("市") if prefix and text.startswith(prefix) else text
+            return text
         names = list(dict.fromkeys(query_name(value) for value in [name,*(aliases or [])] if query_name(value)))
         accepted = {normalized(value) for value in names}
         result = await self.search(trip_id,"poi",{"city":city,"date":day_date},{"city-name":city,"keyword":names[0]},fresh=fresh)
@@ -779,14 +828,31 @@ class FlyAI:
                         return True
                 return False
             rows = [row for row in all_rows if relaxed_match(row)]
+        if rows and coordinates(place):
+            def row_point(row):
+                return coordinates({"location":row.get("location") or f"{row.get('longitude')},{row.get('latitude')}"})
+            alias_rows = [row for row in all_rows if row_point(row) and distance(coordinates(place),row_point(row)) <= 500
+                          and not re.search(r"[-—（(]",row["name"]) and any(
+                              min(len(original),len(normalized(row["name"]))) >= 2 and
+                              (original in normalized(row["name"]) or normalized(row["name"]) in original) for original in accepted)]
+            if all(row.get("freePoiStatus") in {None,"","UNKNOWN","FREE"} for row in rows):
+                rows = list({str(row.get("id")):row for row in [*rows,*alias_rows]}.values())
+            statuses = {row.get("freePoiStatus") for row in rows if row.get("freePoiStatus") not in {None,"","UNKNOWN"}}
+            nearby = all(row_point(row) and distance(coordinates(place),row_point(row)) <= 500 for row in rows)
+            priced = any((amount(record.get("price")) or 0) > 0 for row in rows for record in walk_records(row.get("ticketInfo")))
+            if statuses == {"FREE"} and nearby and not priced:
+                rows = [min((row for row in rows if row.get("freePoiStatus") == "FREE"),
+                            key=lambda row:distance(coordinates(place),row_point(row)))]
         identities = {str(row.get("id") or normalized(row.get("name"))) for row in rows}
         if not rows or len(identities) > 1:
             return default_ticket_price({"price":None,"status":"place_confirmation" if len(identities) > 1 or result.get("options") else result.get("status") or "price_unavailable",
                     "note":result.get("message") or "票务场馆名称或展区未唯一匹配，暂不采用候选票价；行程定位继续使用高德",
                     "queried_at":result.get("queried_at"),"evidence_id":result.get("evidence_id"),"candidates":result.get("options",[])})
         options = normalize_pois({"items":rows},{"city":city,"date":day_date})
-        if len(options) > 1:
+        if (len(options) > 1 and rows[0].get("freePoiStatus") != "FREE" and
+                any(option.get("price") and not option.get("price_unknown") for option in options)):
             return {"price":None,"status":"options","options":options,"queried_at":result["queried_at"],"evidence_id":result.get("evidence_id"),
+                    "free_poi_status":rows[0].get("freePoiStatus"),"reported_paid":rows[0].get("freePoiStatus") == "NOT_FREE",
                     "note":"该景点有多个票种，按实际游玩项目选择；各票种分别列出，不合并计费"}
         row = rows[0]
         info = row.get("ticketInfo") or {}
@@ -796,11 +862,22 @@ class FlyAI:
             info = {}
         price = amount(info.get("price") if info else first(row,"ticketPrice","minPrice","price"))
         price_date = info.get("priceDate")
-        return default_ticket_price({"price":price,"status":"reference" if price is not None else "free" if row.get("freePoiStatus") == "FREE" else "price_unavailable",
-                "reported_free":row.get("freePoiStatus") == "FREE" and price is None,"price_date":price_date,"ticket_name":info.get("ticketName"),"queried_at":result["queried_at"],"evidence_id":result.get("evidence_id"),
+        if row.get("freePoiStatus") == "NOT_FREE" and price is None:
+            products = await self.search(trip_id,"ticket",{"city":city,"date":day_date,"poi_id":str(row["id"]),
+                                         "name":row["name"],"aliases":names},
+                                         {"query":city+" "+row["name"]+" 门票"},fresh=fresh)
+            if products.get("options"):
+                selected = min(products["options"],key=lambda option:option["price"])
+                return {**copy.deepcopy(selected),"status":"reference","queried_at":products["queried_at"],
+                        "evidence_id":products.get("evidence_id"),"poi_evidence_id":result.get("evidence_id"),
+                        "evidence_ids":[value for value in (result.get("evidence_id"),products.get("evidence_id")) if value]}
+        free = row.get("freePoiStatus") == "FREE"
+        return default_ticket_price({"price":0 if free else price,"status":"free" if free else "reference" if price is not None else "price_unavailable",
+                "reported_free":free,"reported_paid":row.get("freePoiStatus") == "NOT_FREE","free_poi_status":row.get("freePoiStatus"),
+                "price_date":price_date,"ticket_name":info.get("ticketName"),"queried_at":result["queried_at"],"evidence_id":result.get("evidence_id"),
                 "booking_url":web_url(row.get("jumpUrl")),"provider":"flyai","price_basis":"starting","supplier_id":row.get("id"),
                 "image_url":web_url(row.get("mainPic")),
-                "note":"" if price is None else "飞猪展示价，适用票种与人数需核对" if price_date == day_date else "报价日期未提供，仅作展示参考价" if not price_date else "报价日期与游览日期不同，仅供参考"})
+                "note":"免费；飞猪标记基础参观免费" if free else "" if price is None else "飞猪参考价，适用票种与人数需核对" if price_date == day_date else "飞猪参考价；报价日期未提供，按起价估算" if not price_date else "飞猪参考价；报价日期与游览日期不同，按起价估算"})
 
 
 class Amap:
@@ -922,6 +999,13 @@ class Amap:
             state["ready"].set()
 
     async def call(self, trip_id: str, tool: str, args: dict) -> dict:
+        hours = 24 if tool in {"maps_direction_walking","maps_direction_transit_integrated","maps_direction_driving","maps_bicycling"} else 168 if tool in {
+            "maps_text_search","maps_search_detail","maps_around_search","maps_geo","maps_regeocode"} else None
+        if hours and hasattr(self.store,"amap_result"):
+            cached = self.store.amap_result(trip_id,{"tool":tool,**args},hours)
+            if cached and not self.response_error(cached["raw"]):
+                self.cache[("evidence",trip_id,tool,json.dumps(args,sort_keys=True,default=str))] = cached["id"]
+                return copy.deepcopy(cached["raw"])
         if not self.api_key:
             raise ToolError("amap_config", "请在页面右上角“高德配置”中填写 Key，地点与移动耗时待确认")
         state = self.batch_state.get()
@@ -1229,7 +1313,36 @@ class Amap:
         self.cache[key] = copy.deepcopy(chosen)
         return copy.deepcopy(chosen)
 
-    async def route(self, trip_id: str, city: str, origin: dict, destination: dict, mode: str) -> dict:
+    async def transit_entry(self, trip_id, city, place):
+        key = ("transit_entry",trip_id,city,place.get("id") or place["location"])
+        if key in self.cache:
+            return copy.deepcopy(self.cache[key])
+        name = place["name"]
+        if not re.search(r"公园|园区|科学中心|动物|乐园|景区|植物园",name):
+            return None
+        def related(value):
+            def normalized(text):
+                return re.sub(r"国家|公园|[\s·（）()\-]","",str(text or "").removeprefix(city.removesuffix("市")).removeprefix("市"))
+            core = normalized(name)
+            return len(core) >= 4 and core in normalized(value)
+        payload = await self.call(trip_id,"maps_text_search",{"keywords":name+" 出入口","city":city,"citylimit":True})
+        candidates = {row["id"]:row for row in walk_records(payload) if row.get("id") and
+                      related(row.get("name")) and
+                      re.search(r"(?:出入口|入口|[东南西北正]门)(?:[（(].*?[）)])?$",str(row.get("name") or "")) and
+                      not re.search(r"停车|办公|地铁|公交|暂停|关闭|不开放|施工|仅出口",str(row.get("name") or ""))}
+        ranked = sorted(candidates.values(),key=lambda row:(
+            distance(coordinates(place),coordinates(row)) if coordinates(row) else float("inf"),row["id"]))
+        entry = None
+        if ranked:
+            candidate = ranked[0]
+            detail = await self.call(trip_id,"maps_search_detail",{"id":candidate["id"]})
+            resolved = next((row for row in walk_records(detail) if row.get("id") == candidate["id"] and coordinates(row)),None)
+            if resolved and related(resolved.get("name")) and distance(coordinates(place),coordinates(resolved)) <= 3500:
+                entry = {**resolved,"evidence_id":f"query:{self.cache.get(('evidence',trip_id,'maps_search_detail',json.dumps({'id':candidate['id']},sort_keys=True,default=str)))}"}
+        self.cache[key] = copy.deepcopy(entry)
+        return entry
+
+    async def route(self, trip_id: str, city: str, origin: dict, destination: dict, mode: str, *, entry_retry=True) -> dict:
         tools = {"walking":"maps_direction_walking", "transit":"maps_direction_transit_integrated", "driving":"maps_direction_driving","bicycling":"maps_bicycling"}
         if mode not in tools:
             raise ToolError("amap_mode", "不支持的市内交通方式")
@@ -1241,7 +1354,8 @@ class Amap:
         def current_endpoints(result):
             return {**copy.deepcopy(result),"origin":origin["name"],"destination":destination["name"],
                     "origin_place":copy.deepcopy(origin),"destination_place":copy.deepcopy(destination),
-                    "navigation_url":navigation_link(origin,destination,mode)}
+                    "navigation_url":navigation_link(result.get("routing_origin_place") or origin,
+                                                      result.get("routing_destination_place") or destination,mode)}
         if cached and time.monotonic() - cached[0] < 1800:
             return current_endpoints(cached[1])
         if key in batch_routes:
@@ -1258,6 +1372,9 @@ class Amap:
             lines = bus.get("buslines") if isinstance(bus,dict) else None
             return [line for line in lines if isinstance(line,dict) and
                     any(isinstance(line.get(field),str) and line[field].strip() for field in ("id","name"))] if isinstance(lines,list) else []
+        def railway_leg(segment):
+            railway = segment.get("railway") if isinstance(segment,dict) else None
+            return railway if isinstance(railway,dict) and has_route_leg(railway) else None
         valid = []
         for row in alternatives if isinstance(alternatives,list) else []:
             if not isinstance(row,dict):
@@ -1266,10 +1383,10 @@ class Amap:
             if seconds is None and isinstance(row.get("cost"),dict):
                 seconds = amount(row["cost"].get("duration"))
             segments = row.get("segments",[]) if isinstance(row.get("segments"),list) else []
-            if mode == "transit" and any(has_route_leg(segment.get("taxi")) or has_route_leg(segment.get("railway"))
+            if mode == "transit" and any(has_route_leg(segment.get("taxi"))
                                          for segment in segments if isinstance(segment,dict)):
                 continue
-            if mode == "transit" and not any(bus_lines(segment) for segment in segments):
+            if mode == "transit" and not any(bus_lines(segment) or railway_leg(segment) for segment in segments):
                 continue
             if seconds is not None and seconds > 0:
                 valid.append((seconds,row))
@@ -1283,6 +1400,11 @@ class Amap:
                 lines.append(line["name"])
                 description = str(line.get("type") or "")+line["name"]
                 transit_modes.append("地铁" if re.search(r"地铁|轨道|subway|metro",description,re.I) else "轮渡" if re.search(r"轮渡|渡轮",description) else "公交")
+            railway = railway_leg(segment)
+            if railway:
+                lines.append(next((railway[field].strip() for field in ("name","trip")
+                                   if isinstance(railway.get(field),str) and railway[field].strip()),"城际/铁路"))
+                transit_modes.append("城际/铁路")
         transport_label = " + ".join(dict.fromkeys(transit_modes)) or "公共交通"
         if mode == "transit" and (amount(path.get("walking_distance")) or 0) > 0:
             transport_label += " + 步行接驳"
@@ -1302,6 +1424,25 @@ class Amap:
                               "地图服务未返回该交通方式的路线")
         result.update(origin_place=copy.deepcopy(origin),destination_place=copy.deepcopy(destination),
                       navigation_url=navigation_link(origin,destination,mode))
+        meters = distance(coordinates(origin),coordinates(destination))
+        estimate = math.ceil(meters*1.25/300)+12
+        if (mode == "transit" and entry_retry and seconds is not None and
+                transit_modes and set(transit_modes) == {"公交"} and result["minutes"] >= max(60,estimate*2)):
+            try:
+                entry = await self.transit_entry(trip_id,city,destination)
+                origin_entry = None if entry else await self.transit_entry(trip_id,city,origin)
+                if entry or origin_entry:
+                    alternate = await self.route(trip_id,city,origin_entry or origin,entry or destination,mode,entry_retry=False)
+                    if alternate.get("minutes") is not None and alternate["minutes"] < result["minutes"]:
+                        result = {**alternate,"original_evidence_id":result["evidence_id"],
+                                  "routing_origin_place":copy.deepcopy(origin_entry or origin),
+                                  "routing_destination_place":copy.deepcopy(entry or destination),
+                                  "origin":origin["name"],"destination":destination["name"],
+                                  "origin_place":copy.deepcopy(origin),"destination_place":copy.deepcopy(destination),
+                                  "note":"按"+(entry or origin_entry)["name"]+"计算公共交通，入口位置以现场开放为准"}
+                        result["summary"] += "；"+result["note"]
+            except ToolError:
+                pass
         if result["minutes"] is not None:
             self.cache[key] = (time.monotonic(),copy.deepcopy(result))
         # A confirmed empty response stays unknown; a new planning batch may retry it.

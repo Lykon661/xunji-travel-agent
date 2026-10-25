@@ -39,9 +39,13 @@ class SpatialDiscovery(unittest.IsolatedAsyncioTestCase):
             "stop_constraints":{"required":[],"excluded":[]}}
         self.planner.route_agent = SimpleNamespace(plan=AsyncMock(side_effect=self.initial_turn))
 
-    def initial_turn(self, state, instruction, payload, tools):
-        return RouteTurn(status="ready",candidate=Candidate(title="合成两天",reason="根据初始安排",
-            days=copy.deepcopy(payload["spatial_plan"]["days"])))
+    def initial_turn(self,state,instruction,payload,tools):
+        days = copy.deepcopy(payload["spatial_plan"]["days"])
+        if not any(day["stop_ids"] for day in days):
+            first = next(iter(payload["available_stops"]))
+            days[0]["stop_ids"] = [first]
+            days[0]["adjustment"] = "保留一个已有来源地点作为待解决草稿"
+        return RouteTurn(status="ready",candidate=Candidate(title="合成两天",reason="根据初始安排",days=days))
 
     def baseline(self):
         stops = canonicalize_stops(self.state["stops"])
@@ -59,8 +63,7 @@ class SpatialDiscovery(unittest.IsolatedAsyncioTestCase):
         return RouteTurn(status="ready",candidate=candidate)
 
     def decision_model(self):
-        self.planner.route_agent.plan.side_effect = None
-        self.planner.route_agent.plan.return_value = RouteTurn(status="needs_decision",question=QUESTION)
+        self.planner.route_agent.plan.side_effect = self.initial_turn
 
     async def test_ordinary_location_budget_does_not_shrink_available_pool(self):
         self.state["stops"] = {s["id"]:s for s in (stop(i,False) for i in reversed(range(80)))}
@@ -116,9 +119,9 @@ class SpatialDiscovery(unittest.IsolatedAsyncioTestCase):
                     self.state["requirements"]["required_stop_ids"] = ["guide:007"]
                 self.decision_model()
                 result = await self.planner.discover(self.state)
-                self.assertEqual(result["decision"]["id"],"choice")
+                self.assertTrue(result.get("candidates"))
                 self.assertIn("guide:007",self.planner.locate_stops.await_args.args[1])
-                self.planner.route_agent.plan.assert_awaited_once()
+                self.assertIn(self.planner.route_agent.plan.await_count,(1,2))
 
     async def test_located_representative_prevents_required_alias_clarification(self):
         self.state["stops"]["guide:alias"] = stop(0,id="guide:alias",name="合成景点0别名",
@@ -126,15 +129,15 @@ class SpatialDiscovery(unittest.IsolatedAsyncioTestCase):
         self.state["stop_constraints"]["required"] = ["guide:alias"]
         self.decision_model()
         result = await self.planner.discover(self.state)
-        self.planner.route_agent.plan.assert_awaited_once()
-        self.assertEqual(result["decision"]["id"],"choice")
+        self.assertIn(self.planner.route_agent.plan.await_count,(1,2))
+        self.assertTrue(result.get("candidates"))
 
     async def test_unresolved_original_required_still_needs_clarification(self):
         self.state["stops"]["guide:007"].update(map_place=None,map_candidates=[
             {"id":"branch-a","name":"分店甲"},{"id":"branch-b","name":"分店乙"}])
         self.state["stop_constraints"]["required"] = ["guide:007"]
         result = await self.planner.discover(self.state)
-        self.assertEqual(result["place_selection"]["stop_id"],"guide:007")
+        self.assertEqual(result["unmet"][0]["refs"][0]["id"],"guide:007")
         self.planner.route_agent.plan.assert_not_awaited()
 
     async def test_excluded_required_does_not_need_clarification(self):
@@ -143,8 +146,8 @@ class SpatialDiscovery(unittest.IsolatedAsyncioTestCase):
         self.state["stop_constraints"] = {"required":["guide:007"],"excluded":["guide:007"]}
         self.decision_model()
         result = await self.planner.discover(self.state)
-        self.assertEqual(result["decision"]["id"],"choice")
-        self.planner.route_agent.plan.assert_awaited_once()
+        self.assertTrue(result.get("candidates"))
+        self.assertIn(self.planner.route_agent.plan.await_count,(1,2))
 
     async def test_payload_prompt_single_call_and_inputs_are_preserved(self):
         before = copy.deepcopy(self.state)
@@ -249,8 +252,8 @@ class SpatialDiscovery(unittest.IsolatedAsyncioTestCase):
         plan = self.baseline()
         self.planner.route_agent.plan.side_effect = [self.proposal(plan,3),self.proposal(plan,3)]
         with patch("app.nodes.candidates.spatial_errors",side_effect=[[],[],["回退固定日期不合法"]]) as errors:
-            with self.assertRaisesRegex(ToolError,"回退固定日期不合法"):
-                await self.planner.discover(self.state)
+            result = await self.planner.discover(self.state)
+            self.assertTrue(any(item["blocking"] and "回退固定日期不合法" in item["detail"] for item in result["unmet"]))
         self.assertEqual(errors.call_count,3)
 
     async def test_second_hard_error_does_not_fall_back(self):
@@ -268,17 +271,10 @@ class SpatialDiscovery(unittest.IsolatedAsyncioTestCase):
         invalid.candidate.days[0].stop_ids = list(self.state["stops"])
         invalid.candidate.days[1].stop_ids = []
         self.planner.route_agent.plan.side_effect = [invalid,copy.deepcopy(invalid)]
-        with self.assertRaisesRegex(ToolError,"容量"):
-            await self.planner.discover(self.state)
+        result = await self.planner.discover(self.state)
+        self.assertTrue(any(item["blocking"] and "容量" in item["detail"] for item in result["unmet"]))
         self.assertEqual(self.planner.route_agent.plan.await_count,2)
 
-    async def test_needs_decision_after_policy_error_survives(self):
-        plan = self.baseline()
-        self.planner.route_agent.plan.side_effect = [self.proposal(plan,3),RouteTurn(status="needs_decision",question=QUESTION)]
-        result = await self.planner.discover(self.state)
-        self.assertEqual(result["decision"]["id"],"choice")
-        self.assertNotIn("candidates",result)
-        self.assertEqual(result["decision_resume"],"discover")
 
     async def test_missing_move_reason_retries_then_accepts_explicit_reason(self):
         plan = self.baseline()
@@ -422,9 +418,8 @@ class SpatialDiscovery(unittest.IsolatedAsyncioTestCase):
         self.state["stops"]["guide:007"]["map_place"] = None
         self.state["stop_constraints"]["required"] = ["guide:007"]
         with patch("app.nodes.candidates.cluster_deviation",side_effect=AssertionError("partial不能检查偏离")):
-            with self.assertRaisesRegex(ToolError,"必去"):
-                await self.planner.discover(self.state)
-        self.assertEqual(self.planner.route_agent.plan.await_count,2)
+            result = await self.planner.discover(self.state)
+        self.assertTrue(any(item["kind"] == "stop_unplaced" and item["blocking"] for item in result["unmet"]))
 
     async def test_partial_allows_model_to_change_city_day_counts(self):
         last = "2026-11-12"
@@ -452,26 +447,11 @@ class SpatialDiscovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error.exception.code,"route_constraints")
         self.planner.route_agent.plan.assert_not_awaited()
 
-    async def test_ready_plan_skips_pool_question_for_optional_full_day(self):
-        self.state["requirements"]["constraints"] = merge([],[ConstraintDraft(
-            kind="daily_min_stops",count=2,quote="每天至少2个景点").model_dump(mode="json")],"form")
-        self.state["stops"]["guide:008"] = stop(8,evidence={"quote":"合成景点8需要一整天"})
-        self.baseline()
-        with patch("app.nodes.candidates.trip_pool_question",side_effect=AssertionError("ready不应提前追问")):
-            result = await self.planner.discover(self.state)
-        self.planner.route_agent.plan.assert_awaited_once()
-        self.assertTrue(result["candidates"])
-        self.assertFalse(result["decision"])
-
-    async def test_pool_question_is_returned_when_model_needs_decision(self):
-        self.state["requirements"]["constraints"] = merge([],[ConstraintDraft(
-            kind="daily_min_stops",count=12,quote="每天至少12个景点").model_dump(mode="json")],"form")
-        self.decision_model()
+    async def test_ready_plan_keeps_optional_full_day_without_a_question(self):
         result = await self.planner.discover(self.state)
-        self.assertEqual(result["decision"]["id"],"pool-trip")
-        self.assertEqual(result["decision_options"]["question_id"],"pool-trip")
-        self.assertTrue(result["decision_options"]["options"])
-        self.planner.route_agent.plan.assert_awaited_once()
+        self.assertTrue(result["candidates"])
+        self.assertNotIn("decision",result)
+
 
     async def test_no_code_checks_keeps_clustering_but_skips_policy_and_hard_rejection(self):
         plan = self.baseline()

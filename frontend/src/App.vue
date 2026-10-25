@@ -7,6 +7,7 @@ import CrawlerSettings from './CrawlerSettings.vue'
 import AmapSettings from './AmapSettings.vue'
 import FlyaiSettings from './FlyaiSettings.vue'
 import InterviewPanel from './InterviewPanel.vue'
+import CoordinatorMessages from './CoordinatorMessages.vue'
 import ProductPanel from './ProductPanel.vue'
 import LoadingState from './LoadingState.vue'
 import MapPanel from './MapPanel.vue'
@@ -103,7 +104,7 @@ const isHistory = computed(() => selectedVersion.value > 0)
 const canEdit = computed(() => !!current.value && !isRunning.value && !isHistory.value)
 const itinerary = computed(() => doc.value?.itinerary)
 const visibleCandidates = computed(() => {
-  if (!isHistory.value && (isRunning.value || ['interview','interview_confirmation','decision'].includes(doc.value?.pending?.kind || ''))) return []
+  if (!isHistory.value && (isRunning.value || ['interview','interview_confirmation','decision','decision_confirmation'].includes(doc.value?.pending?.kind || ''))) return []
   const candidates = (doc.value?.candidates || []).filter(candidate => isHistory.value ||
     !!candidate.draft?.days?.length && reviewReady(candidate) && !candidate.confirmation_blockers?.length)
   const selected = candidates.find(candidate => candidate.id === doc.value?.selected_route?.id)
@@ -114,7 +115,7 @@ const blockedCandidate = computed(() => {
   return (doc.value?.candidates || []).find(candidate => candidate.draft?.days?.length &&
     (!!candidate.confirmation_blockers?.length || !reviewReady(candidate))) || null
 })
-const planningDecision = computed(() => doc.value?.pending?.kind === 'decision' ? doc.value.pending : null)
+const planningDecision = computed(() => ['decision','decision_confirmation'].includes(doc.value?.pending?.kind || '') ? doc.value?.pending || null : null)
 const selectedActivities = computed(() => (doc.value?.candidates[0]?.draft?.days || []).flatMap(day => day.activities
   .filter(activity => activity.kind === 'visit' && selectedActivityIds.value.includes(activity.id))
   .map(activity => ({id:activity.id,name:activity.name,date:day.date}))))
@@ -132,6 +133,7 @@ const canSaveItinerary = computed(() => canEdit.value && !!itinerary.value && sa
 const itineraryStatus = computed(() => isHistory.value ? `已保存 · v${selectedVersion.value}` : savedItineraryVersion.value !== null ? `已保存 · v${savedItineraryVersion.value}` : '未保存的草稿')
 const visibleSources = computed(() => isHistory.value ? doc.value?.sources_snapshot || current.value?.sources || [] : current.value?.sources || [])
 const sourceStops = computed(() => new Map([...visibleSources.value.flatMap(s => s.extraction?.stops || []),...(doc.value?.supplements || [])].map(s => [s.id,s])))
+const stopNameMap = computed(() => Object.fromEntries([...sourceStops.value.entries()].map(([id, stop]) => [id, stop.name])))
 const activeConstraints = computed(() => (requirements.constraints || []).filter(item => !item.superseded_by && !item.revoke))
 const preferencesEdited = computed(() => requirements.preferences !== (doc.value?.requirements.preferences ?? ''))
 const constraintsEdited = computed(() => JSON.stringify(requirements.constraints || []) !== JSON.stringify(doc.value?.requirements.constraints || []))
@@ -160,7 +162,7 @@ function constraintText(item: PlanningConstraint) {
   return (item.scope.dates.length ? item.scope.dates.join('、')+'：' : '')+body+(soft ? '（尽量）' : '')
 }
 const sourceMap = computed(() => new Map(visibleSources.value.map(s => [s.id,s])))
-const interviewPending = computed(() => ['interview','interview_confirmation','decision'].includes(doc.value?.pending?.kind || '') ? doc.value?.pending : null)
+const interviewPending = computed(() => ['interview','interview_confirmation','decision','decision_confirmation'].includes(doc.value?.pending?.kind || '') ? doc.value?.pending : null)
 const tripDayCount = computed(() => {
   if (!requirements.start_date || !requirements.end_date) return 0
   return Math.max(0, Math.round((Date.parse(requirements.end_date) - Date.parse(requirements.start_date)) / 86400000) + 1)
@@ -187,7 +189,7 @@ const planningStep = computed(() => {
   if (busy.value && actionLabel.value) return actionLabel.value
   if (current.value?.run?.status === 'running') return document.progress_message || labels[document.progress_stage || document.stage] || '正在规划旅行'
   if (['failed','recoverable'].includes(document.stage)) return `${labels[document.progress_stage || ''] || '规划旅行'}（已中断）`
-  const pending: Record<string,string> = {requirements:'补充旅行需求',guides:'选择参考攻略',sources:'补充参考攻略',interview:'回答旅行偏好',interview_confirmation:'确认旅行需求',selection:'确认完整路线',decision:'回答当前路线问题'}
+  const pending: Record<string,string> = {requirements:'补充旅行需求',guides:'选择参考攻略',sources:'补充参考攻略',interview:'回答旅行偏好',interview_confirmation:'确认旅行需求',selection:'确认完整路线',decision:'回答当前路线问题',decision_confirmation:'确认主理人理解'}
   return pending[document.pending?.kind || ''] || labels[document.stage] || '查看当前行程'
 })
 const workflowStep = computed(() => current.value ? resolveWorkflowTab(current.value) : 'requirements')
@@ -298,7 +300,7 @@ function syncWorkflow(data: Trip, force = false) {
   if (data.run?.status === 'failed') error.value = data.run.document.message || '任务中断，请查看错误或继续本次任务'
   moveToStep(target);navigationStamp = stamp
 }
-function productBusy(active: boolean) {busy.value = active;actionLabel.value = active ? '正在查询或保存飞猪资源' : ''}
+function productBusy(active: boolean, label = '正在查询或保存飞猪资源') {busy.value = active;actionLabel.value = active ? label : ''}
 function productChanged() {void refreshCurrent().catch(cause => {error.value = String(cause)})}
 function amapConfigSaved() {amapConfigRevision.value++;void refreshCapabilities()}
 async function loadList() {trips.value = await api<TripSummary[]>('/trips')}
@@ -770,7 +772,7 @@ onUnmounted(() => {events?.close();window.clearInterval(runPoll);window.removeEv
           <span class="banner-actions">
             <button v-if="current.document.pending.kind === 'requirements'" class="primary small" @click="navigateToStep('requirements')">填写信息</button>
             <button v-if="current.document.pending.kind === 'guides'" class="primary small" @click="navigateToStep('guides')">选择参考攻略</button>
-            <button v-if="interviewPending" class="primary small" @click="navigateToStep('interview')">{{ interviewPending.kind === 'interview' ? '回答本轮问题' : '确认需求总结' }}</button>
+            <button v-if="interviewPending" class="primary small" @click="navigateToStep('interview')">{{ planningDecision ? '处理路线取舍' : interviewPending.kind === 'interview' ? '回答本轮问题' : '确认需求总结' }}</button>
             <button v-if="current.document.pending.kind === 'sources'" class="primary small" :disabled="!canEdit" @click="importSource">导入攻略</button>
           </span>
         </div>
@@ -1007,11 +1009,11 @@ onUnmounted(() => {events?.close();window.clearInterval(runPoll);window.removeEv
             <!-- 需求追问 -->
             <section v-if="tab === 'interview'" class="panel-body">
               <div class="section-intro">
-                <h2>先把想要的旅行聊清楚</h2>
-                <p>每次只问一个问题。提交这一题后，再根据你的回答决定下一问；推荐选项可以改成自己的答案。</p>
+                <h2>{{ planningDecision ? '处理当前路线取舍' : '先把想要的旅行聊清楚' }}</h2>
+                <p>{{ planningDecision ? '主理人已为你算好可执行方案并预选推荐项；可直接按推荐继续，也可改选其他方案或填写文字说明。' : '每次只问一个问题。提交这一题后，再根据你的回答决定下一问；推荐选项可以改成自己的答案。' }}</p>
               </div>
               <p v-if="candidateInputsChanged && !isHistory" class="pending-note">攻略或基本需求已变化，请回到参考攻略重新协作规划。</p>
-              <InterviewPanel v-if="interviewPending" :key="current.id" :pending="interviewPending" :disabled="!canEdit || candidateInputsChanged" @answer="answerInterview" />
+              <InterviewPanel v-if="interviewPending" :key="current.id" :pending="interviewPending" :stop-names="stopNameMap" :disabled="!canEdit || candidateInputsChanged" @answer="answerInterview" />
               <LoadingState v-else-if="isRunning" title="正在整理需求与查证行程" detail="偏好问题和路线冲突都在这里回答，问题解决后会显示完整候选路线。" />
               <div v-else-if="doc?.interview?.summary" class="interview-summary">
                 <h3>{{ doc.interview.confirmed ? '已确认的旅行需求' : '目前的需求总结' }}</h3>
@@ -1067,6 +1069,12 @@ onUnmounted(() => {events?.close();window.clearInterval(runPoll);window.removeEv
                 <p v-for="reason in blockedCandidate.confirmation_blockers || []" :key="reason">{{ reason }}</p>
                 <details>
                   <summary>查看未通过的草稿</summary>
+                  <CoordinatorMessages
+                    :messages="blockedCandidate.coordinator_messages?.length ? blockedCandidate.coordinator_messages : doc?.coordinator_messages"
+                    :disabled="!canEdit || candidateInputsChanged"
+                    :historical="isHistory"
+                    @reopen="reopenDecision"
+                  />
                   <PlanView
                     v-if="blockedCandidate.draft"
                     :itinerary="blockedCandidate.draft"
@@ -1102,6 +1110,13 @@ onUnmounted(() => {events?.close();window.clearInterval(runPoll);window.removeEv
                   <p class="candidate-reason">{{ candidate.reason }}</p>
                 </header>
                 <ReviewPanel :review="candidate.review" :historical="isHistory" />
+                <CoordinatorMessages
+                  v-if="!showRouteChat"
+                  :messages="candidate.coordinator_messages?.length ? candidate.coordinator_messages : doc?.coordinator_messages"
+                  :disabled="!canEdit || candidateInputsChanged"
+                  :historical="isHistory"
+                  @reopen="reopenDecision"
+                />
                 <section v-if="candidate.feasibility?.budget" class="candidate-feasibility">
                   <div class="fact-row">
                     <div><small>已知费用</small><strong>{{ money(candidate.feasibility.budget.known_subtotal) }}</strong></div>
@@ -1157,7 +1172,6 @@ onUnmounted(() => {events?.close();window.clearInterval(runPoll);window.removeEv
                     </div>
                   </div>
                 </div>
-                <p v-for="gap in candidate.gaps" :key="gap" class="pending-note">{{ gap }}</p>
                 <div v-if="candidate.confirmation_blockers?.length || !reviewReady(candidate)" class="issues-panel">
                   <h3>处理以下问题后才能确认</h3>
                   <p v-for="reason in candidate.confirmation_blockers || []" :key="reason">{{ reason }}</p>
@@ -1288,6 +1302,12 @@ onUnmounted(() => {events?.close();window.clearInterval(runPoll);window.removeEv
                   住宿选择与备选位于“酒店与门票”。<button class="text-button" @click="moveToStep('resources')">查看行程住宿</button>
                 </p>
                 <ReviewPanel :review="doc?.review" :historical="isHistory" />
+                <CoordinatorMessages
+                  :messages="doc?.coordinator_messages?.length ? doc.coordinator_messages : doc?.selected_route?.coordinator_messages"
+                  :disabled="!canEdit || candidateInputsChanged"
+                  :historical="isHistory"
+                  @reopen="reopenDecision"
+                />
                 <PlanView
                   :itinerary="itinerary"
                   :interactive="!isHistory"
@@ -1320,6 +1340,8 @@ onUnmounted(() => {events?.close();window.clearInterval(runPoll);window.removeEv
               :key="current.id"
               :days="doc.candidates[0].days"
               :messages="doc.route_chat || []"
+              :coordinator-messages="doc.coordinator_messages?.length ? doc.coordinator_messages : doc.candidates[0].coordinator_messages"
+              @reopen="reopenDecision"
               :selected-activities="selectedActivities"
               :disabled="!canEdit || candidateInputsChanged"
               @revise="reviseFromChat"

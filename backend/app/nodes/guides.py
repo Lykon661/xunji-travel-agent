@@ -1,59 +1,53 @@
 """需求协调、攻略解析、攻略 Agent 分析与访谈节点。"""
+import copy
 import re
 from pathlib import Path
 from uuid import uuid4
 
 from ..adapters import ToolError, image_data, remote_image
 from ..config import settings
-from ..models import WISH_PREFIX, Candidate, ChangeRequest, InterviewRound, Requirements, RequirementUpdate, wish_stop_id, wish_stops
+from ..models import WISH_PREFIX, Candidate, ChangeRequest, Requirements, RequirementUpdate, wish_stop_id, wish_stops
 from ..rules import validate_candidate
 from ..store import Conflict, dump
 from ..routing import coordinates
 from ..agents.runtime import digest
-from ..decisions import apply_walking_decision, walking_question
-from ..conflicts import trip_pool_question
+from ..decisions import apply_walking_decision
+from ..models import UnmetItem
 from ..constraints import CONSTRAINT_GUIDE, check, merge, preferences_basis, refresh_form_constraints, stop_catalog, trip_dates
 from ..dining import is_dining, dining_wishes
 from ..workflow.state import TripState
+from ..authority import user_texts
+from ..planning_repairs import change_dependencies
 
 
 class GuideNodes:
     async def guide_analysis(self,state):
-        # The daily stop count is settled by code once, before any agent can raise its own version of the question.
-        coded = trip_pool_question(state,lambda:self.store.sources(state["trip_id"]))
-        if coded:
-            return {"decision":coded[0],"decision_options":{"question_id":coded[0]["id"],"options":coded[1]},"decision_resume":"guide_analysis"}
         self.emit(state,"parsing","攻略 Agent 正在整理景点与建议分组")
         result = await self.guide_agent.brief(state)
         prior = state.get("stop_constraints",{})
-        required = set(prior.get("required",[])) | (set(result.required_ids)-set(prior.get("excluded",[]))) | set(state["requirements"].get("required_stop_ids",[]))
+        texts = user_texts(state)
+        def grounded(identity):
+            stop = state.get("stops",{}).get(identity,{})
+            names = [stop.get("name", ""), *stop.get("alias_names", [])]
+            return any(name and name in text for name in names for text in texts)
+        user_required = {identity for identity in result.required_ids if grounded(identity)}
+        user_excluded = {identity for identity in result.excluded_ids if grounded(identity)}
+        required = set(prior.get("required",[])) | (user_required-set(prior.get("excluded",[]))) | set(state["requirements"].get("required_stop_ids",[]))
         required = {identity for identity in required if identity not in state["stops"] or not is_dining(state["stops"][identity])}
-        excluded = set(prior.get("excluded",[])) | (set(result.excluded_ids)-required) | set(state["requirements"].get("excluded_stop_ids",[]))
+        excluded = set(prior.get("excluded",[])) | (user_excluded-required) | set(state["requirements"].get("excluded_stop_ids",[]))
         excluded -= required
         excluded -= dining_wishes(state["stops"],state["requirements"]).keys()
         if not (required | excluded) <= set(state["stops"]):
             raise Conflict("必去或排除标记的攻略依据已变化，请在旅行需求中移除失效标记并重新规划")
         req = {**state["requirements"],"required_stop_ids":sorted(required),"excluded_stop_ids":sorted(excluded)}
-        decision = result.question.model_dump(mode="json") if result.question else {}
-        answered = state.get("decision_history",[])[-1:]
-        previous_question = (state.get("guide_brief") or {}).get("question") or {}
-        repeated = decision and previous_question.get("question") == decision["question"] and any(
-            (any(item.get("answers",{}).values()) or item.get("note")) and any(
-                old.get("question") == decision["question"] and set(old.get("affected_dates",[])) == set(decision.get("affected_dates",[]))
-                for old in item.get("questions",[])) for item in answered)
-        if repeated and not state.get("decision_reopened"):
-            # The accepted answer is already in requirements/history; do not ask the same choice again.
-            decision = {}
-            result.status, result.question = "ready", None
-            result.summary = "已沿用你对该问题的明确回答，继续按最新需求规划；可查事实由后续工具核实。"
-        options = {}
-        if decision:
-            coded = trip_pool_question({**state,"requirements":req,"stop_constraints":{"required":sorted(required),"excluded":sorted(excluded)}},lambda:self.store.sources(state["trip_id"]))
-            if coded:
-                decision,options = coded[0],{"question_id":coded[0]["id"],"options":coded[1]}
+        sources = {key:dict(value) for key,value in state.get("stop_constraint_sources",{}).items()}
+        for kind, identities in (("required", (user_required & required)-set(prior.get("required",[]))-set(state["requirements"].get("required_stop_ids",[]))),
+                                 ("excluded", (user_excluded & excluded)-set(prior.get("excluded",[]))-set(state["requirements"].get("excluded_stop_ids",[])))):
+            sources.setdefault(kind,{}).update({identity:"message" for identity in identities})
         return {"requirements":req,"guide_brief":result.model_dump(mode="json"),"stop_constraints":{"required":sorted(required),"excluded":sorted(excluded)},
+                "guide_suggestions":{"required":list(result.required_ids),"excluded":list(result.excluded_ids)},"stop_constraint_sources":sources,
                 "interview":{"summary":result.summary,"questions":[],"history":state.get("decision_history",[]),"confirmed":False},
-                "decision":decision,"decision_options":options,"decision_resume":"guide_analysis"}
+                "unmet":[item.model_dump(mode="json") for item in result.unmet],"coordinator_resume":"discover"}
 
     async def agent_tool(self,state,request):
         if request.tool == "guide_feedback":
@@ -165,11 +159,6 @@ class GuideNodes:
             self.emit(state,"coordinating","正在理解旅行需求")
         req, change = state["requirements"],state.get("change",{})
         history = state.get("decision_history",[])
-        if history:
-            last = history[-1]
-            question = (last.get("questions") or [{}])[0]
-            if walking_question(question):
-                req,_ = apply_walking_decision(req,question," ".join(last.get("answers",{}).values())+" "+last.get("note",""))
         # Stops are only needed to resolve constraint targets: a new message or edited preferences text.
         reextract = preferences_basis(req.get("preferences","")) != req.get("constraints_basis","")
         available = self.source_stops(state["trip_id"], state.get("selected_source_ids", []), req) if reextract or state.get("message") and not change else {}
@@ -256,9 +245,32 @@ class GuideNodes:
         for identity,stop in wish_stops(req).items():
             previous = state.get("stops",{}).get(identity,{})
             stops[identity] = {**{key:value for key,value in previous.items() if key not in {"assigned_date","duration_minutes","duration_is_default"}},**stop}
-        return {"requirements":req,"stops":stops,"change":change,"message":"","decision_history":history,"stop_constraints":{"required":req.get("required_stop_ids",[]),"excluded":req.get("excluded_stop_ids",[])}}
+        result = {"requirements":req,"stops":stops,"change":change,"message":"","decision_history":history,
+                "user_inputs":user_texts(state),"preferences_original":state.get("preferences_original",state["requirements"].get("preferences","")),
+                "stop_constraints":{"required":req.get("required_stop_ids",[]),"excluded":req.get("excluded_stop_ids",[])}}
+        if state["mode"] == "modify" and state.get("old_itinerary",{}).get("days"):
+            prior = {**state,"requirements":state.get("old_requirements") or state["requirements"],"itinerary":state["old_itinerary"]}
+            scope = change.get("dates",[])
+            fields = {key for key in req if req.get(key) != prior["requirements"].get(key)} - {"constraints_basis"}
+            if not scope and not fields:
+                scope = [day["date"] for day in state["old_itinerary"]["days"]
+                         if not change.get("cities") or day["city"] in change["cities"]]
+            dependency = change_dependencies(prior,{**state,**result},dates=scope)
+            structural = state.get("source_selection_changed") or dependency["full"] or not fields and "full" in change.get("scopes",[])
+            if not structural:
+                resource_scopes = dependency["resource_scopes"]
+                if change.get("resource_choice") or change.get("refresh_resources"):
+                    resource_scopes = list(dict.fromkeys([*resource_scopes,*[item for item in change.get("scopes",[]) if item in {"hotel","transport"}]]))
+                dependency["resource_scopes"] = resource_scopes
+                result.update(change={**change,"scopes":[*resource_scopes,"activity"],"dates":dependency["replan_dates"]},
+                              repair_only=True,assessment_dates=dependency["replan_dates"],review_change=dependency)
+            else:
+                result.update(review_previous=None,review_change=None)
+        return result
 
     def after_coordinate(self,state):
+        if state.get("assumption_change"):
+            return "assumption"
         if Requirements.model_validate(state["requirements"]).missing():
             return "requirements"
         if state["mode"] == "modify" and "full" not in state.get("change",{}).get("scopes",[]) and state.get("selected_route") and state.get("selected_source_ids"):
@@ -350,6 +362,11 @@ class GuideNodes:
                 source["error"] = str(exc); warnings.append(source["title"]+"："+str(exc))
             self.store.add_source(state["trip_id"],source)
         stops = self.source_stops(state["trip_id"], state["selected_source_ids"], state["requirements"])
+        for identity,stop in stops.items():
+            previous = state.get("stops",{}).get(identity,{})
+            if (previous.get("city"),previous.get("name")) == (stop.get("city"),stop.get("name")):
+                stop.update({key:copy.deepcopy(previous[key]) for key in
+                             ("represented_by","representation_reason","represented_canonical_id","source_references") if key in previous})
         allowed_source_ids = set(chosen)
         stops = {k:v for k,v in stops.items() if (v["source_id"] in allowed_source_ids or v.get("source_kind") in {"flyai","user"}) and v["city"] in req.cities
                  and (not v.get("assigned_date") or req.start_date.isoformat() <= v["assigned_date"] <= req.end_date.isoformat())}
@@ -359,23 +376,5 @@ class GuideNodes:
         requirements["required_stop_ids"] = [identity for identity in req.required_stop_ids if identity not in dining_ids]
         return {"candidates":[],"stops":stops,"requirements":requirements,
                 "stop_constraints":{"required":requirements["required_stop_ids"],"excluded":requirements["excluded_stop_ids"]},
-                "selected_route":{},"interview":{},"decision":{},"warnings":list(dict.fromkeys(warnings))}
+                "selected_route":{},"interview":{},"unmet":[],"warnings":list(dict.fromkeys(warnings))}
 
-    async def interview(self,state):
-        self.emit(state,"interviewing","正在根据你的回答确定下一个问题")
-        previous = state.get("interview",{})
-        sources = self.selected_sources(state["trip_id"],state["selected_source_ids"])
-        result = await self.models.ask(InterviewRound,
-            "像 grilling 访谈一样，一次只问一个问题。questions最多只能有1项，禁止提前列出后续问题。"
-            "收到当前问题的回答后，再依据最新需求和历史回答决定下一问；依赖未回答问题的分支必须等待回答后再分析。"
-            "每题只询问一个旅行决策，题干直接写清这个问题，禁止在一题中列多个子问题或混问多个选择。title简短，question不超过200字。"
-            "只询问尚未明确且会影响路线的选择，不重复已提供的日期、人数、预算、交通或历史答案。"
-            "围绕所选攻略具体地点、必去与可舍弃项、节奏与体力、同行限制、兴趣取舍追问，避免泛泛问卷。"
-            "每题给出推荐答案和理由，可提供2到4个选项，但推荐不是用户回答，不得自动接受。允许用户写自己的答案或明确让你决定。"
-            "攻略中的可查事实由你阅读，不要求用户代查；缺少事实标明待确认，不虚构票价开放时间。"
-            "summary总结已知需求、用户选择和资料缺口。偏好已足够明确时questions为空，进入用户确认，不自行生成路线。"
-            "用户提出修正时重新分析受影响分支。需求表中的起止日期、城市顺序等硬约束不能擅自改动。",
-            {"requirements":state["requirements"],"history":previous.get("history",[]),
-             "guides":[{"id":s["id"],"title":s["title"],"guide":s.get("extraction")} for s in sources],"available_stops":state["stops"]})
-        return {"interview":{**result.model_dump(mode="json"),"round":previous.get("round",0)+1,
-                "round_id":uuid4().hex,"history":previous.get("history",[]),"confirmed":False}}

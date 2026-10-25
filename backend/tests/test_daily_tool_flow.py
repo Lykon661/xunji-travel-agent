@@ -206,23 +206,6 @@ class DailyToolFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.planner.route_agent.plan.await_count,2)
         self.assertIn("互相冲突",self.planner.route_agent.plan.call_args.args[2]["validation_error"])
 
-    async def test_daily_payload_omits_other_dates_feedback_and_decision_history(self):
-        current = {"code":"current","dates":[DATE],"field_path":"/days/0/activities/0"}
-        future = {"code":"future","dates":[NEXT_DATE],"field_path":"/days/1/activities/0"}
-        inferred_current = {"code":"inferred_current","dates":[],"target":"guide:a"}
-        inferred_future = {"code":"inferred_future","dates":[],"target":"guide:c"}
-        global_finding = {"code":"global","dates":[],"field_path":"/budget","target":"trip","message":"整趟预算需复核"}
-        self.state["review_feedback"] = [current,future,inferred_current,inferred_future,global_finding]
-        history = [{"id":"today","questions":[{"affected_dates":[DATE]}]},
-                   {"id":"tomorrow","questions":[{"affected_dates":[NEXT_DATE]}]},
-                   {"id":"all","questions":[{"affected_dates":[]}]},
-                   {"id":"initial","questions":[]}]
-        self.planner.route_agent = SimpleNamespace(plan=AsyncMock(return_value=ready()))
-        await self.daily({"decisions":history})
-        payload = self.planner.route_agent.plan.call_args.args[2]
-        self.assertEqual([finding["code"] for finding in payload["review_feedback"]],["current","inferred_current","global"])
-        self.assertEqual([item["id"] for item in payload["decisions"]],["today","all","initial"])
-        self.assertEqual(len(self.state["review_feedback"]),5)
 
     async def test_global_required_and_excluded_ids_are_scoped_without_changing_global_state(self):
         self.state["stops"].update(canonicalize_stops({"guide:d":source_stop("guide:d","次日备选",assigned_date=NEXT_DATE)}))

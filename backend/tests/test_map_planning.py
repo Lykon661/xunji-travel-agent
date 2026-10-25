@@ -174,7 +174,7 @@ class DailyPlanning(unittest.IsolatedAsyncioTestCase):
         self.planner.window = AsyncMock(return_value=(540,730,[],[],{"name":"酒店","label":"返回住宿"}))
         self.planner.movement = AsyncMock(return_value=({"minutes":40,"mode":"transit"},None))
         state = {**self.state,"stops":stops,"selected_route":{"days":[{"date":"2026-11-10","city":"杭州","stop_ids":list(stops)}]},
-            "itinerary":{"days":[],"transport":[],"hotels":[{"city":"杭州","selected_by_user":True,"selected":{"name":"酒店"}}]}}
+            "itinerary":{"days":[],"transport":[],"hotels":[{"id":"hotel:杭州","city":"杭州","selected_by_user":True,"selected":{"name":"酒店"}}]}}
         result = await self.planner.activities(state)
         day = result["itinerary"]["days"][0]
         self.assertEqual([a["id"] for a in day["activities"] if a["kind"] == "visit"],["近处"])
@@ -183,7 +183,7 @@ class DailyPlanning(unittest.IsolatedAsyncioTestCase):
 
     async def test_departure_tail_uses_station_and_keeps_its_transfer_time(self):
         self.planner.movement = AsyncMock(return_value=({"minutes":30,"mode":"transit"},None))
-        state = {**self.state,"itinerary":{"hotels":[{"city":"杭州","selected_by_user":True,"selected":{"name":"酒店"}}],"transport":[
+        state = {**self.state,"itinerary":{"hotels":[{"id":"hotel:杭州","city":"杭州","selected_by_user":True,"selected":{"name":"酒店"}}],"transport":[
             {"context":{"date":"2026-11-10","origin":"杭州","destination":"北京"},"label":"杭州到北京","buffer_minutes":60,
              "selected":{"departure":"18:00","departure_place":"车站"}}]}}
         _,end,_,transfers,tail = await self.planner.window(state,{"date":"2026-11-10","city":"杭州"})
@@ -194,7 +194,7 @@ class DailyPlanning(unittest.IsolatedAsyncioTestCase):
     async def test_lock_or_repair_changes_predecessor_and_routes_are_refreshed(self):
         day = {"date":"2026-11-10","city":"杭州","available_start":540,"tail_deadline":1200,"end_place":"车站",
             "activities":[{"id":"near","kind":"visit","name":"近处","end":"10:00"},{"id":"far","kind":"visit","name":"远处","end":"11:00"}],"transfers":[]}
-        itinerary = {"days":[day],"hotels":[{"city":"杭州","selected_by_user":True,"selected":{"name":"酒店"}}],
+        itinerary = {"days":[day],"hotels":[{"id":"hotel:杭州","city":"杭州","selected_by_user":True,"selected":{"name":"酒店"}}],
                      "transport":[{"context":{"date":"2026-11-10","origin":"杭州","destination":"北京"},"selected":{"departure_place":"车站"}}]}
         self.planner.movement = AsyncMock(return_value=({"minutes":20,"mode":"transit"},None))
         await self.planner.refresh_day_routes(self.state,itinerary)
