@@ -51,9 +51,27 @@ OUTCOMES = {"selection": "得到候选", "decision_limit": "追问超过上限",
             "no_candidate": "未形成候选", "timeout": "超时", "invalid_case": "用例无效"}
 
 
+def recommended_option_id(question: dict) -> str:
+    options = question.get("structured_options") or question.get("options") or []
+    recommendation = (question.get("recommendation") or "").strip()
+    prefix = re.split(r"[：:，,。]", recommendation)[0].strip()
+    for option in options:
+        if isinstance(option, str):
+            clean = option.strip()
+            if question.get("recommended_option_id") == option or (clean and recommendation and
+                    (recommendation.startswith(clean) or prefix and clean.startswith(prefix))):
+                return option
+        elif option.get("recommended") or question.get("recommended_option_id") == option["id"]:
+            return option["id"]
+    first = options[0] if options else ""
+    return first if isinstance(first, str) else first["id"]
+
+
 def auto_answer(question: dict) -> str:
     """Deterministic stand-in for the user, identical across variants."""
-    options = [option for option in question.get("options", []) if option.strip()]
+    if question.get("structured_options") or any(isinstance(option, dict) for option in question.get("options", [])):
+        return recommended_option_id(question)
+    options = [option for option in question.get("options", []) if isinstance(option, str) and option.strip()]
     if question.get("id", "").startswith(("place-", "hub-")) and options:
         return options[0]
     recommendation = question.get("recommendation", "").strip()
@@ -100,7 +118,7 @@ def count_model_calls(ask, row):
             row["seconds_by_schema"][name] = round(seconds[name],1)
             if incremental:
                 row["incremental_reviews"] += 1
-            elif name == "ReviewReport":
+            elif name in {"ReviewReport", "SemanticReviewReport"}:
                 row["full_reviews"] += 1
     return counted
 
@@ -165,7 +183,19 @@ async def run_one(case, variant, repeat, out, cassette, args):
                 if kind == "sources":
                     row.update(outcome="no_candidate", error="；".join(doc.get("warnings") or [])[:300])
                     break
-                if kind in {"decision", "interview"} and pending.get("questions"):
+                if kind == "decision" and pending.get("questions"):
+                    if row["decisions"] >= args.max_decisions:
+                        row["outcome"] = "decision_limit"
+                        break
+                    response = {"round_id": pending.get("batch_id") or pending["round_id"],
+                                "selected_options": {question["id"]: recommended_option_id(question)
+                                                     for question in pending["questions"]},
+                                "draft_revision": pending.get("draft_revision")}
+                    row["decisions"] += 1
+                elif kind == "decision_confirmation":
+                    response = {"round_id": pending.get("batch_id") or pending["round_id"], "confirm": True,
+                                "interpretation_id": pending["interpretation"]["interpretation_id"]}
+                elif kind == "interview" and pending.get("questions"):
                     if row["decisions"] >= args.max_decisions:
                         row["outcome"] = "decision_limit"
                         break
@@ -191,7 +221,9 @@ async def run_one(case, variant, repeat, out, cassette, args):
                 {"requirements": doc["requirements"], "candidate": candidate, "decision_history": doc.get("decision_history", []),
                  "warnings": doc.get("warnings", [])}, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
             # 由代码给出选项、回答后直接执行的追问数（其余追问由模型生成和解析）。
-            row["code_option_decisions"] = sum(bool(entry.get("code_option")) for entry in doc.get("decision_history", []))
+            row["code_option_decisions"] = sum(bool(entry.get("code_option") or
+                entry.get("selected_options") and not entry.get("answers") and not entry.get("note"))
+                for entry in doc.get("decision_history", []))
             try:
                 row.update(evaluate(doc["requirements"], candidate, pool, case.get("aliases", []), case.get("expected_constraints")))
             except Exception as exc:

@@ -211,6 +211,5 @@ function requery(product: Product) {
 .product-card img {width:110px; height:90px; border-radius:8px; object-fit:cover}
 .product-card > div {flex:1; min-width:0}
 .product-actions {display:flex; flex-wrap:wrap; gap:14px; align-items:center}
-.product-summary {white-space:pre-wrap; overflow-wrap:anywhere}
 @media(max-width:600px) {.product-card {flex-direction:column}}
 </style>

@@ -146,8 +146,8 @@ class Models:
                   + instruction + "\n输出字段约束（JSON Schema，仅用于校验，不是要原样返回的内容）：" + schema_text
                   + "\n请返回这些字段对应的实际结果值，不要返回type、properties、$defs等结构定义。")
         input_limit = {"DecisionWording":30000,"DecisionInterpretation":30000,
-                       "RouteTurn":40000,"RouteCompletion":40000,"DailyRouteCompletion":40000,
-                       "SemanticReviewReport":40000,"ReviewReport":40000}.get(schema.__name__)
+                       "RouteTurn":40000,"RouteCompletion":40000,
+                       "SemanticReviewReport":40000}.get(schema.__name__)
         hard_limit = 120000
         content = [{"type":"text", "text":payload_text}]
         for index, data in zip(image_indices or list(range(1,len(images or [])+1)), images or []):
@@ -159,7 +159,6 @@ class Models:
         def text_chars():
             return sum(len(message["content"]) if isinstance(message["content"],str) else
                 sum(len(block.get("text","")) for block in message["content"] if block.get("type") == "text") for message in messages)
-        retained_review_blockers = []
         try:
             for attempt in range(2):
                 input_chars = text_chars()
@@ -202,9 +201,6 @@ class Models:
                 parsed = None
                 try:
                     parsed = parse_json(text)
-                    if retained_review_blockers and (not isinstance(parsed.get("findings"),list) or
-                            not all(finding in parsed["findings"] for finding in retained_review_blockers)):
-                        raise StructuredOutputError("审查结构纠正不能删除或改写原有阻断发现，也不能降低严重性；原报告未采用")
                     return schema.model_validate(parsed)
                 except (StructuredOutputError, ValidationError) as exc:
                     detail = self.format_issue(exc)
@@ -219,12 +215,6 @@ class Models:
                         {"role":"user","content":"上一条输出未通过格式校验：" + detail +
                          "。请按照原任务和返回结构重新输出完整 JSON 对象，修正格式、字段类型及长度约束，不添加来源、报价或活动 ID。"}])
                     messages[-1]["content"] += "业务字段直接放在根对象："+"、".join(schema.model_fields)+"；填写实际值，不要返回JSON Schema、空对象或properties包装。"
-                    if schema.__name__ == "ReviewReport" and issue_types and all(kind.startswith("review_") for kind in issue_types):
-                        retained_review_blockers = copy.deepcopy([finding for finding in parsed.get("findings",[]) if finding.get("severity") == "blocker"])
-                        if retained_review_blockers:
-                            messages[-1]["content"] += "本次是审查跨字段一致性错误；保留原有阻断发现及严重性，按具体错误修正状态、检查项或问题结构，不得删掉阻断来宣称通过。"
-                        else:
-                            messages[-1]["content"] += "当前没有原有阻断发现可保留；重新核对结论，只有warning时返回pass_with_warnings。报告自身的状态或格式错误必须在本报告内纠正，不能新增要求路线重排的假问题。"
         except ModelImageNotSupported as exc:
             raise ToolError("model_config", str(exc)) from exc
         except ModelRuntimeError as exc:

@@ -22,10 +22,6 @@ def source_stop(identity, name, **extra):
             "duration_minutes":90,"evidence":{"quote":name},**extra}
 
 
-def ready(ids=("guide:a",), **extra):
-    return RouteTurn(status="ready",order=OrderChoice(stop_ids=list(ids),explanation="合成安排",**extra))
-
-
 class DailyToolFlow(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
@@ -52,14 +48,6 @@ class DailyToolFlow(unittest.IsolatedAsyncioTestCase):
             {identity:{**stop,"map_place":None} for identity,stop in pool.items()}))
         self.planner.movement = AsyncMock(return_value=({"minutes":None,"estimate_minutes":45,"note":"未取得路线"},None))
         self.planner.map_order = AsyncMock(side_effect=lambda state,city,ids,*anchors:(list(ids),"合成顺序"))
-
-    def model(self, turns):
-        model = SimpleNamespace(ask=AsyncMock(side_effect=turns))
-        self.planner.route_agent = RouteAgent(model,self.store)
-        return model
-
-    async def daily(self, payload=None, ids=None):
-        return await self.planner.daily_order(self.state,self.day,list(ids or self.day["stop_ids"]),set(),payload or {})
 
 
     async def test_real_location_projection_preserves_opening_evidence_for_the_scheduler(self):
@@ -93,32 +81,3 @@ class DailyToolFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failure.exception.code,"agent_tool_scope")
         self.planner.amap.route.assert_not_awaited()
         self.planner.locate_stops.assert_not_awaited()
-
-
-
-
-
-
-
-
-
-    def prepare_activity_flow(self, turns):
-        self.state["mode"] = "new"
-        self.state["requirements"].update(end_date=DATE)
-        self.state["selected_route"] = {"days":[self.day]}
-        self.state["itinerary"] = {"days":[],"transport":[],"hotels":[]}
-        places = {"guide:a":{"id":"poi-a","name":"东山口","location":"113.2,23.1","evidence_id":"query:1"},
-                  "guide:b":{"id":"poi-b","name":"正佳广场","location":"113.3,23.1","evidence_id":"query:2"}}
-        self.state["stops"]["guide:a"]["map_place"] = copy.deepcopy(places["guide:a"])
-        self.planner.flyai = SimpleNamespace(availability=lambda:{"ready":False})
-        self.planner.weather_context = AsyncMock(return_value={})
-        self.planner.update_day_places = Mock()
-        self.planner.refresh_day_routes = AsyncMock()
-        self.planner.query_ticket_prices = AsyncMock()
-        self.planner.route_agent = SimpleNamespace(plan=AsyncMock(side_effect=turns))
-        self.planner.locate_stops.side_effect = lambda state,pool:canonicalize_stops(
-            {identity:{**stop,"map_place":copy.deepcopy(places[identity])} for identity,stop in pool.items()})
-        async def movement(state,city,origin,destination,origin_place=None,destination_place=None):
-            return {"minutes":15,"mode":"transit"},destination_place
-        self.planner.movement.side_effect = movement
-        return places

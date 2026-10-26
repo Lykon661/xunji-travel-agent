@@ -10,7 +10,6 @@ class ReviewerAgent(AgentRuntime):
 
     async def review(self, state, payload):
         from ..views import reviewer_view
-        from ..unmet import valid_refs
         from ..reviewing import pointer_exists
         payload = reviewer_view(state,agent_payload(state,payload))
         if payload.get("review_mode") == "changed_requirements" and not set(payload.get("review_dimensions",[])) & {"places","dining","sources"}:
@@ -51,8 +50,6 @@ class ReviewerAgent(AgentRuntime):
             finding["severity"] = "info" if finding["severity"] == "info" else "warning"
             valid.append(finding)
         report["findings"] = valid
-        report["unmet"] = [{**item,"blocking":False} for item in report.get("unmet",[]) if
-                           valid_refs(state,payload["plan"],item.get("refs",[])) and set(item.get("dates",[])) <= dates]
         for check in report["checks"]:
             if check["result"] == "blocker":
                 check["result"] = "warning"

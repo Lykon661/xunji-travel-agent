@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock
 from app.agents.runtime import digest
 from app.models import REVIEW_DIMENSIONS, Requirements, ReviewReport
 from app.planner import Planner
-from app.reviewing import incremental_review_payload, merge_incremental_review, review_context, review_reference_errors, review_payload
+from app.reviewing import incremental_review_payload, merge_incremental_review, review_context, review_payload
 from app.rules import check_itinerary
 
 
@@ -73,7 +73,6 @@ class IncrementalPayload(unittest.TestCase):
         self.assertEqual([item["field_path"] for item in merged["findings"]],
                          ["/days/0/activities/0","/days/1/activities/0"])
         self.assertEqual(len(merged["checks"]),10)
-        self.assertFalse(review_reference_errors(ReviewReport.model_validate(merged),review_payload(self.state,self.new,[],[])))
 
 
     def test_global_or_uncertain_changes_require_full_review(self):

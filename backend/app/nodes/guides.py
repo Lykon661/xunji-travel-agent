@@ -2,7 +2,6 @@
 import copy
 import re
 from pathlib import Path
-from uuid import uuid4
 
 from ..adapters import ToolError, image_data, remote_image
 from ..config import settings
@@ -12,7 +11,6 @@ from ..store import Conflict, dump
 from ..routing import coordinates
 from ..agents.runtime import digest
 from ..decisions import apply_walking_decision
-from ..models import UnmetItem
 from ..constraints import CONSTRAINT_GUIDE, check, merge, preferences_basis, refresh_form_constraints, stop_catalog, trip_dates
 from ..dining import is_dining, dining_wishes
 from ..workflow.state import TripState
@@ -377,4 +375,3 @@ class GuideNodes:
         return {"candidates":[],"stops":stops,"requirements":requirements,
                 "stop_constraints":{"required":requirements["required_stop_ids"],"excluded":requirements["excluded_stop_ids"]},
                 "selected_route":{},"interview":{},"unmet":[],"warnings":list(dict.fromkeys(warnings))}
-

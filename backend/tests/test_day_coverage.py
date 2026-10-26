@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock
 from app.adapters import ToolError
 from app.models import Constraint, OrderChoice, RouteTurn
 from app.planner import Planner
-from app.routing import early_finish, reference_opening
+from app.routing import reference_opening
 from app.rules import check_itinerary
 
 
@@ -22,10 +22,6 @@ REQ = {"origin":"北京","cities":["杭州"],"start_date":DATE,"end_date":DATE,
 def stop(identity, duration=None, **extra):
     return {"id":identity,"name":identity,"city":"杭州","duration_minutes":duration,
             "source_id":"guide","source_title":"合成攻略","evidence":{"quote":identity},**extra}
-
-
-def ready(ids, **kwargs):
-    return RouteTurn(status="ready",order=OrderChoice(stop_ids=ids,**kwargs))
 
 
 def opening_place(claim="周一至周日 11:00-22:00"):
@@ -43,32 +39,8 @@ class OpeningReferences(unittest.TestCase):
         self.assertEqual(reference_opening(museum,"2026-10-13")["windows"],[[540,1020]])
 
 
-
     def test_evidenced_daily_map_hours_work_without_a_guide_claim(self):
         value = reference_opening(stop("mall",45,map_place=opening_place()))
         self.assertEqual(value["windows"],[[660,1320]])
         self.assertEqual(value["evidence_id"],"query:synthetic-opening")
         self.assertIn("不代表",value["note"])
-
-
-
-
-
-
-class CoveragePolicy(unittest.TestCase):
-    def test_spare_afternoon_is_detected_from_visits_instead_of_waiting_blocks(self):
-        day = {"available_start":540,"tail_deadline":1200,"activities":[
-            {"kind":"visit","end":"14:30"},{"kind":"rest","end":"19:00"}]}
-        self.assertEqual(early_finish(day)["last_visit_end"],"14:30")
-
-    def test_early_return_or_long_station_transfer_does_not_request_filler(self):
-        day = {"available_start":540,"tail_deadline":900,"activities":[{"kind":"visit","end":"14:00"}]}
-        self.assertIsNone(early_finish(day))
-        day.update(tail_deadline=1080,return_move={"minutes":160})
-        self.assertIsNone(early_finish(day))
-
-    def test_short_available_window_and_complete_afternoon_are_exempt(self):
-        day = {"available_start":900,"tail_deadline":1200,"activities":[{"kind":"visit","end":"16:00"}]}
-        self.assertIsNone(early_finish(day))
-        day.update(available_start=540,activities=[{"kind":"visit","end":"17:30"}])
-        self.assertIsNone(early_finish(day))

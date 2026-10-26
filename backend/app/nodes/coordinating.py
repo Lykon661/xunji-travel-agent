@@ -1,5 +1,4 @@
 import copy
-from uuid import uuid4
 
 from .. import assumptions, authority, coordinator
 from ..actions import execute
@@ -14,7 +13,8 @@ from ..unmet import collect, fingerprint
 
 DOCUMENT_FIELDS = ("coordinator_messages","system_assumptions","coordinator_confirmation",
                    "coordinator_batch","unmet","draft_revision",
-                   "system_durations","system_free_time","stop_constraint_sources","stops","repair_round","decision_history","duplicate_review_generation")
+                   "system_durations","system_free_time","stop_constraint_sources","stops","repair_round","decision_history",
+                   "decision_snapshots","duplicate_review_generation")
 
 
 def persisted(state):
@@ -23,7 +23,7 @@ def persisted(state):
 
 def public_document(document):
     result = copy.deepcopy(document)
-    for key in ("coordinator_batch","coordinator_confirmation"):
+    for key in ("coordinator_batch","coordinator_confirmation","decision_snapshots"):
         result.pop(key,None)
     def clean(value):
         if isinstance(value,dict):
@@ -58,11 +58,6 @@ def pending_batch(state, confirming=False):
             ("interpretation_id","summary","changes","relaxed")}
         result["interpretation"].update(original_answers=confirmation["original_answers"],original_note=confirmation["original_note"])
     return result
-
-
-def action_dates(state, proposed):
-    updates,_,_ = execute(state,proposed,"user")
-    return change_dependencies(state,{**state,**updates},proposed)["replan_dates"]
 
 
 def identity_unmet(state):
@@ -229,7 +224,7 @@ class CoordinatingNodes:
             return {**outcome.state_updates,"coordinator_answer":{},"coordinator_confirmation":outcome.confirmation.model_dump(mode="json")}
         history = work["decision_history"]
         entry = history[-1]
-        entry.update(batch=copy.deepcopy(batch),questions=copy.deepcopy(batch["questions"]))
+        entry.update(questions=copy.deepcopy(batch["questions"]))
         proposed = entry.get("actions",[])
         if answer.get("confirm"):
             proposed = state["coordinator_confirmation"]["interpretation"]["actions"]

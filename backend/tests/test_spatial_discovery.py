@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from app import ablation
 from app.adapters import ToolError
 from app.constraints import merge
-from app.day_clustering import build_spatial_plan, cluster_deviation, spatial_errors
+from app.day_clustering import build_spatial_plan, spatial_errors
 from app.models import Candidate, ConstraintDraft, Requirements, RouteTurn
 from app.places import canonicalize_stops
 from app.planner import Planner
@@ -64,7 +64,6 @@ class SpatialDiscovery(unittest.IsolatedAsyncioTestCase):
 
     def decision_model(self):
         self.planner.route_agent.plan.side_effect = self.initial_turn
-
 
 
     async def test_existing_coordinates_do_not_consume_the_ordinary_budget(self):
@@ -136,7 +135,6 @@ class SpatialDiscovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted(len(day["stop_ids"]) for day in result["candidates"][0]["days"]),[0,1])
 
 
-
     async def test_location_results_do_not_mutate_input_stops(self):
         self.state["stops"]["guide:000"]["map_place"] = None
         before = copy.deepcopy(self.state)
@@ -161,23 +159,6 @@ class SpatialDiscovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["candidates"][0]["days"][0]["stop_ids"],[])
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     async def test_conflict_reports_fixed_place_and_date_without_model_call(self):
         self.state["stops"]["guide:000"]["assigned_date"] = "2026-11-12"
         with self.assertRaisesRegex(ToolError,"guide:000.*2026-11-12") as error:
@@ -189,7 +170,6 @@ class SpatialDiscovery(unittest.IsolatedAsyncioTestCase):
         result = await self.planner.discover(self.state)
         self.assertTrue(result["candidates"])
         self.assertNotIn("decision",result)
-
 
 
     async def test_no_code_checks_does_not_reject_a_conflicting_initial_plan(self):

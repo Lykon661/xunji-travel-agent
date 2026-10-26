@@ -6,7 +6,6 @@ import os
 import re
 import sqlite3
 from contextlib import asynccontextmanager
-from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
 

@@ -72,6 +72,7 @@ class TripState(TypedDict, total=False):
     review_previous: dict | None
     review_change: dict | None
     decision_history: list[dict]
+    decision_snapshots: dict[str, dict]
     place_selection: dict
     draft_revision: int
     route_confirmed: bool

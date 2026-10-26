@@ -8,7 +8,6 @@ from ..models import Candidate, Requirements, RequirementUpdate
 from ..rules import timestamp, validate_candidate
 from ..store import Conflict, now, dump
 from ..decisions import input_hash
-from ..reviewing import review_repair_dates
 from ..planning_recovery import previous_round
 from ..authority import user_texts
 from .state import NODE_STAGES
@@ -297,6 +296,7 @@ class SubmitWorkflow:
                     "interview":{},"route_edit":{},
                     "stop_constraints":{"required":req.get("required_stop_ids",[]),"excluded":req.get("excluded_stop_ids",[])},
                     "decision_history":doc.get("decision_history",[]) if not selection_changed else [],
+                    "decision_snapshots":copy.deepcopy(doc.get("decision_snapshots",{})) if not selection_changed else {},
                     "draft_revision":doc.get("draft_revision",0),"decision":{},"route_confirmed":False,
                     "previews":{},"preview_ready":False,
                     "old_requirements":copy.deepcopy(doc["requirements"])}
@@ -444,6 +444,7 @@ class SubmitWorkflow:
                      "preview_ready":False,"route_edit":{},"repair_round":0,"decision":{},"route_confirmed":False,
                      "draft_revision":candidates[0].get("draft_revision",0) if candidates else 0,
                      "stop_constraints":doc.get("stop_constraints",{}),"decision_history":doc.get("decision_history",[]),
+                      "decision_snapshots":copy.deepcopy(doc.get("decision_snapshots",{})),
                      "guide_brief":copy.deepcopy(snapshot.values.get("guide_brief",{})) if snapshot else {}}
             if resume_node:
                 await self.graph.aupdate_state({"configurable":{"thread_id":thread}},state,as_node=resume_node)
@@ -486,25 +487,45 @@ class SubmitWorkflow:
                 raise Conflict("旅行已变化，请刷新后再修改回答")
             doc = trip["document"]
             history = doc.get("decision_history",[])
-            if index < 0 or index >= len(history) or not history[index].get("batch"):
-                raise Conflict("该记录不是可重开的主理人批次，请从当前草稿重新诊断。")
-            candidate = copy.deepcopy((doc.get("candidates") or [doc.get("selected_route") or {}])[0])
-            if not candidate.get("draft"):
-                raise Conflict("请先完成路线草稿，再修改已有回答")
-            batch = copy.deepcopy(history[index]["batch"])
-            batch.update(batch_id=uuid4().hex,draft_revision=doc.get("draft_revision",0))
+            snapshots = doc.get("decision_snapshots",{})
+            record = snapshots.get(history[index].get("snapshot_id"),{}) if 0 <= index < len(history) else {}
+            if not record.get("batch") or not record.get("snapshot"):
+                raise Conflict("这条较早的回答无法重新修改，请在当前方案上提出新的调整")
+            before = {key:copy.deepcopy(value) for key,value in record["snapshot"].items() if key != "stops"}
+            restored = {**copy.deepcopy(doc),**before}
+            stops = restored.setdefault("stops",{})
+            for entry in reversed(history[index:]):
+                for identity,value in snapshots.get(entry.get("snapshot_id"),{}).get("snapshot",{}).get("stops",{}).items():
+                    if value is None:
+                        stops.pop(identity,None)
+                    else:
+                        stops[identity] = copy.deepcopy(value)
+            cutoff = min(index,record.get("history_start",index))
+            restored["decision_history"] = copy.deepcopy(history[:cutoff])
+            removed = {entry.get("snapshot_id") for entry in history[cutoff:]}
+            restored["decision_snapshots"] = {identity:copy.deepcopy(value) for identity,value in snapshots.items() if identity not in removed}
+            restored["coordinator_messages"] = [copy.deepcopy(item) for item in doc.get("coordinator_messages",[])
+                if item.get("decision_index") is None or item["decision_index"] < index]
+            candidate = copy.deepcopy((restored.get("candidates") or [restored.get("selected_route") or {}])[0])
+            itinerary = copy.deepcopy(restored.get("itinerary") or candidate.get("draft") or {})
+            batch = copy.deepcopy(record["batch"])
+            batch.update(batch_id=uuid4().hex,draft_revision=restored.get("draft_revision",0))
             thread = f"{trip_id}:{uuid4().hex}"
-            state = {**persisted(doc),"trip_id":trip_id,"generation":thread,"base_version":base,"requirements":doc["requirements"],
-                "selected_source_ids":doc.get("selected_source_ids",[]),"stops":{**self.source_stops(trip_id,doc.get("selected_source_ids",[])),**doc.get("stops",{})},
-                "mode":"modify","change":{},"locks":doc.get("locks",[]),"warnings":doc.get("warnings",[]),
-                "candidates":[candidate],"selected_route":{},"old_itinerary":copy.deepcopy(candidate["draft"]),
-                "old_requirements":copy.deepcopy(doc["requirements"]),"itinerary":copy.deepcopy(candidate["draft"]),
-                "decision_history":copy.deepcopy(history),"stop_constraints":doc.get("stop_constraints",{}),
-                "coordinator_batch":batch,"coordinator_confirmation":None,"coordinator_blocked":False,"coordinator_resume":"review_gate"}
+            state = {**persisted(restored),**before,
+                "trip_id":trip_id,"generation":thread,"base_version":base,
+                "stops":{**self.source_stops(trip_id,restored.get("selected_source_ids",[])),**restored.get("stops",{})},
+                "mode":"modify","change":{},"selected_route":{},"old_itinerary":copy.deepcopy(itinerary),
+                "candidates":restored.get("candidates") or ([candidate] if candidate else []),
+                "old_requirements":copy.deepcopy(restored["requirements"]),"itinerary":itinerary,
+                "decision_history":restored["decision_history"],"coordinator_messages":restored["coordinator_messages"],
+                "coordinator_batch":batch,"coordinator_confirmation":None,"coordinator_blocked":False}
             run_id = self.store.start_run(trip_id,base,thread,{"request":"重新回答已有选择","history_index":index})
             state["run_id"] = run_id
             try:
                 await self.graph.aupdate_state({"configurable":{"thread_id":thread}},state,as_node="coordinator")
+                doc.update(restored)
+                doc.update(persisted(state))
+                doc.update(candidates=copy.deepcopy(state["candidates"]),selected_route={},keep_current_plan=state["keep_current_plan"])
                 doc.update(stage="queued",pending=None,workflow_step="interview")
                 self.store.update(trip_id,doc)
             except Exception:

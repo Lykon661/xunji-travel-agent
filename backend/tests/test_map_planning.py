@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, Mock
 from app.adapters import Amap, ToolError, has_route_leg
 from app.models import OrderChoice, Requirements, RouteTurn
 from app.planner import Planner
-from app.routing import geographic_order
 from app.rules import check_itinerary
 from app.constraints import preferences_basis
 
@@ -18,12 +17,7 @@ PLACES = {name:{"name":name,"location":f"{120+offset},30"} for name,offset in
 
 
 class GeographicPlanning(unittest.TestCase):
-    def test_outward_route_avoids_far_then_near_backtrack(self):
-        places = {name:PLACES[name] for name in ("近处","中间","远处")}
-        self.assertEqual(geographic_order(["远处","近处","中间"],places,PLACES["酒店"],PLACES["车站"]),["近处","中间","远处"])
 
-    def test_missing_location_keeps_order(self):
-        self.assertEqual(geographic_order(["近处","远处"],{"近处":PLACES["近处"],"远处":None}),["近处","远处"])
 
     def test_local_transport_choices_are_kept(self):
         self.assertEqual(Requirements(**REQ,local_transport="driving").local_transport,"driving")

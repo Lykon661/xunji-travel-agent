@@ -120,6 +120,23 @@ def estimate_move(state, first, last):
             "mode":mode,"note":"按直线距离换算的交通估计，实际路线待查询"}
 
 
+def reusable_move(window, first, last, move):
+    if move.get("minutes") is None:
+        return False
+    for identity,field in ((first,"origin_place"),(last,"destination_place")):
+        if identity not in {"@start","@end"}:
+            continue
+        current = window.get("tail",{}).get("start_place" if identity == "@start" else "end_place") or {}
+        previous = move.get(field) or {}
+        a,b = coordinates(current),coordinates(previous)
+        if a is not None and b is not None:
+            if a != b:
+                return False
+        elif not current.get("id") or current.get("id") != previous.get("id"):
+            return False
+    return True
+
+
 def edge(state, window, first, last, moves, selected_move=None):
     if first is None or last is None:
         return {},0,0,0
@@ -132,7 +149,8 @@ def edge(state, window, first, last, moves, selected_move=None):
     guess = estimate_move(state,stop(first),stop(last))
     move = selected_move if selected_move is not None else moves.get((window["date"],first,last))
     if move is None:
-        move = next((value for (_,a,b),value in moves.items() if a == first and b == last and value.get("minutes") is not None),guess)
+        move = next((value for (_,a,b),value in moves.items()
+                     if a == first and b == last and reusable_move(window,first,last,value)),guess)
     minutes = move.get("minutes") if move.get("minutes") is not None else move.get("estimate_minutes",guess["estimate_minutes"])
     return move,minutes,move.get("walking_meters") if move.get("walking_meters") is not None else guess["walking_meters"],move.get("distance_meters") or guess.get("distance_meters") or 0
 
@@ -181,7 +199,7 @@ def plan_day(state, window, identities, moves=None, preserved=None, order=None, 
     deadline = window["end"]-state.get("system_free_time",{}).get(day,0)
     predecessors = {identity:set() for identity in ids}
     for item in active(req,"fixed_order",date=day):
-        if item.get("after") in predecessors:
+        if item.get("after") in predecessors and item.get("before") in predecessors:
             predecessors[item["after"]].add(item["before"])
     locked_order = [identity for identity in preserved if identity in ids]
     for first,last in zip(locked_order,locked_order[1:]):

@@ -5,7 +5,7 @@ import re
 from . import ablation
 from .models import Candidate, Requirements
 from .dining import is_dining, dining_wishes, dining_wish_issues
-from .places import canonicalize_stops, canonical_key, repeat_allowed, duplicate_issues, represented_stop_ids
+from .places import canonicalize_stops, canonical_key, repeat_allowed, represented_stop_ids
 from .routing import daily_route_scope, daily_movements, transport_access_transfers, scoped_day
 from .constraints import active, walking_target
 

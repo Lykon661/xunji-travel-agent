@@ -47,12 +47,6 @@ class PlanningInvariants(unittest.TestCase):
     def test_missing_required_stop_blocks_confirmation(self):
         self.assertTrue(confirmation_blockers(complete_draft(),{"required":["source:missing"]}))
 
-    def test_unresolved_conditions_use_structured_items(self):
-        from app.models import UnmetItem
-        item = UnmetItem(kind="budget",refs=[{"type":"requirement","id":"budget"}],numbers={"excess_amount":100})
-        value = RouteTurn(status="ready",order=OrderChoice(stop_ids=[]),unmet=[item])
-        self.assertEqual(value.unmet,[item])
-
 
     def test_map_refresh_does_not_change_source_fingerprint_but_source_edit_does(self):
         stops = {"a":{"name":"景点","city":"广州","evidence":{"quote":"景点"}}}
@@ -72,30 +66,6 @@ class CollaborativeFlow(unittest.IsolatedAsyncioTestCase):
         self.state = {"trip_id":self.trip["id"],"run_id":self.run_id,"generation":"generation","base_version":0,
                       "requirements":REQ,"selected_source_ids":[],"locks":[],"stop_constraints":{},"warnings":[],"decision_history":[]}
 
-    async def test_tool_loop_records_observation_and_reuses_finished_result(self):
-        model = SimpleNamespace(ask=AsyncMock(side_effect=[
-            RouteTurn(status="tools",tools=[RouteToolRequest(tool="route",city="广州",origin_id="a",destination_id="b")]),
-            RouteTurn(status="ready",order=OrderChoice(stop_ids=["a","b"],explanation="按实际交通排序"))]))
-        tool = AsyncMock(return_value={"minutes":12,"provider":"amap"})
-        agent = RouteAgent(model,self.store)
-        def payload():
-            return {"city":"广州","available_stops":{identity:{"id":identity,"name":"合成景点"+identity,"city":"广州"}
-                                                    for identity in ("a","b")}}
-        first = await agent.plan(self.state,"安排当天",payload(),tool,daily=True)
-        second = await agent.plan(self.state,"安排当天",payload(),tool,daily=True)
-        self.assertEqual(first,second)
-        self.assertEqual(tool.await_count,1)
-        self.assertEqual(model.ask.await_count,2)
-        self.assertTrue(model.ask.call_args.args[2]["tool_observations"][0]["evidence_id"].startswith("query:"))
-
-    async def test_late_agent_result_cannot_write_after_new_run_started(self):
-        async def delayed(*args,**kwargs):
-            self.store.finish_run(self.run_id,"waiting",{})
-            self.store.start_run(self.trip["id"],0,"new-generation",{})
-            return RouteTurn(status="ready",order=OrderChoice(stop_ids=["a"]))
-        agent = RouteAgent(SimpleNamespace(ask=AsyncMock(side_effect=delayed)),self.store)
-        with self.assertRaises(Conflict):
-            await agent.plan(self.state,"安排当天",{},AsyncMock(),daily=True)
 
     async def test_confirm_and_save_preserves_exact_preview_without_model_or_tools(self):
         planner = Planner.__new__(Planner)

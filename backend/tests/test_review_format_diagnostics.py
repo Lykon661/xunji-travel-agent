@@ -9,7 +9,6 @@ from pydantic import ValidationError
 
 from app.adapters import Models, ToolError
 from app.models import REVIEW_DIMENSIONS, ReviewReport
-from app.reviewing import require_review, review_blockers
 from app.store import Conflict
 
 
@@ -56,36 +55,3 @@ class ReviewFormatDiagnostics(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("审查报告",detail)
                 self.assertNotIn("不符合字段约束",detail)
                 self.assertNotIn(PRIVATE,detail)
-
-    async def test_correction_gets_exact_rule_and_retains_the_blocker(self):
-        invalid = {**report(),"findings":[blocker()]}
-        corrected = {**copy.deepcopy(invalid),"status":"revise"}
-        self.client([invalid,corrected])
-        with self.assertLogs("app.adapters",level="WARNING") as captured:
-            result = await self.models.ask(ReviewReport,"独立审查",{})
-        self.assertEqual(result.status,"revise")
-        self.assertEqual(result.findings[0].severity,"blocker")
-        self.assertIn("status不能为pass",self.messages[1][-1]["content"])
-        logs = "\n".join(captured.output)
-        self.assertIn("review_blocker_status",logs)
-        self.assertNotIn(PRIVATE,logs)
-
-    async def test_structure_retry_cannot_remove_blocker_and_claim_pass(self):
-        self.client([{**report(),"findings":[blocker()]},report()])
-        with self.assertRaises(ToolError) as raised:
-            await self.models.ask(ReviewReport,"独立审查",{})
-        self.assertEqual(raised.exception.code,"model_format")
-        self.assertIn("不能删除或改写原有阻断",str(raised.exception))
-        self.assertEqual(len(self.messages),2)
-
-    async def test_warning_only_report_corrects_status_without_inventing_a_route_blocker(self):
-        invalid = {**report(),"status":"revise","findings":[{**blocker(),"severity":"warning"}]}
-        invalid["checks"][0].update(result="warning",note="参考价格待确认")
-        corrected = {**copy.deepcopy(invalid),"status":"pass_with_warnings"}
-        self.client([invalid,corrected])
-        result = await self.models.ask(ReviewReport,"独立审查",{})
-        self.assertEqual(result.status,"pass_with_warnings")
-        self.assertFalse(any(item.severity == "blocker" for item in result.findings))
-        correction = self.messages[1][-1]["content"]
-        self.assertIn("当前没有原有阻断发现可保留",correction)
-        self.assertIn("不能新增要求路线重排的假问题",correction)

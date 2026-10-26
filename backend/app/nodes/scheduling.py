@@ -7,7 +7,7 @@ from .. import assumptions
 from ..authority import USER_SOURCES
 from ..opening import prepare as prepare_opening
 from ..scheduler import (MAX_DAY_STOPS, MAX_ROUTE_PASSES, MAX_LONG_LEG_TRIALS, MAX_LONG_LEG_QUERIES,
-                         long_leg_candidates, plan_day, plan_trip, route_metrics)
+                         long_leg_candidates, plan_day, plan_trip, reusable_move, route_metrics)
 from ..adapters import ToolError, map_link, navigation_link
 from ..models import UnmetItem, Requirements
 from ..rules import enforce_locks, timestamp
@@ -15,7 +15,7 @@ from ..constraints import active, public_only
 from ..routing import coordinates, daily_route_scope, daily_movements, transport_access_transfers, distance, reference_opening
 from ..resource_planning import chosen_hotel, comparison
 from ..agents.runtime import digest
-from ..dining import is_dining, refresh_meals, plan_meal_wishes
+from ..dining import is_dining, refresh_meals
 from ..places import canonicalize_stops, canonical_key, represented_stop_ids
 from ..planning_recovery import route_moves
 from ..assumptions import visible_text
@@ -279,7 +279,8 @@ class SchedulingNodes:
                     key = (day_date,first,last)
                     if key in moves:
                         continue
-                    known = next((move for (_,a,b),move in moves.items() if a == first and b == last and move.get("minutes") is not None),None)
+                    known = next((move for (_,a,b),move in moves.items()
+                                  if a == first and b == last and reusable_move(window,first,last,move)),None)
                     if known is not None:
                         moves[key] = copy.deepcopy(known)
                         continue

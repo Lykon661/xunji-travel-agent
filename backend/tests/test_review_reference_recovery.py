@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 from app.adapters import ToolError
 from app.agents.reviewer import ReviewerAgent
 from app.agents.runtime import agent_payload, digest
-from app.models import REVIEW_DIMENSIONS, Requirements, ReviewReport, ReviewReferenceCorrections
+from app.models import REVIEW_DIMENSIONS, Requirements, ReviewReport
 from app.reviewing import canonical_review_path, pointer_exists, review_field_index
 from app.store import Store
 
@@ -21,11 +21,6 @@ def report_value(path="/days/0/activities/0"):
             "findings":[{"code":"duration_unknown","severity":"blocker","owner":"route","action":"repair",
                 "target":"stop-a","dates":["2026-11-10"],"field_path":path,"message":"合成景点缺少明确游玩时长",
                 "evidence_ids":["requirements"],"suggestion":"补充时长依据"}]}
-
-
-def reference_patch(path="/days/0/activities/0", index=0):
-    return ReviewReferenceCorrections(corrections=[{"finding_index":index,"field_path":path,
-        "evidence_ids":["requirements"],"dates":["2026-11-10"]}])
 
 
 class ReviewPointers(unittest.TestCase):

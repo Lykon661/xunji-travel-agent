@@ -6,8 +6,8 @@ from .constraints import active, merge, trip_dates
 from .models import WISH_PREFIX, ConstraintDraft, wish_stop_id
 from .dining import is_dining
 from .stop_types import is_light_wish
-from .places import canonical_key, canonicalize_stops, local_name, strip_suffix
-from .routing import coordinates, early_finish, scoped_day, daily_route_scope
+from .places import canonicalize_stops
+from .routing import scoped_day, daily_route_scope
 from .rules import timestamp
 
 DEFAULT_VISIT_MINUTES = 90

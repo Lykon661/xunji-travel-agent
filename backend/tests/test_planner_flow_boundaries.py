@@ -76,7 +76,6 @@ class DiscoveryQueryScope(unittest.IsolatedAsyncioTestCase):
 class GuideQuestionRecovery(unittest.IsolatedAsyncioTestCase):
 
 
-
     def test_guide_group_unique_names_normalize_but_ambiguous_names_remain_rejected(self):
         state = {"requirements":REQ,"stops":{"a":{"id":"a","city":"广州","name":"合成公园"}}}
         groups = [GuideGroup(city="广州",stop_ids=["合成公园"])]
@@ -87,11 +86,6 @@ class GuideQuestionRecovery(unittest.IsolatedAsyncioTestCase):
 
 
 class FactGapsAreNotUserChoices(unittest.TestCase):
-    def test_unknown_opening_is_kept_as_a_fact_gap_without_an_extra_question(self):
-        brief = GuideBrief(status="ready",summary="尚未确定是否开放，需后续核实")
-        turn = RouteTurn(status="ready",order=OrderChoice(stop_ids=[],explanation="尚未确定是否开放，保留缺口"))
-        self.assertEqual(brief.unmet,[])
-        self.assertEqual(turn.unmet,[])
 
     def test_unresolved_user_choice_is_structured_without_a_question(self):
         from app.models import UnmetItem

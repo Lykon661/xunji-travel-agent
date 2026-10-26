@@ -10,7 +10,7 @@ from app.decisions import confirmation_blockers
 from app.models import REVIEW_DIMENSIONS, Requirements
 from app.planner import Planner
 from app.resource_planning import resource_context_issues
-from app.reviewing import bind_report, review_basis, review_blockers
+from app.reviewing import bind_report, review_basis
 
 
 REQ = Requirements(origin="北京",cities=["杭州"],start_date="2026-11-11",end_date="2026-11-12",

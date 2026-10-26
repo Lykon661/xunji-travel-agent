@@ -4,7 +4,7 @@ import json
 import re
 from typing import Annotated, Literal
 
-from pydantic import AliasChoices, BaseModel, Field, SecretStr, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 from .stop_types import with_visit_defaults
 
@@ -285,16 +285,6 @@ class CandidatePack(BaseModel):
     candidates: list[Candidate] = Field(default_factory=list, max_length=1)
 
 
-class InterviewQuestion(BaseModel):
-    id: str = Field(min_length=1, max_length=80)
-    title: str = Field(min_length=1, max_length=150)
-    question: str = Field(min_length=1, max_length=1500)
-    options: list[str] = Field(default_factory=list, max_length=10)
-    recommendation: str = Field(min_length=1, max_length=1000)
-
-
-
-
 class GuideGroup(BaseModel):
     city: str
     stop_ids: list[str] = Field(default_factory=list, description="建议区域内的现有景点 ID 数组；这是资料分组，不是每日行程，无每日 12 项限制")
@@ -360,7 +350,6 @@ class GuideBrief(BaseModel):
     unmet: list[UnmetItem] = Field(default_factory=list,max_length=40)
 
 
-
 class GuideFeedback(BaseModel):
     stop_ids: list[str] = Field(default_factory=list, max_length=20)
     explanation: str
@@ -380,15 +369,14 @@ class RouteTurn(BaseModel):
     status: Literal["tools", "ready"]
     tools: list[RouteToolRequest] = Field(default_factory=list, max_length=4)
     candidate: Candidate | None = None
-    order: "OrderChoice | None" = None
     unmet: list[UnmetItem] = Field(default_factory=list,max_length=40)
 
     @model_validator(mode="after")
     def valid_turn(self):
         if self.status == "tools" and not self.tools:
             raise ValueError("工具轮次必须提供工具请求")
-        if self.status == "ready" and (self.tools or self.candidate is None and self.order is None):
-            raise ValueError("完成轮次须交付草稿或顺序及未满足条目")
+        if self.status == "ready" and (self.tools or self.candidate is None):
+            raise ValueError("完成轮次须交付草稿及未满足条目")
         return self
 
 
@@ -466,30 +454,6 @@ class SemanticReviewReport(BaseModel):
     def semantic_dimensions(self):
         if {item.dimension for item in self.checks} != {"places","dining","sources"}:
             raise ValueError("语义审查只覆盖places、dining、sources，各一次")
-        return self
-
-
-class ReviewReferenceCorrection(BaseModel):
-    model_config = {"extra":"forbid"}
-    finding_index: int = Field(ge=0)
-    field_path: str = Field(min_length=1, max_length=300, pattern=r"^/")
-    evidence_ids: list[str] = Field(min_length=1, max_length=20)
-    dates: list[Date] = Field(default_factory=list, max_length=30)
-
-
-class ReviewReferenceCorrections(BaseModel):
-    model_config = {"extra":"forbid"}
-    corrections: list[ReviewReferenceCorrection] = Field(min_length=1, max_length=40)
-
-
-class InterviewRound(BaseModel):
-    summary: str = Field(min_length=1, max_length=4000)
-    questions: list[InterviewQuestion] = Field(default_factory=list, max_length=1)
-
-    @model_validator(mode="after")
-    def unique_questions(self):
-        if len({question.id for question in self.questions}) != len(self.questions):
-            raise ValueError("追问问题 ID 不能重复")
         return self
 
 
@@ -583,9 +547,6 @@ class OrderChoice(BaseModel):
         if not set(self.start_times) <= set(self.stop_ids):
             raise ValueError("指定时刻只能对应已经安排的景点")
         return self
-
-
-RouteTurn.model_rebuild()
 
 
 class CreateTrip(BaseModel):

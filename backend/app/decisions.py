@@ -1,10 +1,8 @@
 from . import ablation
 from .agents.runtime import digest
-from .routing import coordinates, daily_route_scope, reference_opening, route_issue_applies, scoped_day, selected_route_resources
+from .routing import coordinates, reference_opening
 from .rules import timestamp, walking_limit
-from .resource_planning import resource_context_issues
-from .places import duplicate_issues, represented_ids
-from .dining import dining_wishes, dining_wish_issues, visit_required_ids
+from .places import represented_ids
 from datetime import date, timedelta
 import re
 import copy

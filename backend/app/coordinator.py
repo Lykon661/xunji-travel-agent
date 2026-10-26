@@ -12,6 +12,15 @@ from .store import now
 from .views import stop_summary, activity_summary, coordinator_view
 
 
+ANSWER_SNAPSHOT_DEFAULTS = {
+    "candidates":[], "selected_route":{}, "itinerary":{}, "requirements":{},
+    "stop_constraints":{}, "stop_constraint_sources":{}, "selected_source_ids":[], "locks":[],
+    "system_durations":{}, "system_free_time":{}, "system_assumptions":[], "keep_current_plan":False,
+    "draft_revision":0, "warnings":[], "unmet":[], "review":None, "repair_round":0,
+    "duplicate_review_generation":"", "coordinator_resume":"review_gate",
+}
+
+
 def _json(value):
     return value.model_dump(mode="json", exclude_none=True) if hasattr(value, "model_dump") else copy.deepcopy(value)
 
@@ -293,14 +302,20 @@ async def apply_answer(state, batch, response, agent):
     else:
         update,_,summary = actions.execute(work,proposed,"user",quotes=quotes)
     work.update(update)
+    snapshot = {key:copy.deepcopy(state.get(key,default)) for key,default in ANSWER_SNAPSHOT_DEFAULTS.items()}
+    before_stops,after_stops = state.get("stops",{}),work.get("stops",{})
+    snapshot["stops"] = {identity:copy.deepcopy(before_stops.get(identity)) for identity in before_stops.keys() | after_stops.keys()
+                         if before_stops.get(identity) != after_stops.get(identity)}
+    work.setdefault("decision_snapshots",{})[batch.batch_id] = {
+        "batch":copy.deepcopy(raw_batch),"snapshot":snapshot,"history_start":len(state.get("decision_history",[]))}
     history = work.setdefault("decision_history",[])
     entry = {"source":"decision","batch_id":batch.batch_id,"targets":targets,"summary":summary,"actions":copy.deepcopy(proposed),
              "answers":original_answers,"note":original_note,"selected_options":dict(answer.selected_options),
-             "situation_hash":_relevant_hash(work,targets)}
+             "situation_hash":_relevant_hash(work,targets),"reopenable":True,"snapshot_id":batch.batch_id}
     for native in history[len(state.get("decision_history",[])):]:
         native.update(source="decision",targets=targets,summary=summary,situation_hash=entry["situation_hash"])
     history.append(entry)
-    _message(work,summary,len(history)-1)
+    _message(work,summary,len(history)-1)["reopenable"] = True
     work["coordinator_confirmation"] = None
     return CoordinatorOutcome(state_updates=_updates(state,work),itinerary=copy.deepcopy(actions._plan(work)),
         messages=work["coordinator_messages"][start_messages:],

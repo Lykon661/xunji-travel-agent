@@ -938,46 +938,6 @@ label small { font-weight: 400; color: var(--text-3); }
 .interpretation-original p { margin: 4px 0; white-space: pre-wrap; }
 .decision-actions { display: flex; flex-wrap: wrap; gap: var(--s3); margin-top: var(--s4); }
 
-/* 系统替你做的决定（AssumptionsPanel） */
-.assumptions-panel {
-  padding: var(--s4) var(--s5);
-  margin: var(--s4) 0;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-}
-.assumptions-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: var(--s3);
-  margin-bottom: var(--s3);
-}
-.assumptions-head h4 { margin: 0 0 2px; font-size: var(--fs-md); color: var(--text); }
-.assumptions-head p { margin: 0; }
-.assumptions-list { display: flex; flex-direction: column; gap: var(--s3); }
-.assumption-card {
-  padding: var(--s3) var(--s4);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-}
-.assumption-title-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--s2);
-  margin-bottom: 4px;
-}
-.assumption-title-row strong { font-size: var(--fs-sm); color: var(--text); }
-.assumption-action { font-size: var(--fs-sm); color: var(--text-2); margin: 0 0 4px; }
-.assumption-reason { margin: 0 0 var(--s2); font-size: var(--fs-xs); }
-.assumption-alternatives { display: flex; flex-wrap: wrap; gap: var(--s2); margin-top: var(--s2); }
-.assumption-alt-btn { font-weight: 500; }
-.assumption-alt-desc { color: var(--text-3); font-weight: 400; margin-left: 2px; }
-.assumptions-mobile-toggle { display: none; margin-top: var(--s3); }
-
 /* 主理人消息（Coordinator Messages） */
 .coordinator-messages {
   display: flex;
@@ -1032,8 +992,6 @@ label small { font-weight: 400; color: var(--text-3); }
 .source-links { display: flex; gap: var(--s3); flex-wrap: wrap; }
 .source-links button { font-size: var(--fs-xs); }
 .candidate-edit-link { margin-top: var(--s3); }
-.candidate-edit-dates { display: flex; flex-wrap: wrap; gap: 14px; margin: 18px 0; }
-.candidate-edit-dates label { flex-direction: row; align-items: center; }
 
 /* ==========================================================================
    每日行程（PlanView）
@@ -1194,7 +1152,6 @@ label small { font-weight: 400; color: var(--text-3); }
 .map-mobile-export img { display: block; background: #fff; object-fit: contain; border-radius: var(--r-sm); }
 .map-mobile-export p { font-size: var(--fs-sm); line-height: 1.7; }
 .map-copy-address { font-size: var(--fs-xs); width: 100%; }
-.map-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; margin-bottom: 20px; }
 
 /* ==========================================================================
    行程调整对话（RouteChat）
@@ -1408,8 +1365,6 @@ label small { font-weight: 400; color: var(--text-3); }
   .map-mobile-export { grid-template-columns: 1fr; }
   .decision-options, .decision-options.legacy-options { display: grid; grid-template-columns: 1fr; }
   .decision-option-btn, .legacy-options .decision-option-btn { min-height: 44px; width: 100%; border-radius: var(--r-md); }
-  .assumption-card.mobile-collapsed { display: none; }
-  .assumptions-mobile-toggle { display: inline-flex; }
 }
 @media (max-width: 480px) {
   .guide-search-fields { grid-template-columns: 1fr; }

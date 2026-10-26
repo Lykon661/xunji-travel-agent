@@ -14,7 +14,6 @@ from .config import Settings
 
 ModelApi = Literal["openai-completions", "openai-responses", "openai-codex-responses", "anthropic-messages", "google-generative-ai", "mistral-conversations"]
 ThinkingLevel = Literal["default", "off", "minimal", "low", "medium", "high", "xhigh", "max"]
-APIS = set(ModelApi.__args__)
 ENV_KEYS = {
     "openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "google": "GEMINI_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY", "openrouter": "OPENROUTER_API_KEY", "groq": "GROQ_API_KEY",
@@ -433,4 +432,3 @@ class ModelConfigStore:
                         registry[role] = None
                 self._write(registry)
             return self.public_registry()
-

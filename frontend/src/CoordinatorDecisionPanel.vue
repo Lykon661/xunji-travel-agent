@@ -58,11 +58,11 @@ const effectiveQuestions = computed<DecisionQuestion[]>(() => {
 })
 
 function isLegacyQuestion(question: DecisionQuestion): boolean {
-  return !question.structured_options?.length && (question.options || []).every(opt => typeof opt === 'string')
+  return (question.options || []).every(opt => typeof opt === 'string')
 }
 
 function normalizeOptions(question: DecisionQuestion): NormalizedOption[] {
-  const rawList = question.structured_options?.length ? question.structured_options : (question.options || [])
+  const rawList = question.options || []
   const recText = (question.recommendation || '').trim()
   const recPrefix = recText.split(/[：:，,。]/)[0]?.trim() || ''
   let matchedAnyRec = false
@@ -129,11 +129,10 @@ function formatImpact(impact?: DecisionOption['impact']): string[] {
 }
 
 function resolveStopLabels(question: DecisionQuestion): string[] {
-  if (question.affected_stop_names?.length) return question.affected_stop_names
   if (!question.affected_stop_ids?.length) return []
   return question.affected_stop_ids.map(id => {
     if (props.stopNames?.[id]) return props.stopNames[id]
-    if (id.startsWith('wish:')) return id.slice(5)
+    if (id.startsWith('wish:')) return '你填写的地点'
     return id
   })
 }

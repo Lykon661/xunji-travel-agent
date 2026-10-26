@@ -30,7 +30,7 @@ const visibleMessages = computed(() =>
         <strong>主理人</strong>
         <small v-if="item.time" class="subtle">{{ item.time }}</small>
         <button
-          v-if="!historical"
+          v-if="!historical && item.reopenable"
           type="button"
           class="text-button coordinator-reopen-btn"
           :disabled="disabled"

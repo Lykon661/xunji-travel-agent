@@ -23,7 +23,7 @@ import SourceModal from './SourceModal.vue'
 import BudgetPanel from './BudgetPanel.vue'
 import { money } from './format'
 import { resolveWorkflowTab, workflowStamp, type WorkflowTab } from './workflow'
-import type { Capabilities, ModelConfiguration, Candidate, InterviewResponse, ProgressEvent, PlanningConstraint, Requirements, Source, Trip, TripSummary, Version, VersionSummary, TripDocument, MapResult } from './types'
+import type { Capabilities, ModelConfiguration, Candidate, InterviewHistoryEntry, InterviewQuestion, InterviewResponse, ProgressEvent, PlanningConstraint, Requirements, Source, Trip, TripSummary, Version, VersionSummary, TripDocument, MapResult } from './types'
 
 const trips = ref<TripSummary[]>([]), current = ref<Trip | null>(null), versions = ref<VersionSummary[]>([])
 const versionDocuments = ref<Record<number,TripDocument>>({})
@@ -133,7 +133,43 @@ const canSaveItinerary = computed(() => canEdit.value && !!itinerary.value && sa
 const itineraryStatus = computed(() => isHistory.value ? `已保存 · v${selectedVersion.value}` : savedItineraryVersion.value !== null ? `已保存 · v${savedItineraryVersion.value}` : '未保存的草稿')
 const visibleSources = computed(() => isHistory.value ? doc.value?.sources_snapshot || current.value?.sources || [] : current.value?.sources || [])
 const sourceStops = computed(() => new Map([...visibleSources.value.flatMap(s => s.extraction?.stops || []),...(doc.value?.supplements || [])].map(s => [s.id,s])))
-const stopNameMap = computed(() => Object.fromEntries([...sourceStops.value.entries()].map(([id, stop]) => [id, stop.name])))
+const stopNameMap = computed(() => ({
+  ...Object.fromEntries(
+    Object.entries(doc.value?.stops || {})
+      .filter(([, stop]) => stop?.name)
+      .map(([id, stop]) => [id, stop.name])
+  ),
+  ...Object.fromEntries([...sourceStops.value.entries()].map(([id, stop]) => [id, stop.name])),
+}))
+function roundAnswer(round: InterviewHistoryEntry, question: InterviewQuestion): string {
+  const direct = round.answers?.[question.id]
+  if (direct) return direct
+  const optId = round.selected_options?.[question.id]
+  if (optId) {
+    for (const opt of question.options || []) {
+      if (typeof opt === 'object' && opt !== null && opt.id === optId) return opt.label || opt.id
+      if (typeof opt === 'string' && opt === optId) return opt
+    }
+    if (round.summary) return round.summary
+    return optId
+  }
+  return round.summary || ''
+}
+function roundFallbackText(round: InterviewHistoryEntry): string {
+  if (round.summary?.trim()) return round.summary.trim()
+  if (round.place_selection) {
+    const name = round.place_selection.name || round.place_selection.label || round.place_selection.title || round.place_selection.place_id || round.place_selection.stop_id
+    return name ? `选择了地点：${name}` : '已完成地点选择'
+  }
+  if (round.hub_selection) {
+    const name = round.hub_selection.name || round.hub_selection.area || round.hub_selection.label || round.hub_selection.title || round.hub_selection.city
+    return name ? `选择了住宿区域：${name}` : '已完成住宿区域选择'
+  }
+  return ''
+}
+function hasRoundContent(round: InterviewHistoryEntry): boolean {
+  return Boolean(round.questions?.length || roundFallbackText(round) || round.note?.trim())
+}
 const activeConstraints = computed(() => (requirements.constraints || []).filter(item => !item.superseded_by && !item.revoke))
 const preferencesEdited = computed(() => requirements.preferences !== (doc.value?.requirements.preferences ?? ''))
 const constraintsEdited = computed(() => JSON.stringify(requirements.constraints || []) !== JSON.stringify(doc.value?.requirements.constraints || []))
@@ -144,7 +180,7 @@ function toggleConstraintStrength(id: string) {
 }
 const anchorLabels = {sunrise:'看日出',sunset:'看日落',appointment:'按预约时刻','':''}
 const modeLabels = {train:'火车',flight:'航班',ferry:'船班','':'班次'}
-function stopName(id: string) { return sourceStops.value.get(id)?.name || '攻略依据已变化的地点' }
+function stopName(id: string) { return stopNameMap.value[id] || '攻略依据已变化的地点' }
 function constraintText(item: PlanningConstraint) {
   const stop = item.scope.stop_ids[0] ? stopName(item.scope.stop_ids[0]) : ''
   const body = {
@@ -1027,17 +1063,22 @@ onUnmounted(() => {events?.close();window.clearInterval(runPoll);window.removeEv
               </div>
               <details v-if="doc?.interview?.history?.length" class="interview-history">
                 <summary>查看前面 {{ doc.interview.history.length }} 轮回答</summary>
-                <section v-for="(round,index) in doc.interview.history" :key="index">
-                  <h3>第 {{ index + 1 }} 轮</h3>
-                  <p v-for="question in round.questions" :key="question.id"><strong>{{ question.title }}</strong><br>{{ round.answers[question.id] }}</p>
-                  <p v-if="round.note">补充：{{ round.note }}</p>
-                  <button
-                    v-if="round.questions.length && doc.decision_history?.length && !isHistory"
-                    class="text-button"
-                    :disabled="!canEdit || candidateInputsChanged"
-                    @click="reopenDecision(index)"
-                  >重新回答这一题</button>
-                </section>
+                <template v-for="(round,index) in doc.interview.history" :key="index">
+                  <section v-if="hasRoundContent(round)">
+                    <h3>第 {{ index + 1 }} 轮</h3>
+                    <template v-if="round.questions?.length">
+                      <p v-for="question in round.questions" :key="question.id"><strong>{{ question.title }}</strong><br>{{ roundAnswer(round, question) }}</p>
+                    </template>
+                    <p v-else-if="roundFallbackText(round)">{{ roundFallbackText(round) }}</p>
+                    <p v-if="round.note">补充：{{ round.note }}</p>
+                    <button
+                      v-if="round.reopenable && !isHistory"
+                      class="text-button"
+                      :disabled="!canEdit || candidateInputsChanged"
+                      @click="reopenDecision(index)"
+                    >重新回答这一题</button>
+                  </section>
+                </template>
               </details>
             </section>
 
@@ -1070,7 +1111,7 @@ onUnmounted(() => {events?.close();window.clearInterval(runPoll);window.removeEv
                 <details>
                   <summary>查看未通过的草稿</summary>
                   <CoordinatorMessages
-                    :messages="blockedCandidate.coordinator_messages?.length ? blockedCandidate.coordinator_messages : doc?.coordinator_messages"
+                    :messages="doc?.coordinator_messages"
                     :disabled="!canEdit || candidateInputsChanged"
                     :historical="isHistory"
                     @reopen="reopenDecision"
@@ -1112,7 +1153,7 @@ onUnmounted(() => {events?.close();window.clearInterval(runPoll);window.removeEv
                 <ReviewPanel :review="candidate.review" :historical="isHistory" />
                 <CoordinatorMessages
                   v-if="!showRouteChat"
-                  :messages="candidate.coordinator_messages?.length ? candidate.coordinator_messages : doc?.coordinator_messages"
+                  :messages="doc?.coordinator_messages"
                   :disabled="!canEdit || candidateInputsChanged"
                   :historical="isHistory"
                   @reopen="reopenDecision"
@@ -1303,7 +1344,7 @@ onUnmounted(() => {events?.close();window.clearInterval(runPoll);window.removeEv
                 </p>
                 <ReviewPanel :review="doc?.review" :historical="isHistory" />
                 <CoordinatorMessages
-                  :messages="doc?.coordinator_messages?.length ? doc.coordinator_messages : doc?.selected_route?.coordinator_messages"
+                  :messages="doc?.coordinator_messages"
                   :disabled="!canEdit || candidateInputsChanged"
                   :historical="isHistory"
                   @reopen="reopenDecision"
@@ -1340,7 +1381,7 @@ onUnmounted(() => {events?.close();window.clearInterval(runPoll);window.removeEv
               :key="current.id"
               :days="doc.candidates[0].days"
               :messages="doc.route_chat || []"
-              :coordinator-messages="doc.coordinator_messages?.length ? doc.coordinator_messages : doc.candidates[0].coordinator_messages"
+              :coordinator-messages="doc.coordinator_messages"
               @reopen="reopenDecision"
               :selected-activities="selectedActivities"
               :disabled="!canEdit || candidateInputsChanged"

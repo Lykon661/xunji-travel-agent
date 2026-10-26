@@ -2,6 +2,7 @@
 import copy
 import logging
 from datetime import timedelta
+from time import monotonic
 from pydantic import ValidationError
 
 from .. import ablation
@@ -14,9 +15,11 @@ from ..resource_planning import resource_changes, resource_context_issues, trans
 from ..decisions import confirmation_blockers, confirmation_issues, input_hash, route_structure
 from ..unmet import collect
 from ..places import canonicalize_itinerary, duplicate_issues, plan_fingerprint, verified_review_duplicates, canonical_key
-from ..reviewing import bind_report, evidence_ids, require_review, review_basis, review_blockers, review_payload, incremental_review_payload, merge_incremental_review, review_context, review_context_state
+from ..reviewing import bind_report, evidence_ids, review_basis, review_payload, incremental_review_payload, merge_incremental_review, review_context, review_context_state
 from ..planning_recovery import previous_round, regression_reason, route_moves
 from ..actions import execute
+from ..constraints import public_only
+from ..scheduler import estimate_move
 
 
 logger = logging.getLogger(__name__)
@@ -37,8 +40,6 @@ class ReviewLoopNodes:
             raise Conflict("当前需求、攻略选择或规划任务已变化，旧审查不能用于保存")
         if hard := confirmation_blockers(itinerary,state.get("stop_constraints"),state["requirements"],state.get("stops"),state):
             raise Conflict("路线仍有阻断："+"；".join(hard))
-        queries = self.store.review_queries(state["trip_id"],list(evidence_ids(itinerary)))
-        require_review(report,state,itinerary,self.selected_sources(state["trip_id"],state.get("selected_source_ids",[])),queries)
 
     def assert_document_review(self,trip):
         doc = trip["document"]
@@ -57,9 +58,6 @@ class ReviewLoopNodes:
                             if item.blocking)
             if not itinerary.get("days"):
                 blockers.append("路线尚无逐日草稿，不能确认或保存；请重新规划")
-            blockers.extend(review_blockers(candidate.get("review"),state,itinerary,
-                self.selected_sources(trip["id"],doc.get("selected_source_ids",[])),
-                self.store.review_queries(trip["id"],list(evidence_ids(itinerary)))))
             candidate["confirmation_blockers"] = list(dict.fromkeys(blockers))
             if candidate.get("review"):
                 candidate["review"]["current"] = not bool(blockers)
@@ -175,6 +173,60 @@ class ReviewLoopNodes:
         return {"itinerary":plan,"unmet":[item.model_dump(mode="json") for item in collect(state,plan,report)],
                 "coordinator_resume":"review_gate"}
 
+    def refresh_duplicate_moves(self,state,original,dates):
+        known = route_moves(original)
+        original_days = {day["date"]:day for day in original.get("days",[])}
+        amap = getattr(self,"amap",None)
+        cache = getattr(amap,"cache",{})
+        batch_var = getattr(amap,"batch_state",None)
+        batch = batch_var.get() if batch_var is not None else None
+        batch_routes = batch.get("route_results",{}) if isinstance(batch,dict) else {}
+        mode = state["requirements"].get("local_transport","public")
+        modes = ["transit","walking"] if mode == "public" else [mode]
+        if state["requirements"].get("allow_taxi") and "driving" not in modes and not public_only(state["requirements"]):
+            modes.append("driving")
+        for day in state["itinerary"].get("days",[]):
+            if day["date"] not in dates:
+                continue
+            old = original_days[day["date"]]
+            old_visits = [item for item in old.get("activities",[]) if item.get("kind") == "visit"]
+            def movement(first,last):
+                if not first.get("name") or not last.get("name"):
+                    return {}
+                move = known.get((day["date"],day["city"],first["name"],last["name"]))
+                if move is not None and move.get("minutes") is not None:
+                    return copy.deepcopy(move)
+                origin,destination = first.get("map_place") or {},last.get("map_place") or {}
+                if origin.get("location") and destination.get("location"):
+                    for allowed in modes:
+                        key = ("route",state["trip_id"],day["city"],origin["location"],destination["location"],allowed)
+                        cached = cache.get(key)
+                        candidate = batch_routes.get(key)
+                        if candidate is None and cached and monotonic()-cached[0] < 1800:
+                            candidate = cached[1]
+                        if candidate is None or candidate.get("minutes") is None:
+                            continue
+                        if (mode == "public" and allowed == "walking" and
+                                (candidate["minutes"] > 25 or (candidate.get("walking_meters") or 0) > 1500)):
+                            continue
+                        return {**copy.deepcopy(candidate),"origin":first["name"],"destination":last["name"],
+                                "origin_place":copy.deepcopy(origin),"destination_place":copy.deepcopy(destination)}
+                return {**estimate_move(state,first,last),"origin":first["name"],"destination":last["name"],
+                        "origin_place":copy.deepcopy(origin),"destination_place":copy.deepcopy(destination)}
+            previous = {"name":day.get("start_place"),
+                        "map_place":((old_visits[0].get("move_before") or {}).get("origin_place") if old_visits else None)}
+            visits = [item for item in day.get("activities",[]) if item.get("kind") == "visit"]
+            for item in visits:
+                stop = {**item,"map_place":item.get("map_place") or state.get("stops",{}).get(item["id"],{}).get("map_place")}
+                item["move_before"] = movement(previous,stop)
+                previous = stop
+            day["return_move"] = movement(previous,{"name":day.get("end_place"),
+                "map_place":(old.get("return_move") or {}).get("destination_place")}) if visits else {}
+            end = timestamp(visits[-1].get("end"),day["date"]) if visits else None
+            move = day["return_move"]
+            travel = move.get("minutes") if move.get("minutes") is not None else move.get("estimate_minutes",0)
+            day["tail_arrival"] = end.hour*60+end.minute+(20+travel if move else 0) if end else day.get("available_start")
+
     async def repair_review_duplicates(self,state,report):
         generation = state.get("generation") or state.get("run_id")
         if not generation or state.get("duplicate_review_generation") == generation:
@@ -227,14 +279,16 @@ class ReviewLoopNodes:
             probe.update({key:repair[key] for key in ("itinerary","stops","system_assumptions","selected_route","candidates") if key in repair})
         except (ToolError,ValueError,KeyError) as exc:
             logger.warning("Duplicate repair kept the existing day without replacement: %s",exc)
-            probe = after_skip
+            probe = copy.deepcopy(after_skip)
+            self.refresh_duplicate_moves(probe,original,dates)
         await self.query_ticket_prices(probe,probe["itinerary"],dates,missing_only=True)
         checked = {**probe,"duplicate_repair_dates":sorted(dates)}
         probe.update(await self.check(checked))
         if any((issue["code"],issue.get("target")) not in prior_blockers for issue in confirmation_issues(
                 probe["itinerary"],probe.get("stop_constraints"),probe["requirements"],probe["stops"],probe)):
             logger.warning("Duplicate replacement discarded because it would introduce a user requirement conflict")
-            probe = after_skip
+            probe = copy.deepcopy(after_skip)
+            self.refresh_duplicate_moves(probe,original,dates)
             probe.update(await self.check({**probe,"duplicate_repair_dates":sorted(dates)}))
         unchanged = {day["date"]:day for day in original["days"] if day["date"] not in dates}
         probe["itinerary"]["days"] = [copy.deepcopy(unchanged.get(day["date"],day)) for day in probe["itinerary"]["days"]]
@@ -310,8 +364,6 @@ class ReviewLoopNodes:
         sources = self.selected_sources(state["trip_id"],state.get("selected_source_ids",[]))
         items = collect(state,itinerary,report)
         blockers = [item.detail for item in items if item.blocking]
-        blockers.extend(review_blockers(report,self.audit_state(state),itinerary,sources,
-            self.store.review_queries(state["trip_id"],list(evidence_ids(itinerary)))))
         actual = {day["date"]:day for day in itinerary.get("days",[])}
         for day in candidate.get("days",[]):
             if day["date"] in actual:
@@ -406,4 +458,3 @@ class ReviewLoopNodes:
         if itinerary.get("personal_map") and plan_fingerprint(itinerary) != plan_fingerprint(state.get("old_itinerary") or state["itinerary"]):
             itinerary.pop("personal_map",None)
         return {"itinerary":itinerary}
-

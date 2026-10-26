@@ -45,7 +45,7 @@ class GuideAgent(AgentRuntime):
             "required_ids仅包含用户明确必去的地点，excluded_ids仅包含明确不去的地点，不能把推荐当成用户决定。"
             "普通攻略餐饮仅作推荐，不加入景点分组或required_ids；source_kind=user的咖啡甜品饮品属于必去游览，默认45分钟，须参与分组与required_ids；用户正餐餐厅另按必去用餐处理，不因分店未定位让用户反复回答。"
             "同名分店不直接合并，groups只能引用现有景点stop_ids，说明来源冲突与时长缺口。"
-            "groups按城市内的建议区域整理资料，不是每天的游览安排，每组可以超过12个景点；实际每日取舍由行程 Agent 负责。"
+            "groups按城市内的建议区域整理资料，不是每天的游览安排，每组可以超过12个景点；行程 Agent 选择整趟景点，实际分天与排程由代码负责。"
             "每组stop_ids必须是available_stops完整ID组成的字符串数组，不能用名称、序号、对象或逗号分隔的字符串。"
             "分组city使用allowed_cities中的城市原值；不同城市的景点分别成组，以available_stops的city为准。"
             "遇到未满足条件或身份歧义时写入结构化unmet，引用现有stop/requirement/constraint及日期。"
@@ -99,7 +99,7 @@ class GuideAgent(AgentRuntime):
                     raise ToolError("guide_constraints","攻略 Agent 纠正后仍返回无来源或矛盾的必去/排除约束，未采用")
                 # Advisory grouping is optional. Preserve decisions and constraints, replace only unsafe suggestions.
                 result.groups = self.basic_groups(state)
-                result.summary = "区域建议未通过来源校验，已按所选攻略地点的所属城市做基础分组；区域顺序、日期与时段由行程 Agent 结合地图核实。"
+                result.summary = "区域建议未通过来源校验，已按所选攻略地点的所属城市做基础分组；分天、顺序与时段由代码结合地图安排。"
                 return validated(result)
             payload = {**payload,"previous_brief":result.model_dump(mode="json"),"validation_error":problem}
 

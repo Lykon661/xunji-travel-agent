@@ -37,23 +37,28 @@ export interface DecisionOption {
     minutes?: number | null;
     amount?: number | null;
     meters?: number | null;
+    dates?: string[];
+    removed_stop_ids?: string[];
+    added_stop_ids?: string[];
+    moved_stops?: Record<string, unknown>[];
+    known_before?: number | null;
+    known_after?: number | null;
+    budget_limit?: number | null;
+    travel_minutes?: number | null;
+    estimated_transport?: boolean;
   } | null;
 }
 export interface InterviewQuestion {
   id: string; title: string; question: string; options: (string | DecisionOption)[]; recommendation?: string;
-  structured_options?: DecisionOption[];
   recommended_option_id?: string;
   affected_dates?: string[];
   affected_stop_ids?: string[];
-  affected_stop_names?: string[];
   why_needed?: string;
 }
 export interface DecisionQuestion extends InterviewQuestion {
-  structured_options?: DecisionOption[];
   recommended_option_id?: string;
   affected_dates?: string[];
   affected_stop_ids?: string[];
-  affected_stop_names?: string[];
   why_needed?: string;
 }
 export interface DecisionInterpretation {
@@ -64,36 +69,17 @@ export interface DecisionInterpretation {
   original_answers?: Record<string, string>;
   original_note?: string;
 }
-export interface AssumptionAlternative {
-  id: string;
-  label: string;
-  description?: string;
-}
-export interface SystemAssumption {
-  id: string;
-  title: string;
-  dates?: string[];
-  stop_ids?: string[];
-  stop_names?: string[];
-  current_action?: string | Record<string, unknown> | null;
-  reason?: string;
-  revision?: number;
-  assumption_revision?: number;
-  alternatives?: AssumptionAlternative[];
-  options?: AssumptionAlternative[];
-}
 export interface CoordinatorMessage {
   id?: string;
   text: string;
   time?: string;
   decision_index?: number | null;
+  reopenable?: boolean;
 }
 export interface Candidate {
   id: string; title: string; reason: string; gaps: string[];
   days: {date: string; city: string; stop_ids: string[]; adjustment: string}[];
   draft?: Itinerary; draft_revision?: number; plan_hash?: string; input_hash?: string; confirmation_blockers?: string[]; review?: ReviewState | null;
-  system_assumptions?: SystemAssumption[];
-  coordinator_messages?: CoordinatorMessage[];
   feasibility?: {queried_at: string; budget: Itinerary['budget']; issues: Itinerary['issues']; information_unknown: string[];
     transport: {label: string; selected: Partial<Resource>; reason: string}[];
     hotels: {city: string; selected_by_user?: boolean; name?: string | null; area: string[]; commute_minutes?: number | null; selected?: Partial<Resource>; reason?: string; errors?: string[]; query_status?: string}[];
@@ -108,9 +94,20 @@ export interface InterviewResponse {
   selected_options?: Record<string,string>;
   interpretation_id?: string;
 }
+export interface InterviewHistoryEntry {
+  questions?: InterviewQuestion[];
+  summary?: string;
+  answers?: Record<string, string>;
+  selected_options?: Record<string, string>;
+  note?: string;
+  reopenable?: boolean;
+  source?: string;
+  place_selection?: { name?: string; title?: string; label?: string; city?: string; place_id?: string; stop_id?: string; [key: string]: unknown } | null;
+  hub_selection?: { name?: string; title?: string; label?: string; area?: string; city?: string; [key: string]: unknown } | null;
+}
 export interface Interview {
   summary: string; questions: InterviewQuestion[]; round: number; round_id: string; confirmed: boolean;
-  history: {questions: InterviewQuestion[]; summary: string; answers: Record<string,string>; note: string}[];
+  history: InterviewHistoryEntry[];
 }
 export interface Pending {
   kind: string; message: string; missing?: string[];
@@ -229,11 +226,11 @@ export interface TripDocument {
   products?: Product[]; reference_product_ids?: string[];
   product_search?: {query: string; mode: string; city?: string; min_price?: number | null; max_price?: number | null; hotel_location?: 'route' | 'custom' | 'city'; hotel_area?: string; summary?: string; platform_hint?: string; message: string; status?: string; code?: string; queried_at?: string; result_ids?: string[]};
   supplements?: (GuideStop & {source_kind: string; assigned_date: string})[];
+  stops?: Record<string, {id?: string; name: string; city?: string; category?: string; [key: string]: unknown}>;
   draft_revision?: number; stop_constraints?: {required: string[]; excluded: string[]};
   decision_history?: Interview['history'];
   route_chat?: RouteChatMessage[];
-  confirmed_plan?: {draft_revision: number; plan_hash: string; confirmed_at: string};
-  system_assumptions?: SystemAssumption[];
+  confirmed_plan?: {draft_revision: number; plan_hash: string; review_id?: string; confirmed_at: string} | null;
   coordinator_messages?: CoordinatorMessage[];
 }
 export interface Run {id: string; status: string; document: {message?: string; code?: string}}

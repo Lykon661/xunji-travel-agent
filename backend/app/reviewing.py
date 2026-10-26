@@ -4,11 +4,9 @@ import json
 import re
 from datetime import date, datetime, timedelta, timezone
 
-from .models import REVIEW_DIMENSIONS, ReviewReport
+from .models import ReviewReport
 from .places import fingerprint, plan_fingerprint, occurrences
-from .store import Conflict
-from .routing import coordinates, daily_route_scope, reference_opening, route_issue_applies, scoped_day
-from .constraints import active
+from .routing import coordinates, daily_route_scope, reference_opening, scoped_day
 from .assumptions import agent_payload, user_decisions
 
 
@@ -319,138 +317,6 @@ def review_scope(itinerary,queries=()):
             "unpriced_tickets_or_unbooked_reservations_alone_are_blockers":False}
 
 
-def correct_transfer_arithmetic(report, payload):
-    """Correct only a disproven transfer-buffer blocker; preserve separately evidenced constraints."""
-    if active(payload.get("requirements",{}),"transfer_buffer"):
-        return report
-    scope = payload.get("review_scope") or review_scope(payload["plan"])
-    corrected = report.model_copy(deep=True)
-    corrections = []
-    for finding in corrected.findings:
-        if (finding.severity != "blocker" or finding.action != "repair"
-                or not re.search(r"缓冲|余量|衔接|移动|交通|换乘",finding.message)
-                or not re.search(r"不足|不够|不可靠|无法|冲突|赶不上|未充分",finding.message)
-                or re.search(r"预约|班次|船班|登船|登机|检票|末班|停运|闭馆|开放|最晚入",finding.message)):
-            continue
-        path = canonical_review_path(payload["plan"],finding.field_path)
-        activity = next((item for item in scope.get("activities",[]) if path == item["field_path"]
-                         or path.startswith(item["field_path"]+"/")),None)
-        transfer = (activity or {}).get("transfer_timing") or {}
-        identity = transfer.get("evidence_id")
-        if (transfer.get("within_transfer_window") is not True or not identity or identity not in finding.evidence_ids
-                or not set(finding.evidence_ids) <= {identity,"requirements","review_scope"}):
-            continue
-        message = (f"{transfer.get('origin') or '前一项'}至{transfer['destination']}：前一项{transfer['previous_end']}结束，"
-                   f"当前{activity['start']}开始，可用{transfer['available_minutes']:g}分钟，高德路线"
-                   f"{transfer['route_minutes']:g}分钟，剩余{transfer['slack_minutes']:g}分钟；未证实存在额外的硬性缓冲要求。")
-        finding.severity,finding.owner,finding.action = "warning","reviewer","evidence"
-        finding.message = message
-        finding.suggestion = "保留当前活动时段和高德路线；实时交通变化可作提醒，不因此重排行程。"
-        corrections.append(message)
-    if not corrections:
-        return report
-    blockers = [finding for finding in corrected.findings if finding.severity == "blocker"]
-    if not blockers:
-        if any(check.result == "blocker" and check.dimension not in {"timing","feasibility"} for check in corrected.checks):
-            return report
-        for check in corrected.checks:
-            if check.result == "blocker":
-                check.result,check.note = "warning","；".join(corrections)[:1000]
-        corrected.status = "pass_with_warnings"
-    corrected.summary = ("仍有已证实问题："+"；".join(finding.message for finding in blockers)+"；" if blockers else "")
-    corrected.summary += "；".join(corrections)
-    warnings = [finding.message for finding in corrected.findings if finding.severity == "warning" and finding.message not in corrections]
-    if warnings:
-        corrected.summary += "；其他提示："+"；".join(warnings)
-    corrected.summary = corrected.summary[:2000]
-    return type(report).model_validate(corrected.model_dump(mode="json"))
-
-
-def review_semantic_errors(report, payload):
-    scope = payload.get("review_scope") or review_scope(payload["plan"])
-    dates = {item["date"]:item for item in scope["days"]}
-    calendar = {key:item["weekday"][-1] for item in scope["days"] for key in
-                (item["date"],f"{int(item['date'][5:7])}月{int(item['date'][8:10])}日")}
-    texts = [report.summary,*[item.note for item in report.checks],
-             *[text for item in report.findings for text in (item.message,item.suggestion)]]
-    errors = []
-    if scope["budget_status"] == "incomplete" and report.status == "pass":
-        errors.append("预算仍有未知费用，只能带明确提示通过，不能宣称费用已完整核算或预算已满足")
-    for text in texts:
-        for match in re.finditer(r"(\d{4}-\d{2}-\d{2}|\d{1,2}月\d{1,2}日)\s*(?:为|是|[（(])?\s*(?:星期|周|礼拜)([一二三四五六日天])(?![至到])",text):
-            if match[1] in calendar and match[2].replace("天","日") != calendar[match[1]]:
-                errors.append(f"日期星期错误：{match[1]}应为星期{calendar[match[1]]}，不能据错误星期推断闭馆")
-    for finding in report.findings:
-        if finding.severity != "blocker":
-            continue
-        if not route_issue_applies(payload["plan"],finding.model_dump(mode="json")):
-            errors.append("没有已选住宿时不检查住宿首末段或出发结束地址，即使有已选班次也仅检查其车站接驳")
-        if re.search(r"(?:审查|审查结果|报告|检验结论).{0,12}(?:与阻断状态不一致|状态不一致|格式不符|结构不符)|为了.{0,8}(?:满足|符合).{0,8}(?:格式|结构)",finding.message):
-            errors.append("审查报告自身的状态或结构矛盾应由检验Agent纠正，不能列为行程硬问题或要求路线Agent重排；未证实的普通核验需求保留warning")
-        bound_path = canonical_review_path(payload["plan"],finding.field_path)
-        if (bound_path.startswith("/budget") and any(item.get("ticket_assumed_free") for item in scope.get("activities",[]))
-                and re.search(r"门票|票价|票务",finding.message)
-                and re.search(r"未返回|未知|缺失|缺价|未取得|0元|漏计|不完整|缺口",finding.message)
-                and not re.search(r"算术|加总错误|币种|重复计费|已售罄|无法预约|票种不符",finding.message)):
-            errors.append("未查询到门票，预算按0元计算；不能据此认定预算漏计、不完整或阻断行程")
-        activity = next((item for item in scope.get("activities",[]) if bound_path == item["field_path"]
-                         or bound_path.startswith(item["field_path"]+"/")),None)
-        if activity:
-            if (activity["map_location_confirmed"] and re.search(r"飞猪|供应商|门票|票务|报价",finding.message)
-                    and re.search(r"坐标.{0,15}(?:不同|不一致|差异|偏差|不匹配)|(?:不同|不一致|差异|偏差).{0,8}坐标",finding.message)
-                    and not re.search(r"(?:名称|地址|展区).{0,8}(?:不符|不同|不一致|不匹配)|另一场馆|票种不符",finding.message)):
-                errors.append(f"{activity['field_path']}已有高德定位；飞猪只查询票务，跨平台坐标差异不能阻断或要求用户确认场馆；"
-                              "沿用高德POI和交通依据，票务按名称、地址、展区与别名匹配")
-            if (activity.get("ticket_assumed_free") and re.search(r"门票|票价|票务",finding.message)
-                    and re.search(r"未返回|未知|缺失|缺价|未取得|按零|免费|0元|漏计|不完整|缺口",finding.message)
-                    and not re.search(r"已售罄|无法预约|无可预约|闭馆|票种不符",finding.message)):
-                errors.append("未查询到门票，预算按0元计算；这项门票不列未知费用、不使预算不完整，也不构成漏计或阻断；assumed_free与供应商标记免费保持区分")
-            opening = activity["opening_reference"] or {}
-            if (activity["within_opening_window"] is True and activity["entry_before_last_admission"] is not False
-                    and opening.get("evidence_id") in finding.evidence_ids
-                    and set(finding.evidence_ids) <= {opening.get("evidence_id"),"requirements","review_scope"}
-                    and re.search(r"开放|营业|闭馆|最晚(?:进入|入场|入馆|入园)|入馆缓冲",finding.message)
-                    and re.search(r"超出|超过|早于|晚于|最晚|未明确入馆缓冲",finding.message)
-                    and (not re.search(r"最晚|停止入",finding.message) or activity["entry_before_last_admission"] is True)):
-                errors.append(f"{activity['field_path']}的{activity['start']}入场、{activity['end']}离场符合所引开放依据；"
-                              "最晚入场只比较start，闭馆只比较end；未声明额外入馆缓冲或预约待核实不能编造成超时，请分开保留真实预约限制")
-            if (activity["map_location_confirmed"] and activity["ticket_candidates_only"]
-                    and re.search(r"门票|报价|票务|票种",finding.message)
-                    and re.search(r"地点|位置|坐标|场馆|地址|匹配",finding.message)):
-                errors.append(f"{activity['field_path']}已有地图定位，ticket_quote仍为place_confirmation的未采用候选；"
-                              "供应商地点差异只提示票务待核对，不据此判定实际路线地点错误，不采用不匹配报价或改动地图定位")
-        affected = review_repair_dates([finding.model_dump(mode="json")],payload["plan"])
-        if (not active(payload.get("requirements",{}),"transfer_buffer")
-                and re.search(r"进站|出站|值机|到达缓冲|班次衔接",finding.message)
-                and re.search(r"不足|不够|冲突|赶不上|未留足",finding.message)):
-            for day in affected:
-                for connection in dates[day].get("transport_connections",[]):
-                    valid = connection.get("within_station_buffer") if connection["direction"] == "departure" else connection.get("within_exit_buffer")
-                    if (valid is True and connection.get("station") and connection["station"] in finding.message
-                            and set(finding.evidence_ids) <= {"requirements","review_scope",*connection.get("evidence_ids",[])}):
-                        errors.append("已选班次的进出站缓冲已计入review_scope，所引依据下衔接成立，不能重复扣除缓冲后阻断")
-        missing_first = re.search(r"首站|首末段",finding.message) and all(not dates[day]["first_leg_required"] for day in affected)
-        missing_last = re.search(r"首末段|末站|返程|返回住宿",finding.message) and all(not dates[day]["last_leg_required"] for day in affected)
-        missing_hotel = re.search(r"住宿.{0,8}(?:缺口|未选|未定)|酒店.{0,8}(?:未选|未定)",finding.message) and all(
-            not dates[day]["hotel_location_confirmed"] for day in affected)
-        if affected and (missing_first or missing_last or missing_hotel):
-            errors.append("未选定住宿且无已选城际班次的日期不检查首末段或住宿往返，不得据此阻断")
-        if (finding.field_path.startswith("/budget") and scope["budget_status"] == "incomplete"
-                and re.search(r"未知|未计入|待确认|无价",finding.message)
-                and not re.search(r"算术|加总错误|币种|重复计费",finding.message)):
-            errors.append("budget.status=incomplete已明确未知费用不在小计内；仅因缺价不能认定按零计费、超预算或阻断路线")
-        explicit_booking = active(payload.get("requirements",{}),"booking_prerequisite",stop_id=activity.get("id") if activity else None)
-        if (not explicit_booking and re.search(r"门票|票价|票务|预约",finding.message)
-                and re.search(r"(?:票价|价格).{0,8}(?:null|无价|未确认|未知)|(?:门票|票价|预约).{0,8}(?:待确认|待核对|未完成|未取得)",finding.message,re.I)
-                and not re.search(r"已售罄|无法预约|无可预约|停止售票|闭馆|不适用|日期错误|币种|票种不符",finding.message)):
-            errors.append("普通票价或预约尚待确认只保留提示；阻断需引用已证实的不可预约、售罄、闭馆或明确用户前置约束")
-    summary = re.sub(r"(?:未发现|没有|不存在|未见|无)(?:任何|明确的|实际的)?(?:开放|营业).{0,10}冲突|(?:开放|营业).{0,8}(?:无冲突|不冲突)","",report.summary)
-    if re.search(r"(?<![未没无不])(?:存在|发现|出现|仍有|有).{0,8}(?:开放|营业).{0,12}(?:冲突|超出|越界)",summary) and not any(
-            item.severity == "blocker" and re.search(r"开放|营业|闭馆|停止入[馆园场]",item.message) for item in report.findings):
-        errors.append("摘要宣称开放时间冲突，但没有对应的具体阻断发现；应说明真实不等式或修正摘要")
-    return list(dict.fromkeys(errors))
-
-
 def compact_review_payload(payload):
     # Keep plan paths intact; only identical supporting material is replaced by JSON pointers.
     seen = {}
@@ -589,31 +455,6 @@ def review_field_index(plan):
     return result
 
 
-def review_reference_errors(report, payload):
-    errors = []
-    days = payload["plan"].get("days",[])
-    dates = {day["date"] for day in days}
-    for index,finding in enumerate(report.findings):
-        missing = [identity for identity in finding.evidence_ids if identity not in payload["evidence_index"]]
-        if missing:
-            errors.append({"code":"review_evidence","finding_index":index,"field":"evidence_ids","value":missing,
-                           "message":"引用的依据不存在，只能使用evidence_index中的真实ID"})
-        if not pointer_exists(payload["plan"],finding.field_path):
-            errors.append({"code":"review_evidence","finding_index":index,"field":"field_path","value":finding.field_path,
-                           "message":"该路径不在plan中；路径相对于plan，不加/plan前缀；缺失字段应指向现有父对象"})
-        outside = [day.isoformat() for day in finding.dates if day.isoformat() not in dates]
-        if outside:
-            errors.append({"code":"review_scope","finding_index":index,"field":"dates","value":outside,
-                           "message":"影响日期必须属于当前plan.days"})
-        match = re.match(r"^/days/(0|[1-9][0-9]*)(?:/|$)",finding.field_path)
-        if finding.dates and match and int(match[1]) < len(days):
-            bound_date = days[int(match[1])]["date"]
-            if bound_date not in {day.isoformat() for day in finding.dates}:
-                errors.append({"code":"review_scope","finding_index":index,"field":"dates","value":[day.isoformat() for day in finding.dates],
-                               "message":"影响日期应包含field_path所指日期 "+bound_date+"；跨日问题可以同时包含其他日期"})
-    return errors
-
-
 def quote_expiry(option):
     try:
         queried = datetime.fromisoformat(option.get("queried_at","").replace("Z","+00:00"))
@@ -638,12 +479,3 @@ def bind_report(report, state, itinerary, basis, queried_ids):
                   plan_hash=plan_fingerprint(itinerary),review_basis_hash=basis,evidence_ids=sorted(queried_ids),
                   reviewed_at=current.isoformat(),expires_at=expiry.isoformat())
     return result
-
-
-def review_blockers(report, state, itinerary, sources, queries):
-    return []
-
-
-def require_review(report, state, itinerary, sources, queries):
-    if blockers := review_blockers(report,state,itinerary,sources,queries):
-        raise Conflict("；".join(blockers))

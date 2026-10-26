@@ -11,8 +11,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 from pydantic import ValidationError
 
-from app.models import (Candidate, CandidatePack, CandidateRevision, InterviewQuestion,
-                        InterviewRound, RequirementUpdate)
+from app.models import Candidate, CandidatePack, CandidateRevision, RequirementUpdate
 from app.models import GuideBrief, RouteTurn
 from app.planner import Planner
 from app.store import Conflict, Store
@@ -70,7 +69,6 @@ class RouteInterview(unittest.IsolatedAsyncioTestCase):
         return self.store.trip(self.trip["id"])
 
 
-
     async def test_back_rejects_a_stale_page_without_starting_a_run(self):
         trip = self.completed_document()
         with self.assertRaises(Conflict):
@@ -101,12 +99,6 @@ class RouteInterview(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 self.planner.apply_candidate_revision(ROUTE,revision,["2026-11-11"],REQ,self.stops)
 
-
-
-    def test_generated_round_rejects_multiple_questions(self):
-        question = {"id":"first","title":"偏好","question":"喜欢哪种节奏？","options":[],"recommendation":"按偏好选择"}
-        with self.assertRaises(ValidationError):
-            InterviewRound(summary="当前需求",questions=[question,{**question,"id":"second"}])
 
     async def test_invalid_revision_keeps_candidate_available_for_another_edit(self):
         self.model.ask.return_value = self.revision("other:0")

@@ -6,7 +6,6 @@
 import asyncio
 import copy
 import logging
-import re
 import traceback
 from datetime import timedelta
 from functools import cached_property
@@ -39,11 +38,6 @@ __all__ = ["NODE_STAGES", "Planner", "TripState", "interrupt"]
 def interrupt(value):
     from langgraph.types import interrupt as graph_interrupt
     return graph_interrupt(value)
-
-
-
-
-
 
 
 def error_leaves(error: BaseException):
@@ -122,7 +116,6 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
         self.store.update(state["trip_id"],doc)
 
 
-
     async def coordinator_gate(self,state):
         answer = interrupt(pending_batch(state))
         return {"coordinator_answer":answer}
@@ -165,7 +158,9 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
                     candidate = (result.get("candidates") or [{}])[0]
                     reply = result.get("revision_reply") or candidate.get("reason") or "行程已更新，请查看左侧路线。"
                     doc["route_chat"].append({"role":"assistant","content":reply,"time":now()})
-                if pending.get("kind") in {"guides", "sources", "interview", "interview_confirmation", "selection"}:
+                if (pending.get("kind") in {"guides", "sources", "interview", "interview_confirmation", "selection"}
+                        or pending.get("kind") in {"decision", "decision_confirmation"}
+                        and run.get("document",{}).get("request") == "重新回答已有选择"):
                     doc.update(itinerary_outdated=bool(doc.get("itinerary")), selected_route={})
                 self.store.update(run["trip_id"],doc)
                 self.store.finish_run(run_id,"waiting",{"pending":pending})

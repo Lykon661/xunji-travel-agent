@@ -46,7 +46,7 @@ class AgentRuntime:
         if ASSUMPTION_NOTE not in instruction:
             instruction += ASSUMPTION_NOTE
         if self.role in {"行程 Agent","主理人 Agent"}:
-            instruction += "景点摘要的coordinates为经纬度；opening给出open/closed/unknown、分钟时段和停止入场，default为常规结果，exceptions只覆盖列出的日期。未知时间按09:00至17:00参考安排并提示未核实。必去或想去全程任一天安排即满足。"
+            instruction += "景点摘要的coordinates为经纬度；opening给出open/closed/unknown、分钟时段和停止入场，default为常规结果，exceptions只覆盖列出的日期。未知开放时间保留未核实提示，具体排程由代码负责。必去或想去全程任一天安排即满足。"
         config_store = getattr(self.models,"config_store",None)
         config = config_store.snapshot().public() if config_store else {}
         references = self.model_references(state,payload)
@@ -69,7 +69,7 @@ class AgentRuntime:
                        "资料缺口本身不要求用户代查。不得删除必去、锁定项目或扩大所选攻略范围。") if final_turn else ""
             response_schema = completion_schema if final_turn and completion_schema else schema
             model_payload = {**payload,"tool_observations":observations,"remaining_tool_rounds":0 if final_turn else 3-turn}
-            reference_note = ("本次available_stops的键是唯一允许的景点引用；内部长ID已换成stop_短编号。stop_ids、durations/start_times的键及工具origin_id/destination_id必须直接复制这些键；"
+            reference_note = ("本次available_stops的键是唯一允许的景点引用；内部长ID已换成stop_短编号。stop_ids、feasibility.durations/priorities的键及工具origin_id/destination_id必须直接复制这些键；"
                               "不要生成、还原或抄写内部长ID，也不要只复制错误说明里的未知ID。程序会还原真实攻略引用。") if references else ""
             result = await self.models.ask(response_schema,f"你是{self.role}。"+instruction+closing+reference_note,
                                            model_view(self.role,replace_references(state,outward),replace_references(model_payload,outward)))

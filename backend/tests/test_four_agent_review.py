@@ -16,7 +16,7 @@ from app.dining import refresh_meals
 from app.models import REVIEW_DIMENSIONS, Requirements, ReviewReport, ResourceChoice
 from app.places import canonicalize_stops, duplicate_issues
 from app.planner import Planner
-from app.reviewing import bind_report, evidence_ids, review_basis, review_payload, require_review
+from app.reviewing import bind_report, evidence_ids, review_basis, review_payload
 from app.decisions import confirmation_blockers
 from app.rules import check_itinerary
 from app.store import Store, Conflict
@@ -116,11 +116,6 @@ class IndependentReview(unittest.IsolatedAsyncioTestCase):
         plan["hotels"][0]["selected_by_user"] = True
         self.assertIn("query:hotel",evidence_ids(plan))
         self.assertTrue(any(issue["code"] == "over_budget" for issue in check_itinerary(plan,self.req)["issues"]))
-
-
-
-
-
 
 
     def test_incomplete_checklist_is_not_accepted(self):

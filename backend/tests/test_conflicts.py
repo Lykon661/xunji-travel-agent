@@ -43,22 +43,14 @@ def itinerary():
 class Capacity(unittest.TestCase):
 
 
-
-
     def test_exclude_moves_a_required_stop_to_excluded(self):
         updates,_,_ = apply_option(state(),{"type":"exclude","stop_id":"ly","date":A},"这次不去灵隐寺")
         self.assertEqual(updates["stop_constraints"],{"required":["xh"],"excluded":["ly"]})
         self.assertEqual(updates["requirements"]["excluded_stop_ids"],["ly"])
 
 
-
-
 def minimum(count, **scope):
     return merge([],[ConstraintDraft(kind="daily_min_stops",count=count,scope=scope,quote="每天至少三个景点").model_dump(mode="json")],"form")
-
-
-
-
 
 
 def accepted(count):
@@ -73,28 +65,6 @@ def uneven():
     current["selected_route"] = {"days":current["candidates"][0]["days"]}
     plan = {"days":[day(A,visit("xh","09:00","11:00"),visit("ly","11:30","13:00"),visit("ld","13:30","14:00")),day(B)]}
     return current,plan
-
-
-
-
-class RouteFormat(unittest.IsolatedAsyncioTestCase):
-    async def test_missing_daily_order_is_corrected_once(self):
-        agent = RouteAgent(SimpleNamespace(),Mock())
-        ready = SimpleNamespace(status="ready",order=SimpleNamespace(stop_ids=["xh"]),candidate=None)
-        agent.ask = AsyncMock(side_effect=[SimpleNamespace(status="ready",order=None,candidate=object()),ready])
-        self.assertIs(await agent.plan_turn({},"合成指令",{},None,True),ready)
-        retry = agent.ask.await_args_list[1]
-        self.assertIn("没有order",retry.args[2])
-        self.assertFalse(retry.kwargs["cache"])
-
-    async def test_second_incomplete_result_still_fails(self):
-        agent = RouteAgent(SimpleNamespace(),Mock())
-        agent.ask = AsyncMock(return_value=SimpleNamespace(status="ready",order=None,candidate=None))
-        with self.assertRaises(ToolError):
-            await agent.plan_turn({},"合成指令",{},None,False)
-        self.assertEqual(agent.ask.await_count,2)
-
-
 
 
 if __name__ == "__main__":

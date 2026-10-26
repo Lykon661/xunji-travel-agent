@@ -73,63 +73,6 @@ def spatial_errors(plan: dict, candidate: dict, stops: dict[str, dict], requirem
     return errors
 
 
-def cluster_deviation(initial: dict, candidate: dict, stops: dict[str, dict], requirements: dict | None = None) -> dict:
-    unknown = set(initial["unlocated_stop_ids"])
-    known = (set(initial["visit_minutes"]) | set(initial["reserve_stop_ids"]))-unknown
-    known_keys = {canonical_key(stops[i]) for i in known if i in stops}
-    unknown_keys = {canonical_key(stops[i]) for i in unknown if i in stops}-known_keys
-    groups, final = {},{}
-    for source,target in ((initial,groups),(candidate,final)):
-        for day in source.get("days",[]):
-            for i in day.get("stop_ids",[]):
-                if i in stops and i not in unknown and canonical_key(stops[i]) not in unknown_keys:
-                    target.setdefault(canonical_key(stops[i]),[]).append((day["date"],i))
-    moved, removed, added = [],[],[]
-    for key in sorted(groups.keys() | final.keys()):
-        before,after = sorted(groups.get(key,[])),sorted(final.get(key,[]))
-        for entry in list(before):
-            same = next((value for value in after if value[0] == entry[0]),None)
-            if same:
-                before.remove(entry)
-                after.remove(same)
-        pairs = list(zip(before,after))
-        moved.extend((old,new) for old,new in pairs)
-        removed.extend(before[len(pairs):])
-        added.extend(entry for entry in after[len(pairs):] if canonical_key(stops[entry[1]]) in known_keys
-                     and entry[1] not in initial["required_ids"])
-    weights = initial["visit_minutes"]
-    total = sum(weights[i] for entries in groups.values() for _,i in entries)
-    moved_minutes = sum(weights[old[1]] for old,_ in moved)
-    removed_minutes = sum(weights[i] for _,i in removed)
-    added_minutes = sum(_minutes(stops[i],requirements or {},day) for day,i in added)
-    small = (1 <= sum(map(len,groups.values())) <= initial["policy"]["small_trip_max"] and not removed and not added
-             and (len(moved) == 1 or (len(moved) == 2 and moved[0][0][0] == moved[1][1][0] and moved[1][0][0] == moved[0][1][0])))
-    matches = []
-    for (old,i),(new,j) in moved:
-        note = next((d.get("adjustment","") for d in candidate["days"] if d["date"] == new),"")
-        names = {i,j,stops[i].get("name"),stops[j].get("name"),*stops[i].get("alias_names",[]),*stops[j].get("alias_names",[])}
-        valid = [(index,line.strip()[3:].split("|")) for index,line in enumerate(note.splitlines()) if line.strip().startswith("移日：")]
-        matches.append([(new,index) for index,parts in valid if len(parts) == 4 and parts[0].strip() in names
-                        and parts[1].strip() == old and parts[2].strip() == new and len("".join(parts[3].split())) >= 4])
-    claimed = {}
-    def claim(index, seen):
-        for line in matches[index]:
-            if line in seen:
-                continue
-            seen.add(line)
-            if line not in claimed or claim(claimed[line],seen):
-                claimed[line] = index
-                return True
-        return False
-    missing = [moved[index][0][1] for index in range(len(moved)) if not claim(index,set())]
-    ratio,addition = ((moved_minutes+removed_minutes)/total if total else 0),(added_minutes/total if total else 0)
-    return {"initial_minutes":total,"moved_ids":sorted(old[1] for old,_ in moved),"removed_ids":sorted(i for _,i in removed),
-            "added_ids":sorted(i for _,i in added),"moved_minutes":moved_minutes,"removed_minutes":removed_minutes,
-            "added_minutes":added_minutes,"ratio":ratio,"addition_ratio":addition,"small_trip_exception":bool(small),
-            "missing_reasons":sorted(missing),"exceeded":bool(total and not small and
-                (ratio > initial["policy"]["max_deviation"] or addition > initial["policy"]["max_addition"]))}
-
-
 def build_spatial_plan(state: dict, stops: dict[str, dict], days=None, durations=None, priorities=None) -> dict:
     req, constraints = state["requirements"],state.get("stop_constraints") or {}
     dates,cities = trip_dates(req),req["cities"]
@@ -144,7 +87,7 @@ def build_spatial_plan(state: dict, stops: dict[str, dict], days=None, durations
                  if not is_dining(all_stops[identity])}
     allowed_dates = fixed_dates({**state,"stops":all_stops})
     fixed,groups,pool,issues = {},{},{},[]
-    plan = {"version":1,"status":"partial","policy":{"max_deviation":0.25,"max_addition":0.25,"small_trip_max":4},
+    plan = {"version":1,"status":"partial",
             "days":[],"day_budgets":{},"default_day_budgets":{},"city_days":{},"required_ids":[],"fixed_dates":fixed,"visit_minutes":{},
             "unlocated_stop_ids":[],"reserve_stop_ids":[],"issues":issues}
     for i,stop in sorted(stops.items()):

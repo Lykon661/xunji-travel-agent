@@ -3,7 +3,6 @@ from typing import Literal
 
 from pydantic import Field
 
-from ..adapters import ToolError
 from ..models import RouteToolRequest, RouteTurn
 from ..routing import coordinates
 from ..assumptions import ASSUMPTION_NOTE
@@ -26,13 +25,6 @@ def resolve_stop_id(value, stops, city=None):
 class RouteCompletion(RouteTurn):
     status: Literal["ready"]
     tools: list[RouteToolRequest] = Field(default_factory=list, max_length=0)
-    order: None = None
-
-
-class DailyRouteCompletion(RouteTurn):
-    status: Literal["ready"]
-    tools: list[RouteToolRequest] = Field(default_factory=list, max_length=0)
-    candidate: None = None
 
 
 class RouteAgent(AgentRuntime):
@@ -55,13 +47,11 @@ class RouteAgent(AgentRuntime):
 
     def result_cacheable(self, state, payload, result):
         stops = payload.get("available_stops",{})
-        order = getattr(result,"order",None)
         candidate = getattr(result,"candidate",None)
-        groups = [(payload.get("city"),order.stop_ids,list(order.durations)+list(order.start_times))] if order else [
-            (day.city,day.stop_ids,[]) for day in candidate.days] if candidate else []
-        for city,identities,keys in groups:
+        groups = [(day.city,day.stop_ids) for day in candidate.days] if candidate else []
+        for city,identities in groups:
             resolved = [resolve_stop_id(identity,stops,city) for identity in identities]
-            if None in resolved or len(resolved) != len(set(resolved)) or any(resolve_stop_id(key,stops,city) is None for key in keys):
+            if None in resolved or len(resolved) != len(set(resolved)):
                 return False
         return True
 
@@ -99,7 +89,7 @@ class RouteAgent(AgentRuntime):
             stop["query_status"] = "resolved"
             stop.pop("map_issue",None)
 
-    async def plan(self, state, instruction, payload, tools, daily=False):
+    async def plan(self, state, instruction, payload, tools):
         payload = {**payload,"guide_suggestions":state.get("guide_suggestions",{})}
         payload = agent_payload(state,payload)
         pool = payload.get("available_stops")
@@ -109,7 +99,7 @@ class RouteAgent(AgentRuntime):
                 ("resolved" if coordinates(stop.get("map_place")) else "unresolved" if stop.get("map_issue") else "not_queried")}
                 for identity,stop in pool.items()}}
         try:
-            return await self.plan_turn(state,instruction,payload,tools,daily)
+            return await self.plan_turn(state,instruction,payload,tools)
         finally:
             if isinstance(pool,dict):
                 for identity,stop in payload["available_stops"].items():
@@ -123,9 +113,9 @@ class RouteAgent(AgentRuntime):
                         else:
                             original.pop(field,None)
 
-    async def plan_turn(self, state, instruction, payload, tools, daily):
+    async def plan_turn(self, state, instruction, payload, tools):
         prompt = (
-            ASSUMPTION_NOTE+"你与攻略 Agent、资源 Agent 协作，只形成一条完整行程。交通、住宿和门票使用资源 Agent 交接的真实结果。"
+            ASSUMPTION_NOTE+"你只选择整趟景点集合，估计缺失游玩时长并给出优先级。分天、每日顺序、起止时刻、真实交通查询与排程由代码负责。"
             "住宿仅在selected_by_user=true时参与行程；未选定酒店不得暂用，不安排酒店起终点、放行李或接驳，也不要求用户先选酒店。"
             "全程同一canonical_place_id默认只游览一次，多个source_references只是同一地点的多个来源；用户明确repeat_exceptions除外。"
             "可通过tools请求place、route、weather或guide_feedback，"
@@ -142,30 +132,16 @@ class RouteAgent(AgentRuntime):
             "地点query_status=not_queried表示尚未查询，不能称为查不到；有坐标即已定位，不能沿用旧的定位失败名单。"
             "未定位时根据map_issue区分候选歧义、网络请求失败和无匹配；有map_selected_id但无坐标是详情未取得，不重复询问选哪个候选。"
             "攻略gaps中的超出目的地范围属于城市范围问题，不能称为高德无法定位，也不能擅自把外地景点加入目的地城市。"
-            "普通可选且未纳入路线的地点缺口不阻断整趟规划；确需用户选择时只问当前影响安排的具体地点与待决事项，不批量询问是否接受所有未定位景点。"
+            "普通可选且未纳入路线的地点缺口如实说明；需要用户取舍的事项由代码生成问题，不向用户提问。"
             "需区分交通方式：transit为空但walking_alternative或route_evidence有实际步行结果时，只是公交未取得，步行已经核实，不得一并说成未知。"
             "不得默认所有景点间都有公共交通，未查询公交不等于公交查询失败；短途已核实步行无需补公交证据或据此删点，仍计入每日步行上限。不把某日期/某景点的条件推广到整趟。"
-            "先利用高德查询证据再确定顺序，不虚构交通耗时、位置或天气。"
+            "只使用已有查询证据辅助选点，不虚构交通耗时、位置或天气，不决定每日顺序。"
             "地点坐标与路段起终点只用高德map_place，飞猪仅查询票务；不比较两平台坐标，不因票务坐标差异更换或清空高德定位，也不据此要求用户确认场馆。"
             "需要工具时status=tools；完成时status=ready，未满足条件写入unmet，引用对象、日期及差额数字，不向用户提问。"
             "普通可选项目可自行取舍并解释，必去/锁定项不能删除。"
-            "普通攻略餐饮另列用餐推荐，不加入stop_ids；source_kind=user的咖啡、甜品、饮品是必去游览，默认45分钟，用户时长优先。meal_wishes是用户必去正餐餐厅，不加入stop_ids，让对应餐次前后景点靠近它，尽量在2公里内。"
+            "普通攻略餐饮另列用餐推荐，不加入stop_ids；source_kind=user的咖啡、甜品、饮品是必去游览，默认45分钟，用户时长优先。meal_wishes是用户必去正餐餐厅，不加入stop_ids，日期和餐次附近景点由代码安排。"
             "门票不是每个地点的必备条件；保留攻略中的免费说明和多个票种，不因未提供票价反复追问。"
             "用户最新明确指令优先于默认规则与旧偏好。walking_limit_exempt_dates中的日期已获用户授权豁免步行上限，"
             "effective_max_walk_per_day为null时只提示真实距离，不能因旧上限删点、换住宿或重复追问。"
-            "工具失败如实写入unmet；交付尽力完成的草稿，"
-            +("返回order，candidate为null。" if daily else "返回单个candidate，order为null。")+instruction)
-        completion = DailyRouteCompletion if daily else RouteCompletion
-        def incomplete(turn):
-            return turn.status == "ready" and ((daily and turn.order is None) or (not daily and turn.candidate is None))
-        result = await self.ask(state,RouteTurn,prompt,payload,tools,completion_schema=completion)
-        if incomplete(result):
-            # One correction, like other format errors: say what was missing instead of failing the whole run.
-            correction = ("上一次返回status=ready却没有"+("order" if daily else "candidate")+"，本步骤无法采用。"
-                          "完成时必须填写"+("order（candidate为null）" if daily else "candidate（order为null）")+"；未解决条件写入unmet。")
-            result = await self.ask(state,RouteTurn,prompt+correction,payload,tools,cache=False,completion_schema=completion)
-        if incomplete(result):
-            raise ToolError("route_format","路线 Agent 未交接当前步骤需要的结构，未采用")
-        return result
-
-
+            "工具失败如实写入unmet；交付单个candidate，days仅承载所选ID，除用户固定日期外由代码重新分天。"+instruction)
+        return await self.ask(state,RouteTurn,prompt,payload,tools,completion_schema=RouteCompletion)
