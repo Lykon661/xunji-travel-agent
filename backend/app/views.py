@@ -181,10 +181,12 @@ def reviewer_view(state, payload):
     fields = ("requirements","constraints","locks","decisions","occurrences","change_scope","policy_version","review_mode",
               "review_dates","review_dimensions","budget_items","unchanged_days","review_scope","field_path_index")
     result = _clean(pick(payload,fields))
-    result["plan"] = plan_summary(state,payload.get("plan",{}))
-    result["previous_plan"] = plan_summary(state,payload.get("previous_plan",{}))
+    from .reviewing import expand_review_refs
+    plans = {key:expand_review_refs(payload,payload.get(key,{})) for key in ("plan","previous_plan")}
     for key in ("plan","previous_plan"):
-        originals = {day["date"]:day for day in payload.get(key,{}).get("days",[])}
+        result[key] = plan_summary(state,plans[key])
+    for key in ("plan","previous_plan"):
+        originals = {day["date"]:day for day in plans[key].get("days",[])}
         semantic_days = []
         for day in result[key].get("days",[]):
             row = pick(day,("date","city","meal_recommendations"))

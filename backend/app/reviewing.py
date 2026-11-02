@@ -317,6 +317,21 @@ def review_scope(itinerary,queries=()):
             "unpriced_tickets_or_unbooked_reservations_alone_are_blockers":False}
 
 
+def expand_review_refs(payload, value):
+    # Inverse of compact_review_payload for parts that are read structurally.
+    if isinstance(value,dict) and set(value) == {"$ref"}:
+        target = payload
+        for part in value["$ref"][2:].split("/"):
+            part = part.replace("~1","/").replace("~0","~")
+            target = target[int(part)] if isinstance(target,list) else target[part]
+        return expand_review_refs(payload,target)
+    if isinstance(value,dict):
+        return {key:expand_review_refs(payload,item) for key,item in value.items()}
+    if isinstance(value,list):
+        return [expand_review_refs(payload,item) for item in value]
+    return value
+
+
 def compact_review_payload(payload):
     # Keep plan paths intact; only identical supporting material is replaced by JSON pointers.
     seen = {}
