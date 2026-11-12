@@ -33,3 +33,4 @@ backend/eval/nightly-*.log
 # 本地编辑器与助手配置
 .claude/
 .ccg/
+CLAUDE.md
