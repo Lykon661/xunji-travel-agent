@@ -11,7 +11,7 @@ from app.models import GuideBrief
 class GuideBriefRecovery(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.agent = GuideAgent(SimpleNamespace(),Mock())
-        self.agent.store.trip.return_value = {"active_run":"run"}
+        self.agent.store.active_run.return_value = "run"
         self.agent.store.run.return_value = {"status":"running"}
         self.agent.store.agent_result.return_value = None
         self.agent.ask = AsyncMock()

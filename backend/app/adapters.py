@@ -1116,7 +1116,10 @@ class Amap:
                                 self.quota_error = error
                             if error.code != "amap_rate_limit":
                                 raise error from None
-                            self.request_interval = min(2.0,max(0.5,getattr(self,"request_interval",0.0)*2))
+                            # 同一批并发请求被一起拒绝只算一次限流：只有按当前间隔发出的请求才继续降频。
+                            current_interval = getattr(self,"request_interval",0.0)
+                            if interval >= current_interval:
+                                self.request_interval = min(2.0,max(0.5,current_interval*2))
                             delay = max(float(getattr(error,"retry_after",0)),65 if getattr(error,"window_limited",False) else 5*(2**attempt))
                             self.rate_limited_until = max(getattr(self,"rate_limited_until",0),monotonic()+delay)
                             logging.getLogger(__name__).warning("AMap throttled: tool=%s details=%s retry=%s wait_seconds=%s",tool,details,attempt+1,delay)

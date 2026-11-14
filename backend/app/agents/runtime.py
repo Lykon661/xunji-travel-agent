@@ -36,8 +36,7 @@ class AgentRuntime:
         self.role, self.models, self.store = role, models, store
 
     def assert_current(self, state):
-        trip = self.store.trip(state["trip_id"])
-        if trip["active_run"] != state["run_id"] or self.store.run(state["run_id"])["status"] != "running":
+        if self.store.active_run(state["trip_id"]) != state["run_id"] or self.store.run(state["run_id"])["status"] != "running":
             raise Conflict("规划任务已变化，旧 Agent 结果未采用")
 
     async def ask(self, state, schema, instruction, payload, tools=None, cache=True, completion_schema=None):

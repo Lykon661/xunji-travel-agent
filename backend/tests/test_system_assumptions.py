@@ -171,7 +171,7 @@ class AssumptionPersistence(unittest.IsolatedAsyncioTestCase):
                  "system_assumptions":self.ledger, "decision_history":[user]}
         models = SimpleNamespace(ask=AsyncMock(return_value=RequirementUpdate()))
         store = Mock()
-        store.trip.return_value = {"active_run":"run"}
+        store.active_run.return_value = "run"
         store.run.return_value = {"status":"running"}
         store.agent_result.return_value = None
         runtime = AgentRuntime("合成Agent", models, store)

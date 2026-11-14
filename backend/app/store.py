@@ -88,6 +88,7 @@ class Store:
                   result TEXT NOT NULL, created_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS search_cache(keyword TEXT PRIMARY KEY,
                   document TEXT NOT NULL, created_at TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS queries_tool ON queries(trip_id,provider,json_extract(request,'$.tool'),id);
             """)
 
     @contextmanager
@@ -123,11 +124,27 @@ class Store:
         result["sources"] = self.sources(trip_id)
         return result
 
+    def active_run(self, trip_id: str) -> str | None:
+        """只读当前运行编号；过期检查在每次模型和工具调用前后都会用到，不解析整份文档。"""
+        with self.connect() as db:
+            row = db.execute("SELECT active_run FROM trips WHERE id=?", (trip_id,)).fetchone()
+        if not row:
+            raise KeyError("旅行不存在")
+        return row["active_run"]
+
+    def progress(self, trip_id: str, stage: str, message: str):
+        """只改进度字段，不读回整份文档。"""
+        with self.connect() as db:
+            db.execute("UPDATE trips SET document=json_set(document,'$.stage',?,'$.progress_stage',?,"
+                       "'$.progress_message',?,'$.pending',json('null')),updated_at=? WHERE id=?",
+                       (stage,stage,message,now(),trip_id))
+
     def trips(self) -> list[dict]:
         with self.connect() as db:
-            rows = db.execute("SELECT id,title,version,updated_at,document,active_run FROM trips ORDER BY updated_at DESC").fetchall()
+            rows = db.execute("SELECT id,title,version,updated_at,json_extract(document,'$.stage') AS stage,active_run "
+                              "FROM trips ORDER BY updated_at DESC").fetchall()
         return [{"id": r["id"], "title": r["title"], "version": r["version"], "updated_at": r["updated_at"],
-                 "stage": json.loads(r["document"]).get("stage"), "active_run": r["active_run"]} for r in rows]
+                 "stage": r["stage"], "active_run": r["active_run"]} for r in rows]
 
     def trip_threads(self, trip_id: str) -> list[str]:
         trip = self.trip(trip_id)
@@ -280,14 +297,17 @@ class Store:
         cutoff = (datetime.now(timezone.utc)-timedelta(hours=hours)).isoformat()
         key = amap_request_key(request)
         with self.connect() as db:
-            rows = db.execute("SELECT id,request,result,created_at FROM queries WHERE trip_id=? AND provider='amap' "
-                              "AND created_at>=? AND json_extract(request,'$.tool')=? ORDER BY id DESC",
-                              (trip_id,cutoff,request["tool"])).fetchall()
-        for row in rows:
-            result = json.loads(row["result"])
-            if result.get("status") == "error" or "raw" not in result or amap_request_key(json.loads(row["request"])) != key:
-                continue
-            return {"id":row["id"],"raw":result["raw"],"created_at":row["created_at"]}
+            rows = db.execute("SELECT id,request,created_at FROM queries WHERE trip_id=? AND provider='amap' "
+                              "AND json_extract(request,'$.tool')=? AND created_at>=? ORDER BY id DESC",
+                              (trip_id,request["tool"],cutoff)).fetchall()
+            for row in rows:
+                # 先比对请求，命中后才读取并解析体积较大的返回内容。
+                if amap_request_key(json.loads(row["request"])) != key:
+                    continue
+                result = json.loads(db.execute("SELECT result FROM queries WHERE id=?",(row["id"],)).fetchone()[0])
+                if result.get("status") == "error" or "raw" not in result:
+                    continue
+                return {"id":row["id"],"raw":result["raw"],"created_at":row["created_at"]}
         return None
 
     def review_queries(self, trip_id: str, evidence_ids: list[str]):
@@ -298,10 +318,11 @@ class Store:
         with self.connect() as db:
             rows = db.execute("SELECT id,provider,request FROM queries WHERE trip_id=? ORDER BY id DESC",(trip_id,)).fetchall()
             referenced = [row for row in rows if row["id"] in identities]
-            requests = {(row["provider"],dump(json.loads(row["request"]))) for row in referenced}
+            # 请求列写入时已是规范化文本，直接比较文本即可，不必逐行解析再序列化。
+            requests = {(row["provider"],row["request"]) for row in referenced}
             latest, selected = set(),{row["id"] for row in referenced}
             for row in rows:
-                key = (row["provider"],dump(json.loads(row["request"])))
+                key = (row["provider"],row["request"])
                 if key in requests and key not in latest:
                     latest.add(key)
                     selected.add(row["id"])

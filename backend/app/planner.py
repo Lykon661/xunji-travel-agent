@@ -108,12 +108,10 @@ class Planner(SubmitWorkflow, GuideNodes, CandidateNodes, ResourceNodes, Locatio
         return self.gates.setdefault(trip_id,asyncio.Lock())
 
     def emit(self, state: TripState, stage: str, message: str):
-        if self.store.trip(state["trip_id"])["active_run"] != state["run_id"]:
+        if self.store.active_run(state["trip_id"]) != state["run_id"]:
             raise Conflict("旧规划任务已失效，结果未覆盖当前草稿")
         self.store.event(state["run_id"],"progress",message,stage=stage)
-        trip = self.store.trip(state["trip_id"])
-        doc = trip["document"]; doc.update(stage=stage,progress_stage=stage,progress_message=message,pending=None)
-        self.store.update(state["trip_id"],doc)
+        self.store.progress(state["trip_id"],stage,message)
 
 
     async def coordinator_gate(self,state):
